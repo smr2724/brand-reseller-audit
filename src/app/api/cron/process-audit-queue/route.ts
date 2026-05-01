@@ -111,6 +111,14 @@ export async function GET(req: Request) {
   const results: Array<{ lead_id: string; status: string; error?: string }> = [];
 
   for (const lead of leads) {
+    // Defensive guard: even if the query above is ever wrong, never run
+    // the pipeline against a lead that isn't in the `pending` state.
+    // This is the safety belt that keeps a `sent` lead from being
+    // reprocessed and re-emailed if anything upstream regresses.
+    if (lead.audit_status !== "pending") {
+      results.push({ lead_id: lead.id, status: "skipped_not_pending" });
+      continue;
+    }
     try {
       await processLead(admin, lead, ownerId);
       results.push({ lead_id: lead.id, status: "ok" });
@@ -200,41 +208,67 @@ async function processLead(
     .update({ audit_status: "enriching" })
     .eq("id", lead.id);
 
-  const { data: report, error: reportErr } = await admin
+  // Idempotency: if a recent completed report already exists for this
+  // brand, reuse it instead of regenerating. Bounds the blast radius if
+  // this lead ever gets reclaimed mid-flight.
+  const reuseCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data: existingReport } = await admin
     .from("reports")
-    .insert({
-      user_id: ownerId,
-      brand_id: brandId,
-      kind: "channel_ownership_audit",
-      status: "generating",
-      title: `${brandName} — Channel Ownership Audit`,
-      token: makeReportToken(),
-    })
     .select("id, token")
-    .single();
-  if (reportErr || !report) {
-    throw new Error(`report insert failed: ${reportErr?.message ?? "unknown"}`);
+    .eq("user_id", ownerId)
+    .eq("brand_id", brandId)
+    .eq("kind", "channel_ownership_audit")
+    .eq("status", "completed")
+    .gte("created_at", reuseCutoff)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  let reportId: string;
+  if (existingReport?.id && existingReport.token) {
+    reportId = existingReport.id;
+    await admin
+      .from("leads")
+      .update({ audit_status: "generating_report", report_id: reportId })
+      .eq("id", lead.id);
+  } else {
+    const { data: report, error: reportErr } = await admin
+      .from("reports")
+      .insert({
+        user_id: ownerId,
+        brand_id: brandId,
+        kind: "channel_ownership_audit",
+        status: "generating",
+        title: `${brandName} — Channel Ownership Audit`,
+        token: makeReportToken(),
+      })
+      .select("id, token")
+      .single();
+    if (reportErr || !report) {
+      throw new Error(`report insert failed: ${reportErr?.message ?? "unknown"}`);
+    }
+    reportId = report.id;
+
+    await admin
+      .from("leads")
+      .update({ audit_status: "generating_report", report_id: reportId })
+      .eq("id", lead.id);
+
+    // Phase 6.7 hotfix lesson: await generation. Do not waitUntil — we need
+    // the row finalized before we can email the prospect on the same tick.
+    await generateAuditReport({
+      reportId,
+      userId: ownerId,
+      brandId,
+      contactEmail: lead.email,
+    });
   }
-
-  await admin
-    .from("leads")
-    .update({ audit_status: "generating_report", report_id: report.id })
-    .eq("id", lead.id);
-
-  // Phase 6.7 hotfix lesson: await generation. Do not waitUntil — we need
-  // the row finalized before we can email the prospect on the same tick.
-  await generateAuditReport({
-    reportId: report.id,
-    userId: ownerId,
-    brandId,
-    contactEmail: lead.email,
-  });
 
   // ---- 5. Read final report token ----
   const { data: finalReport } = await admin
     .from("reports")
     .select("status, token, error_message")
-    .eq("id", report.id)
+    .eq("id", reportId)
     .maybeSingle();
   if (finalReport?.status !== "completed" || !finalReport.token) {
     throw new Error(
