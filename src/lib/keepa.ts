@@ -10,7 +10,14 @@ export function isKeepaConfigured() {
   return !!process.env.KEEPA_API_KEY;
 }
 
-const DOMAIN_ID = Number(process.env.KEEPA_DOMAIN_ID ?? 1); // Amazon US
+// Amazon US. Tolerate `KEEPA_DOMAIN_ID` being unset OR set to an empty string
+// in Vercel — the latter is what was sending `domain=0` to Keepa and producing
+// `invalidParameter` 400s for every brand audit.
+const DOMAIN_ID = (() => {
+  const raw = process.env.KEEPA_DOMAIN_ID;
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+})();
 
 export async function testKeepa() {
   const key = process.env.KEEPA_API_KEY;
