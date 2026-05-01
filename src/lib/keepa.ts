@@ -215,7 +215,8 @@ export async function searchProductsByBrand(brandName: string, maxResults = 20):
   const selection = JSON.stringify({
     brand: [cleaned],
     sort: [["current_SALES", "asc"]],
-    perPage: Math.min(100, Math.max(1, maxResults)),
+    // Keepa /query requires perPage ≥ 50; we slice down to maxResults below.
+    perPage: Math.min(100, Math.max(50, maxResults)),
     page: 0,
   });
   const { json } = await keepaFetch("/query", { selection });
