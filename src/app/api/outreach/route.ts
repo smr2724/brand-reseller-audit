@@ -21,6 +21,7 @@ export async function GET(req: Request) {
     .select(`
       id, brand_id, contact_id, supplier_id, status, subject, body, body_text, body_html,
       tone, generation_model, copied_at, sent_at, replied_at, last_action_at, created_at,
+      outlook_message_id, outlook_web_link, drafted_in_outlook_at, report_id,
       brands ( id, name ),
       contacts ( id, full_name, first_name, last_name, title, email )
     `)
