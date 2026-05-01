@@ -1,12 +1,18 @@
+/**
+ * Report generation orchestrator.
+ *
+ * Phase 8 — Audit v2 is the active path. The generator runs mandatory
+ * pre-generation enrichment (Keepa + DataForSEO + competitor benchmark),
+ * assembles the v2 narrative_json, renders the v2 PDF, uploads it, and
+ * marks the row 'completed'. If any step fails the row goes 'failed'
+ * with a specific error message — never half-empty success.
+ */
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
-import {
-  getBrandEnrichmentBundle,
-  buildDataSourcesProvenance,
-  type BrandEnrichmentBundle,
-} from "@/lib/enrichment";
-import { generateNarrative, type BrandForReport } from "./narrative";
-import { renderAuditPdf } from "./pdf";
+import type { BrandForReport } from "./narrative";
 import { uploadReportPdf } from "./storage";
+import { runV2Enrichment, EnrichmentStepError, type BrandRowMin } from "./v2/enrich";
+import { assembleV2 } from "./v2/assemble";
+import { renderAuditPdfV2 } from "./v2/pdf";
 
 const FALLBACK_CONTACT = "contact@rolleconsulting.com";
 
@@ -22,17 +28,9 @@ function logStep(reportId: string, step: string, startedAt: number, extra?: Reco
   console.log("[report.generate]", { reportId, step, ms, ...(extra ?? {}) });
 }
 
-/**
- * Orchestrator: assumes the reports row already exists in 'generating' status.
- * Updates the row to 'completed' on success or 'failed' on error.
- *
- * Reports consume `getBrandEnrichmentBundle` only — never call Keepa or
- * DataForSEO directly from this file.
- */
 export async function generateAuditReport(input: GenerateInput): Promise<void> {
   const admin = createSupabaseAdminClient();
   if (!admin) {
-    // Fail fast and persist so the row never gets stuck in `generating`.
     const msg = "SUPABASE_SERVICE_ROLE_KEY missing — required to run report generation";
     console.error("[report.generate] failed", { reportId: input.reportId, step: "init", error: msg });
     throw new Error(msg);
@@ -54,41 +52,49 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
     if (!brand) throw new Error("brand not found");
     logStep(reportId, currentStep, t);
 
-    const brandTyped = brand as BrandForReport;
+    const brandTyped = brand as BrandForReport & BrandRowMin;
 
-    // 2. Enrichment bundle (best-effort).
-    currentStep = "load_enrichment";
+    // 2. Mandatory pre-generation enrichment (Keepa + DataForSEO +
+    // competitor benchmark). Throws EnrichmentStepError on hard failure.
+    currentStep = "enrich";
     t = Date.now();
-    let bundle: BrandEnrichmentBundle | null = null;
-    try {
-      bundle = await getBrandEnrichmentBundle(admin, brandId);
-    } catch (e) {
-      console.warn("[report.generate] enrichment bundle fetch failed:", e);
-      bundle = null;
-    }
-    logStep(reportId, currentStep, t, { hasBundle: !!bundle });
+    const enrichResult = await runV2Enrichment(admin, {
+      id: brandTyped.id,
+      name: brandTyped.name,
+      user_id: userId,
+      category: brandTyped.category,
+      keepa_last_enriched_at: brandTyped.keepa_last_enriched_at ?? null,
+      dataforseo_last_enriched_at: brandTyped.dataforseo_last_enriched_at ?? null,
+    });
+    logStep(reportId, currentStep, t, {
+      keepa: !!enrichResult.bundle.keepa.last_enriched_at,
+      dfs: !!enrichResult.bundle.dataforseo.captured_at,
+      competitors: enrichResult.competitorSnapshots.length,
+    });
 
-    const dataSources = bundle
-      ? buildDataSourcesProvenance(bundle)
-      : { keepa: false, dataforseo: false, keepa_freshness: null, dataforseo_freshness: null };
-
-    // 3. LLM narrative.
-    currentStep = "render_narrative";
+    // 3. Assemble v2 narrative + per-section LLM calls.
+    currentStep = "assemble_narrative";
     t = Date.now();
-    const narrative = await generateNarrative(brandTyped, bundle);
+    const generatedAt = new Date();
+    const contactEmail = (input.contactEmail || "").trim() || FALLBACK_CONTACT;
+    const calendlyUrl = process.env.RCG_CALENDLY_URL || "https://calendly.com/steve-rollemanagementgroup/intro";
+    const assembled = await assembleV2({
+      brand: brandTyped,
+      bundle: enrichResult.bundle,
+      competitors: enrichResult.competitorSnapshots,
+      brandLogoUrl: enrichResult.brandLogoUrl,
+      contactEmail,
+      calendlyUrl,
+      generatedAt,
+    });
     logStep(reportId, currentStep, t);
 
     // 4. PDF render.
     currentStep = "render_pdf";
     t = Date.now();
-    const generatedAt = new Date();
-    const contactEmail = (input.contactEmail || "").trim() || FALLBACK_CONTACT;
-    const buffer = await renderAuditPdf({
+    const buffer = await renderAuditPdfV2({
       brand: brandTyped,
-      narrative,
-      bundle,
-      contactEmail,
-      generatedAt,
+      narrative: assembled.narrative,
     });
     logStep(reportId, currentStep, t, { bytes: buffer.length });
 
@@ -112,8 +118,12 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
         status: "completed",
         pdf_storage_path: path,
         pdf_public_url: signedUrl,
-        narrative_json: narrative as unknown as Record<string, unknown>,
-        data_sources: dataSources,
+        narrative_json: assembled.narrative as unknown as Record<string, unknown>,
+        report_assumptions: assembled.assumptions as unknown as Record<string, unknown>,
+        reseller_dossier: assembled.resellerDossierJson as unknown as Record<string, unknown> | null,
+        competitor_benchmark: assembled.competitorBenchmarkJson as unknown as Record<string, unknown>,
+        cx_audit: assembled.cxAuditJson as unknown as Record<string, unknown>,
+        data_sources: assembled.narrative.data_sources as unknown as Record<string, unknown>,
         generated_at: generatedAt.toISOString(),
         title: `${brandTyped.name} — Channel Ownership Audit`,
         error_message: null,
@@ -125,19 +135,19 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
     console.log("[report.generate] completed", { reportId });
   } catch (e) {
     const err = e instanceof Error ? e : new Error(String(e));
+    const stepLabel = err instanceof EnrichmentStepError ? err.step : currentStep;
     console.error("[report.generate] failed", {
       reportId,
-      step: currentStep,
+      step: stepLabel,
       error: err.message,
       stack: err.stack,
     });
-    // Always persist failure so the row never gets stuck in 'generating'.
     try {
       await admin
         .from("reports")
         .update({
           status: "failed",
-          error_message: `[${currentStep}] ${err.message}`.slice(0, 1000),
+          error_message: `[${stepLabel}] ${err.message}`.slice(0, 1000),
         })
         .eq("id", reportId);
     } catch (persistErr) {
