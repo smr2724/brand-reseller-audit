@@ -92,15 +92,15 @@ export default async function Dashboard({ searchParams }: { searchParams: Search
       <div className="flex items-start justify-between flex-wrap gap-3 mb-5">
         <div>
           <h1 className="text-xl md:text-2xl font-semibold tracking-tight">
-            {showArchived ? "Archived Opportunities" : "Opportunity Dashboard"}
+            {showArchived ? "Archived Brands" : "Brand Dashboard"}
           </h1>
           <p className="text-sm text-[var(--text-muted)] mt-1">
             {showArchived
               ? "Viewing archived items. Click Restore to bring one back."
-              : "Ranked by Legion Score. Every opportunity should end with a decision."}
+              : "Ranked by Brand Score. Every brand should end with a decision."}
           </p>
         </div>
-        <Link href="/app/scan" className="btn btn-primary">+ New Scan</Link>
+        <Link href="/app/brands" className="btn btn-primary">Upload Brands</Link>
       </div>
 
       {/* KPIs */}
@@ -171,7 +171,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Search
               {!opps?.length && (
                 <tr>
                   <td colSpan={12} className="text-center py-10 text-[var(--text-muted)]">
-                    No opportunities yet. <Link href="/app/scan" className="underline">Run your first scan</Link>.
+                    No brands yet. <Link href="/app/brands" className="underline">Upload your SmartScout export to get started</Link>.
                   </td>
                 </tr>
               )}

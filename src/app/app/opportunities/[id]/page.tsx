@@ -60,7 +60,7 @@ export default async function OpportunityPage({ params }: { params: { id: string
             <div className="text-sm text-[var(--text-muted)] mt-1">Main keyword: <span className="text-[var(--text)]">{opp.main_keyword}</span></div>
           </div>
           <div className="text-right">
-            <div className="text-[11px] text-[var(--text-muted)] uppercase tracking-wide">Legion Score</div>
+            <div className="text-[11px] text-[var(--text-muted)] uppercase tracking-wide">Brand Score</div>
             <LegionScore value={opp.legion_score} size="xl" />
             <div className="text-xs text-[var(--text-muted)] mt-1">/ 100</div>
           </div>
@@ -100,7 +100,7 @@ export default async function OpportunityPage({ params }: { params: { id: string
       </Section>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-        <Section title="Why This Might Be a Legion-Like Opportunity" tone="green">
+        <Section title="Why This Might Be a Strong Opportunity" tone="green">
           <p className="text-sm leading-relaxed whitespace-pre-line">{opp.why_excited ?? "—"}</p>
         </Section>
         <Section title="Why This Might Be a Trap" tone="red">
