@@ -70,6 +70,7 @@ async function main() {
   const buffer = await renderAuditPdf({
     brand: brand as BrandForReport,
     narrative,
+    bundle: null,
     contactEmail: "contact@rolleconsulting.com",
     generatedAt: new Date(),
   });

@@ -16,7 +16,11 @@ import {
   getProductDetails,
   type KeepaProductDetails,
 } from "@/lib/keepa";
-import { computeValidationScore } from "./scoring";
+import {
+  computeValidationScore,
+  computeCombinedValidationScore,
+  type DataForSeoSignals,
+} from "./scoring";
 
 export interface EnrichmentSummary {
   run_id: string;
@@ -204,13 +208,28 @@ export async function enrichBrandWithKeepa(
     const top_seller_share_pct = top?.share_pct ?? null;
     const top_seller_country = top?.seller_country ?? null;
 
-    const validation_score = computeValidationScore({
-      top_seller_share_pct,
-      brand_controlled_pct,
-      unique_seller_count,
-      asin_count,
-      top_seller_country,
-    });
+    // Combine Keepa channel signals with the latest DataForSEO snapshot
+    // (if any) so validation_score reflects both pillars. Falls back to
+    // the legacy Keepa-only score when no DFS data exists yet.
+    const dfsSignals = await loadLatestDfsSignals(supabase, brand_id);
+    const validation_score = dfsSignals
+      ? computeCombinedValidationScore(
+          {
+            top_seller_share_pct,
+            brand_controlled_pct,
+            unique_seller_count,
+            asin_count,
+            top_seller_country,
+          },
+          dfsSignals,
+        )
+      : computeValidationScore({
+          top_seller_share_pct,
+          brand_controlled_pct,
+          unique_seller_count,
+          asin_count,
+          top_seller_country,
+        });
 
     const amazon1pShare = asin_count ? amazonOnesP / asin_count : 0;
     const nextTags = new Set(existingTags);
@@ -282,6 +301,32 @@ export async function enrichBrandWithKeepa(
       .eq("id", brand_id)
       .eq("user_id", user_id);
     throw err;
+  }
+}
+
+async function loadLatestDfsSignals(
+  supabase: SupabaseClient<any, any, any>,
+  brandId: string,
+): Promise<DataForSeoSignals | null> {
+  try {
+    const { data } = await supabase
+      .from("brand_search_metrics")
+      .select("branded_search_volume, branded_trend_pct, competitor_brands")
+      .eq("brand_id", brandId)
+      .order("captured_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!data) return null;
+    const competitors = Array.isArray(data.competitor_brands) ? data.competitor_brands : [];
+    const top = competitors[0];
+    return {
+      branded_search_volume: data.branded_search_volume ?? null,
+      branded_trend_pct: data.branded_trend_pct ?? null,
+      competitor_top_share: typeof top?.share_of_serp === "number" ? top.share_of_serp : null,
+      competitor_count: competitors.length || null,
+    };
+  } catch {
+    return null;
   }
 }
 

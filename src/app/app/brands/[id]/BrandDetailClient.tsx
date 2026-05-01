@@ -43,6 +43,28 @@ interface Brand {
   keepa_avg_offers?: number | null;
   validation_score?: number | null;
   enrichment_error?: string | null;
+  dataforseo_last_enriched_at?: string | null;
+  dataforseo_branded_volume?: number | null;
+  dataforseo_branded_trend_pct?: number | null;
+  dataforseo_competitor_count?: number | null;
+  dataforseo_top_keyword?: string | null;
+}
+
+interface DfsKeywordRow {
+  keyword: string;
+  search_volume: number | null;
+}
+interface DfsCompetitorRow {
+  brand: string;
+  share_of_serp: number;
+}
+interface DfsMetricsRow {
+  branded_search_volume: number | null;
+  branded_trend_pct: number | null;
+  top_keywords: DfsKeywordRow[] | null;
+  competitor_brands: DfsCompetitorRow[] | null;
+  organic_traffic_value: number | null;
+  captured_at: string | null;
 }
 
 interface BrandAsin {
@@ -59,7 +81,15 @@ interface BrandAsin {
 
 const STATUSES = ["new", "qualified", "disqualified", "contacted", "client"];
 
-export default function BrandDetailClient({ brand, asins }: { brand: Brand; asins: BrandAsin[] }) {
+export default function BrandDetailClient({
+  brand,
+  asins,
+  dfsMetrics,
+}: {
+  brand: Brand;
+  asins: BrandAsin[];
+  dfsMetrics: DfsMetricsRow | null;
+}) {
   const router = useRouter();
   const [status, setStatus] = useState(brand.status);
   const [notes, setNotes] = useState(brand.manual_notes ?? "");
@@ -69,6 +99,8 @@ export default function BrandDetailClient({ brand, asins }: { brand: Brand; asin
   const [msg, setMsg] = useState<string | null>(null);
   const [enriching, setEnriching] = useState(false);
   const [enrichErr, setEnrichErr] = useState<string | null>(null);
+  const [dfsRunning, setDfsRunning] = useState(false);
+  const [dfsErr, setDfsErr] = useState<string | null>(null);
   const [primaryContact, setPrimaryContact] = useState<{ id: string; full_name: string; first_name: string | null; title: string | null } | null>(null);
 
   async function runEnrichment() {
@@ -86,6 +118,24 @@ export default function BrandDetailClient({ brand, asins }: { brand: Brand; asin
       setEnrichErr(e instanceof Error ? e.message : String(e));
     } finally {
       setEnriching(false);
+    }
+  }
+
+  async function runDfsEnrichment() {
+    setDfsRunning(true);
+    setDfsErr(null);
+    try {
+      const res = await fetch(`/api/enrichment/brands/${brand.id}/dataforseo`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setDfsErr(data.error ?? `HTTP ${res.status}`);
+      } else {
+        router.refresh();
+      }
+    } catch (e) {
+      setDfsErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDfsRunning(false);
     }
   }
 
@@ -231,12 +281,16 @@ export default function BrandDetailClient({ brand, asins }: { brand: Brand; asin
       </div>
 
       <div className="mt-6">
-        <KeepaSection
+        <EnrichmentSection
           brand={brand}
           asins={asins}
+          dfsMetrics={dfsMetrics}
           enriching={enriching}
           enrichErr={enrichErr}
           onEnrich={runEnrichment}
+          dfsRunning={dfsRunning}
+          dfsErr={dfsErr}
+          onDfsEnrich={runDfsEnrichment}
         />
       </div>
 
@@ -247,43 +301,81 @@ export default function BrandDetailClient({ brand, asins }: { brand: Brand; asin
   );
 }
 
-function KeepaSection({
+function EnrichmentSection({
   brand,
   asins,
+  dfsMetrics,
   enriching,
   enrichErr,
   onEnrich,
+  dfsRunning,
+  dfsErr,
+  onDfsEnrich,
 }: {
   brand: Brand;
   asins: BrandAsin[];
+  dfsMetrics: DfsMetricsRow | null;
   enriching: boolean;
   enrichErr: string | null;
   onEnrich: () => void;
+  dfsRunning: boolean;
+  dfsErr: string | null;
+  onDfsEnrich: () => void;
 }) {
   const score = brand.validation_score;
   const scoreColor = score == null ? "#666" : score >= 70 ? "#22c55e" : score >= 40 ? "#eab308" : "#ef4444";
-  const last = brand.keepa_last_enriched_at ? new Date(brand.keepa_last_enriched_at).toLocaleString() : null;
+  const lastKeepa = brand.keepa_last_enriched_at ? new Date(brand.keepa_last_enriched_at).toLocaleString() : null;
+  const lastDfs = brand.dataforseo_last_enriched_at ? new Date(brand.dataforseo_last_enriched_at).toLocaleString() : null;
 
   return (
     <div className="card p-5">
       <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
         <div>
-          <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Keepa validation</div>
+          <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Enrichment</div>
           <div className="text-sm text-[var(--text-muted)] mt-1">
-            {last ? `Last enriched ${last}` : "Not yet enriched"}
+            Channel control (Keepa) + Market demand (DataForSEO)
           </div>
         </div>
-        <button className="btn" onClick={onEnrich} disabled={enriching}>
-          {enriching ? "Enriching…" : last ? "Re-enrich" : "Enrich now"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button className="btn btn-ghost text-xs" onClick={onEnrich} disabled={enriching}>
+            {enriching ? "Keepa…" : lastKeepa ? "Re-enrich Keepa" : "Run Keepa"}
+          </button>
+          <button className="btn btn-ghost text-xs" onClick={onDfsEnrich} disabled={dfsRunning}>
+            {dfsRunning ? "DataForSEO…" : lastDfs ? "Re-enrich DataForSEO" : "Run DataForSEO"}
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-5">
+        <div className="flex items-baseline justify-between mb-2">
+          <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Combined validation score</div>
+          <div className="text-3xl font-semibold" style={{ color: scoreColor }}>
+            {score == null ? "—" : Math.round(score)}
+          </div>
+        </div>
+        <div className="h-2 rounded bg-[var(--bg-3)] overflow-hidden">
+          <div className="h-full transition-all" style={{ width: `${score ?? 0}%`, background: scoreColor }} />
+        </div>
+        <div className="text-[11px] text-[var(--text-muted)] mt-1">
+          Keepa channel control (45 pts) + DataForSEO demand (35 pts) + competitive pressure (20 pts).
+        </div>
       </div>
 
       {(brand.enrichment_error || enrichErr) && (
         <div className="mb-4 p-3 rounded border" style={{ background: "#2a1415", borderColor: "#4a1e21", color: "#f87171" }}>
-          <div className="text-sm font-medium">Enrichment error</div>
+          <div className="text-sm font-medium">Keepa enrichment error</div>
           <div className="text-xs mt-1">{enrichErr ?? brand.enrichment_error}</div>
         </div>
       )}
+      {dfsErr && (
+        <div className="mb-4 p-3 rounded border" style={{ background: "#2a1415", borderColor: "#4a1e21", color: "#f87171" }}>
+          <div className="text-sm font-medium">DataForSEO enrichment error</div>
+          <div className="text-xs mt-1">{dfsErr}</div>
+        </div>
+      )}
+
+      <div className="mb-2 text-xs uppercase tracking-wide text-[var(--text-muted)]">Channel Health (Keepa)</div>
+      <div className="text-xs text-[var(--text-muted)] mb-3">{lastKeepa ? `Last enriched ${lastKeepa}` : "Not yet enriched"}</div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
         <Tile label="ASINs found" value={brand.keepa_asin_count ?? "—"} />
@@ -301,21 +393,6 @@ function KeepaSection({
           label="Avg offers"
           value={brand.keepa_avg_offers != null ? brand.keepa_avg_offers.toFixed(1) : "—"}
         />
-      </div>
-
-      <div className="mb-5">
-        <div className="flex items-baseline justify-between mb-2">
-          <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Validation score</div>
-          <div className="text-3xl font-semibold" style={{ color: scoreColor }}>
-            {score == null ? "—" : Math.round(score)}
-          </div>
-        </div>
-        <div className="h-2 rounded bg-[var(--bg-3)] overflow-hidden">
-          <div
-            className="h-full transition-all"
-            style={{ width: `${score ?? 0}%`, background: scoreColor }}
-          />
-        </div>
       </div>
 
       <div className="mt-4">
@@ -363,8 +440,96 @@ function KeepaSection({
           </div>
         )}
       </div>
+
+      <div className="mt-8 pt-6 border-t border-[var(--border-soft)]">
+        <div className="mb-2 text-xs uppercase tracking-wide text-[var(--text-muted)]">Market Demand (DataForSEO)</div>
+        <div className="text-xs text-[var(--text-muted)] mb-3">{lastDfs ? `Last enriched ${lastDfs}` : "Not yet enriched"}</div>
+
+        {!dfsMetrics && !lastDfs ? (
+          <div className="text-sm text-[var(--text-muted)]">
+            Run DataForSEO enrichment to capture branded search volume, top keywords, and competitor SERP footprint.
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+              <Tile
+                label="Branded volume / mo"
+                value={
+                  brand.dataforseo_branded_volume == null
+                    ? dfsMetrics?.branded_search_volume == null
+                      ? "—"
+                      : formatVolumeShort(dfsMetrics.branded_search_volume)
+                    : formatVolumeShort(brand.dataforseo_branded_volume)
+                }
+              />
+              <Tile
+                label="Trend"
+                value={
+                  brand.dataforseo_branded_trend_pct == null
+                    ? "—"
+                    : `${brand.dataforseo_branded_trend_pct > 0 ? "+" : ""}${brand.dataforseo_branded_trend_pct.toFixed(1)}%`
+                }
+              />
+              <Tile
+                label="Top keyword"
+                value={brand.dataforseo_top_keyword ?? dfsMetrics?.top_keywords?.[0]?.keyword ?? "—"}
+              />
+              <Tile
+                label="Competitors tracked"
+                value={brand.dataforseo_competitor_count ?? dfsMetrics?.competitor_brands?.length ?? "—"}
+              />
+            </div>
+
+            {(dfsMetrics?.top_keywords?.length ?? 0) > 0 && (
+              <div className="mb-5">
+                <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-2">Top branded keywords</div>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[var(--text-muted)] border-b border-[var(--border-soft)]">
+                      <th className="py-2 pr-3">Keyword</th>
+                      <th className="py-2 pr-3 text-right">Volume / mo</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(dfsMetrics?.top_keywords ?? []).slice(0, 8).map((kw, i) => (
+                      <tr key={i} className="border-b border-[var(--border-soft)]">
+                        <td className="py-2 pr-3">{kw.keyword}</td>
+                        <td className="py-2 pr-3 text-right">{formatVolumeShort(kw.search_volume)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {(dfsMetrics?.competitor_brands?.length ?? 0) > 0 && (
+              <div className="mb-3">
+                <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-2">Competitor brands on branded SERP</div>
+                <div className="flex flex-wrap gap-2">
+                  {(dfsMetrics?.competitor_brands ?? []).slice(0, 10).map((c, i) => (
+                    <span
+                      key={i}
+                      className="px-2 py-1 rounded text-xs border border-[var(--border-soft)] bg-[var(--bg-2)]"
+                    >
+                      {c.brand} · {Math.round((c.share_of_serp ?? 0) * 100)}%
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
+}
+
+function formatVolumeShort(n: number | null | undefined): string {
+  if (n == null || !isFinite(Number(n))) return "—";
+  const v = Number(n);
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+  return String(v);
 }
 
 function Tile({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
