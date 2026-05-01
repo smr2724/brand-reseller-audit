@@ -17,6 +17,11 @@ export interface GenerateInput {
   contactEmail?: string | null;
 }
 
+function logStep(reportId: string, step: string, startedAt: number, extra?: Record<string, unknown>) {
+  const ms = Date.now() - startedAt;
+  console.log("[report.generate]", { reportId, step, ms, ...(extra ?? {}) });
+}
+
 /**
  * Orchestrator: assumes the reports row already exists in 'generating' status.
  * Updates the row to 'completed' on success or 'failed' on error.
@@ -27,12 +32,18 @@ export interface GenerateInput {
 export async function generateAuditReport(input: GenerateInput): Promise<void> {
   const admin = createSupabaseAdminClient();
   if (!admin) {
-    throw new Error("SUPABASE_SERVICE_ROLE_KEY missing — required to run report generation");
+    // Fail fast and persist so the row never gets stuck in `generating`.
+    const msg = "SUPABASE_SERVICE_ROLE_KEY missing — required to run report generation";
+    console.error("[report.generate] failed", { reportId: input.reportId, step: "init", error: msg });
+    throw new Error(msg);
   }
 
   const { reportId, userId, brandId } = input;
+  let currentStep = "init";
   try {
-    // 1. Load brand row + enrichment bundle (single contract for both pillars).
+    // 1. Load brand row.
+    currentStep = "load_brand";
+    let t = Date.now();
     const { data: brand, error: brandErr } = await admin
       .from("brands")
       .select("*")
@@ -41,25 +52,35 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       .maybeSingle();
     if (brandErr) throw new Error(`brand lookup failed: ${brandErr.message}`);
     if (!brand) throw new Error("brand not found");
+    logStep(reportId, currentStep, t);
 
     const brandTyped = brand as BrandForReport;
 
+    // 2. Enrichment bundle (best-effort).
+    currentStep = "load_enrichment";
+    t = Date.now();
     let bundle: BrandEnrichmentBundle | null = null;
     try {
       bundle = await getBrandEnrichmentBundle(admin, brandId);
     } catch (e) {
-      console.warn("[report/generate] enrichment bundle fetch failed:", e);
+      console.warn("[report.generate] enrichment bundle fetch failed:", e);
       bundle = null;
     }
+    logStep(reportId, currentStep, t, { hasBundle: !!bundle });
 
     const dataSources = bundle
       ? buildDataSourcesProvenance(bundle)
       : { keepa: false, dataforseo: false, keepa_freshness: null, dataforseo_freshness: null };
 
-    // 2. LLM narrative (uses the bundle for Keepa + DataForSEO context).
+    // 3. LLM narrative.
+    currentStep = "render_narrative";
+    t = Date.now();
     const narrative = await generateNarrative(brandTyped, bundle);
+    logStep(reportId, currentStep, t);
 
-    // 3. PDF render
+    // 4. PDF render.
+    currentStep = "render_pdf";
+    t = Date.now();
     const generatedAt = new Date();
     const contactEmail = (input.contactEmail || "").trim() || FALLBACK_CONTACT;
     const buffer = await renderAuditPdf({
@@ -69,16 +90,22 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       contactEmail,
       generatedAt,
     });
+    logStep(reportId, currentStep, t, { bytes: buffer.length });
 
-    // 4. Upload + sign
+    // 5. Upload + sign.
+    currentStep = "upload_storage";
+    t = Date.now();
     const { path, signedUrl } = await uploadReportPdf({
       userId,
       brandId,
       reportId,
       buffer,
     });
+    logStep(reportId, currentStep, t, { path });
 
-    // 5. Mark complete (persist data_sources jsonb).
+    // 6. Mark complete.
+    currentStep = "finalize_row";
+    t = Date.now();
     const { error: updErr } = await admin
       .from("reports")
       .update({
@@ -93,16 +120,32 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       })
       .eq("id", reportId);
     if (updErr) throw new Error(`report update failed: ${updErr.message}`);
+    logStep(reportId, currentStep, t);
+
+    console.log("[report.generate] completed", { reportId });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error("[report/generate] failed:", msg);
-    await admin
-      .from("reports")
-      .update({
-        status: "failed",
-        error_message: msg.slice(0, 1000),
-      })
-      .eq("id", reportId);
-    throw e;
+    const err = e instanceof Error ? e : new Error(String(e));
+    console.error("[report.generate] failed", {
+      reportId,
+      step: currentStep,
+      error: err.message,
+      stack: err.stack,
+    });
+    // Always persist failure so the row never gets stuck in 'generating'.
+    try {
+      await admin
+        .from("reports")
+        .update({
+          status: "failed",
+          error_message: `[${currentStep}] ${err.message}`.slice(0, 1000),
+        })
+        .eq("id", reportId);
+    } catch (persistErr) {
+      console.error("[report.generate] failed to persist failure state", {
+        reportId,
+        error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+      });
+    }
+    throw err;
   }
 }

@@ -18,6 +18,9 @@ import type { InitialTemplateContact } from "@/lib/outreach/initial-template";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Microsoft Graph draft creation can be slow on cold paths; bump from
+// the default 10s so we don't time out before the draft lands in Outlook.
+export const maxDuration = 60;
 
 interface Body {
   brand_id?: string;

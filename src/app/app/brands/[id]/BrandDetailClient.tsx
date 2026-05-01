@@ -618,10 +618,12 @@ function ReportsSection({
 
   useEffect(() => {
     load();
-    // Poll while anything is generating
+    // Poll every 3s while anything is generating. The synchronous
+    // /api/reports/generate response is the primary signal — this is a
+    // fallback for clients that disconnect before the lambda finishes.
     const t = setInterval(() => {
       if ((reports ?? []).some((r) => r.status === "generating")) load();
-    }, 4000);
+    }, 3000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [brandId, reports?.length]);
@@ -635,33 +637,73 @@ function ReportsSection({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ brand_id: brandId }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setMsg(`Failed: ${data.error ?? "unknown"}`);
+        const errMsg = data?.error_message || data?.error || `HTTP ${res.status}`;
+        setMsg(`Generation failed: ${errMsg}`);
+      } else if (data?.status === "failed") {
+        setMsg(`Generation failed: ${data.error_message ?? data.error ?? "unknown"}`);
+      } else if (data?.status === "completed") {
+        setMsg("Report ready.");
       } else {
-        setMsg("Generation started.");
-        await load();
+        setMsg("Generating…");
       }
+      await load();
     } catch (e) {
-      setMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      // Client disconnect (long-running lambda) is normal — the row will
+      // be finalized server-side and the poller will pick it up.
+      setMsg(`Still generating in background — this can take up to 2 minutes.`);
+      await load();
     } finally {
       setGenerating(false);
     }
   }
 
+  async function cancelReport(reportId: string) {
+    if (!confirm("Mark this stuck report as failed?")) return;
+    try {
+      const res = await fetch(`/api/reports/${reportId}/cancel`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMsg(`Cancel failed: ${data?.error ?? `HTTP ${res.status}`}`);
+      } else {
+        setMsg("Report cancelled.");
+        await load();
+      }
+    } catch (e) {
+      setMsg(`Cancel error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   const list = reports ?? [];
   const hasAny = list.length > 0;
+  const anyGenerating = list.some((r) => r.status === "generating");
+
+  const generateLabel = generating
+    ? "Generating report (this can take up to 2 minutes)…"
+    : anyGenerating
+      ? "Generating…"
+      : null;
 
   return (
     <div className="card p-4">
       <div className="flex items-baseline justify-between mb-3">
         <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Reports</div>
         {hasAny && (
-          <button className="btn btn-ghost text-xs" onClick={generate} disabled={generating}>
-            {generating ? "Starting…" : "Regenerate"}
+          <button className="btn btn-ghost text-xs" onClick={generate} disabled={generating || anyGenerating}>
+            {generating || anyGenerating ? "Generating…" : "Regenerate"}
           </button>
         )}
       </div>
+
+      {generateLabel && (
+        <div className="mb-3 p-3 rounded border border-[#4a3e1e] bg-[#2a2410] text-[#facc15] text-sm flex items-center gap-2">
+          <span className="inline-block w-3 h-3 rounded-full border-2 border-[#facc15] border-t-transparent animate-spin" />
+          <span>
+            {generateLabel.replace("…", "")} for <strong>{brandName}</strong>…
+          </span>
+        </div>
+      )}
 
       {!hasAny ? (
         <div className="flex flex-col items-start gap-3">
@@ -670,7 +712,7 @@ function ReportsSection({
             in the webinar narrative arc, ready to email.
           </div>
           <button className="btn" onClick={generate} disabled={generating}>
-            {generating ? "Starting…" : "Generate Channel Ownership Audit"}
+            {generating ? "Generating…" : "Generate Channel Ownership Audit"}
           </button>
           {msg && <div className="text-xs text-[var(--text-muted)]">{msg}</div>}
         </div>
@@ -689,11 +731,35 @@ function ReportsSection({
                     {formatDateTime(r.generated_at ?? r.created_at)}
                   </div>
                   {r.status === "failed" && r.error_message && (
-                    <div className="text-xs text-[#f87171] mt-1">{r.error_message}</div>
+                    <div
+                      className="text-xs mt-1 px-2 py-1 rounded border"
+                      style={{ background: "#2a1415", borderColor: "#4a1e21", color: "#f87171" }}
+                    >
+                      {r.error_message}
+                    </div>
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <ReportStatusBadge status={r.status} />
+                  {r.status === "failed" && (
+                    <button
+                      className="btn btn-ghost text-xs"
+                      onClick={generate}
+                      disabled={generating}
+                      title="Retry generation"
+                    >
+                      Retry
+                    </button>
+                  )}
+                  {r.status === "generating" && (
+                    <button
+                      className="btn btn-ghost text-xs"
+                      onClick={() => cancelReport(r.id)}
+                      title="Mark this stuck report as failed"
+                    >
+                      Cancel
+                    </button>
+                  )}
                   {r.status === "completed" && (
                     <>
                       <a

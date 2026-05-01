@@ -2,10 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient, createSupabaseAdminClient } from "@/lib/supabase/server";
 import { randomBytes } from "crypto";
 import { generateAuditReport } from "@/lib/report/generate";
+import { freshSignedUrl } from "@/lib/report/storage";
+import { waitUntil } from "@vercel/functions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Vercel Pro allows up to 300s on the Node runtime. Report generation
+// (Keepa lookup + LLM narrative + PDF render + Supabase storage upload) can
+// take 60-120s on cold paths, so 60s was too tight.
+export const maxDuration = 300;
 
 interface Body {
   brand_id?: string;
@@ -56,8 +61,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Insert reports row in 'generating' state. token is left unique-but-arbitrary
-  // for compatibility with the existing UNIQUE constraint.
   const insertRow = {
     user_id: user.id,
     brand_id: brand.id,
@@ -76,19 +79,75 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: insErr?.message ?? "insert failed" }, { status: 500 });
   }
 
-  // Fire-and-forget. We don't await — caller polls /api/reports/:id.
-  // We intentionally do NOT use `waitUntil` to keep this portable; on Vercel
-  // the maxDuration export keeps the function alive long enough.
-  generateAuditReport({
+  console.log("[api/reports/generate] starting", {
+    reportId: report.id,
+    brandId: brand.id,
+    userId: user.id,
+  });
+
+  // Kick off the generation promise once. We `await` it below for a
+  // synchronous response, AND register it with `waitUntil` so that if the
+  // request handler is interrupted (client disconnect, edge timeout) the
+  // platform keeps the function alive until generation completes and the
+  // reports row is finalized. Both refer to the same promise.
+  const genPromise = generateAuditReport({
     reportId: report.id,
     userId: user.id,
     brandId: brand.id,
     contactEmail: user.email ?? null,
-  }).catch((err) => {
-    console.error("[api/reports/generate] async generation error:", err);
   });
+  try {
+    waitUntil(genPromise);
+  } catch (e) {
+    // waitUntil only works on Vercel; in other environments it may throw —
+    // that's fine because we still await below.
+    console.warn("[api/reports/generate] waitUntil unavailable:", e);
+  }
 
-  return NextResponse.json({ report_id: report.id, status: "generating" });
+  try {
+    await genPromise;
+  } catch (err) {
+    // generateAuditReport already persisted status='failed' + error_message
+    // on the reports row. Surface the error to the client so the UI can
+    // show it immediately instead of waiting on the next poll.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[api/reports/generate] generation failed", {
+      reportId: report.id,
+      error: msg,
+    });
+    return NextResponse.json(
+      {
+        report_id: report.id,
+        status: "failed",
+        error: msg,
+      },
+      { status: 500 }
+    );
+  }
+
+  // Re-read the finalized row so we can return the signed URL + path.
+  const { data: finalRow } = await admin
+    .from("reports")
+    .select("id, status, pdf_storage_path, error_message")
+    .eq("id", report.id)
+    .maybeSingle();
+
+  let signed_url: string | null = null;
+  if (finalRow?.status === "completed" && finalRow.pdf_storage_path) {
+    try {
+      signed_url = await freshSignedUrl(finalRow.pdf_storage_path);
+    } catch (e) {
+      console.warn("[api/reports/generate] signed url failed:", e);
+    }
+  }
+
+  return NextResponse.json({
+    report_id: report.id,
+    status: finalRow?.status ?? "completed",
+    pdf_storage_path: finalRow?.pdf_storage_path ?? null,
+    signed_url,
+    error_message: finalRow?.error_message ?? null,
+  });
 }
 
 // ----------------------------------------------------------------------------

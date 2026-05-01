@@ -16,21 +16,30 @@ function adminOrThrow() {
 
 async function ensureBucket(): Promise<void> {
   const admin = adminOrThrow();
+  // Try to get the bucket first. If it exists, we're done.
   try {
     const { data, error } = await admin.storage.getBucket(BUCKET);
     if (data) return;
     if (error && !/not found/i.test(error.message)) {
-      // Some other error — try to create anyway.
+      console.warn("[report.storage] getBucket returned non-NotFound error:", error.message);
     }
-  } catch {
-    // ignore
-  }
-  try {
-    await admin.storage.createBucket(BUCKET, { public: false });
   } catch (e) {
-    // If creation fails because it already exists, ignore. Otherwise rethrow.
+    console.warn("[report.storage] getBucket threw:", (e as Error).message);
+  }
+  // Bucket missing — create it. The supabase migration's idempotent
+  // do-block can silently skip creation in some environments; this is
+  // the runtime safety net.
+  try {
+    const { error: createErr } = await admin.storage.createBucket(BUCKET, { public: false });
+    if (createErr) {
+      if (/exists/i.test(createErr.message)) return;
+      throw new Error(`createBucket("${BUCKET}") failed: ${createErr.message}`);
+    }
+    console.log("[report.storage] created bucket", { bucket: BUCKET });
+  } catch (e) {
     const msg = String((e as Error)?.message ?? e);
-    if (!/exists/i.test(msg)) throw e;
+    if (/exists/i.test(msg)) return;
+    throw new Error(`createBucket("${BUCKET}") failed: ${msg}`);
   }
 }
 
