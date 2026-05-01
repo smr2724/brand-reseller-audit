@@ -1,17 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 
-type Tone = "direct" | "curious" | "educational";
-const TONES: Tone[] = ["direct", "curious", "educational"];
-
-interface Variant {
-  tone: Tone;
-  subject: string;
-  body_text: string;
-  body_html: string;
-  model: string;
-}
-
 interface Thread {
   id: string;
   subject: string | null;
@@ -41,6 +30,13 @@ interface OutlookStatus {
   auth_url: string;
 }
 
+interface SendResult {
+  subject: string;
+  web_link: string;
+  contact_name: string | null;
+  contact_email: string;
+}
+
 export default function BrandOutreachCard({
   brandId,
   primaryContact,
@@ -50,14 +46,10 @@ export default function BrandOutreachCard({
 }) {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [loading, setLoading] = useState(true);
-  const [drafting, setDrafting] = useState(false);
-  const [variants, setVariants] = useState<Variant[]>([]);
-  const [activeTone, setActiveTone] = useState<Tone>("direct");
-  const [signal, setSignal] = useState<string | null>(null);
-  const [model, setModel] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [outlook, setOutlook] = useState<OutlookStatus | null>(null);
-  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [lastSent, setLastSent] = useState<SendResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -81,110 +73,49 @@ export default function BrandOutreachCard({
     return () => { alive = false; };
   }, []);
 
-  async function generateVariants() {
+  async function sendToOutlook() {
     if (!primaryContact) {
-      setMsg("Set a primary contact first.");
+      setMsg("Set a primary contact for this brand first.");
       setTimeout(() => setMsg(null), 4000);
       return;
     }
-    setDrafting(true);
+    setSending(true);
     setMsg(null);
     try {
-      const r = await fetch(`/api/outreach/draft`, {
+      const r = await fetch(`/api/outreach/send-to-outlook`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brand_id: brandId, contact_id: primaryContact.id }),
+        body: JSON.stringify({ brand_id: brandId }),
       });
-      const d = await r.json();
-      if (!r.ok) {
-        setMsg(`Draft failed: ${d.error ?? "unknown"}`);
-      } else {
-        setVariants(d.variants ?? []);
-        setSignal(d.signal_used ?? null);
-        setModel(d.model ?? null);
-        setActiveTone((d.default_tone as Tone) ?? "direct");
-      }
-    } catch (e) {
-      setMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setDrafting(false);
-    }
-  }
-
-  const active = variants.find(v => v.tone === activeTone) ?? null;
-
-  async function saveActive() {
-    if (!primaryContact || !active) return;
-    const r = await fetch(`/api/outreach/save`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        brand_id: brandId,
-        contact_id: primaryContact.id,
-        subject: active.subject,
-        body_text: active.body_text,
-        body_html: active.body_html,
-        tone: active.tone,
-        generation_model: active.model,
-      }),
-    });
-    const d = await r.json();
-    if (!r.ok) {
-      setMsg(`Save failed: ${d.error ?? "unknown"}`);
-    } else {
-      setMsg("Saved as draft.");
-      setVariants([]);
-      await load();
-    }
-    setTimeout(() => setMsg(null), 4000);
-  }
-
-  async function sendToOutlook(thread: Thread) {
-    setSendingId(thread.id);
-    setMsg(null);
-    try {
-      const r = await fetch(`/api/outreach/${thread.id}/send-to-outlook`, { method: "POST" });
       const d = await r.json();
       if (!r.ok) {
         if (d?.error === "outlook_reauth_required") {
           setMsg("Outlook authorization expired — reconnect to continue.");
           setOutlook((s) => (s ? { ...s, connected: false } : s));
+        } else if (d?.error === "no_primary_contact") {
+          setMsg(d.message ?? "Set a primary contact first.");
         } else {
           setMsg(`Outlook draft failed: ${d?.error ?? "unknown"}`);
         }
       } else {
-        setMsg("Draft created in Outlook.");
+        setLastSent({
+          subject: d.subject,
+          web_link: d.web_link,
+          contact_name: d.contact?.name ?? null,
+          contact_email: d.contact?.email ?? "",
+        });
         await load();
       }
     } catch (e) {
       setMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setSendingId(null);
+      setSending(false);
       setTimeout(() => setMsg(null), 6000);
     }
   }
 
-  async function copyVariant(v: Variant) {
-    try {
-      await navigator.clipboard.writeText(v.body_text);
-      setMsg("Copied. Save as draft if you want to track it.");
-    } catch {
-      setMsg("Could not access clipboard. Select and copy manually.");
-    }
-    setTimeout(() => setMsg(null), 4000);
-  }
-
-  async function copyThread(thread: Thread) {
-    try {
-      await navigator.clipboard.writeText(thread.body_text ?? "");
-      setMsg("Copied — paste into Outlook manually.");
-    } catch {
-      setMsg("Could not access clipboard.");
-    }
-    setTimeout(() => setMsg(null), 4000);
-  }
-
   const outlookConnected = !!outlook?.connected;
+  const canSend = !!primaryContact && outlookConnected && !sending;
 
   return (
     <div className="card p-4">
@@ -192,11 +123,17 @@ export default function BrandOutreachCard({
         <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Outreach</div>
         <button
           className="btn text-xs"
-          onClick={generateVariants}
-          disabled={drafting || !primaryContact}
-          title={!primaryContact ? "Set a primary contact first" : ""}
+          onClick={sendToOutlook}
+          disabled={!canSend}
+          title={
+            !primaryContact
+              ? "Set a primary contact first"
+              : !outlookConnected
+                ? "Connect Outlook first"
+                : "Create the initial outreach draft in Outlook"
+          }
         >
-          {drafting ? "Drafting…" : "Draft email"}
+          {sending ? "Sending…" : "Send to Outlook"}
         </button>
       </div>
 
@@ -209,52 +146,35 @@ export default function BrandOutreachCard({
         </div>
       )}
 
-      {msg && <div className="text-xs mb-2 text-[var(--text-muted)]">{msg}</div>}
-
       {!primaryContact && (
         <div className="text-sm text-[var(--text-muted)] mb-3">
           Run contact discovery and pick a primary contact to draft from.
         </div>
       )}
 
-      {variants.length > 0 && (
-        <div className="border border-[var(--border)] rounded p-3 mb-4">
-          <div className="flex items-center gap-2 mb-2">
-            {TONES.map(t => (
-              <button
-                key={t}
-                onClick={() => setActiveTone(t)}
-                className="text-[11px] px-2 py-1 rounded"
-                style={{
-                  background: activeTone === t ? "var(--bg-3)" : "transparent",
-                  color: activeTone === t ? "var(--text)" : "var(--text-muted)",
-                  border: "1px solid var(--border)",
-                }}
-              >
-                {t}
-              </button>
-            ))}
-            <span className="text-[11px] text-[var(--text-muted)] ml-2">
-              signal: {signal ?? "—"} • model: {model ?? "—"}
-            </span>
+      {msg && <div className="text-xs mb-2 text-[var(--text-muted)]">{msg}</div>}
+
+      {lastSent && (
+        <div className="border border-[var(--border)] rounded p-3 mb-3">
+          <div className="text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-1">
+            Draft created in Outlook
           </div>
-          {active && (
-            <>
-              <div className="text-xs text-[var(--text-muted)] mb-1">Subject</div>
-              <div className="text-sm font-medium mb-2">{active.subject}</div>
-              <div className="text-xs text-[var(--text-muted)] mb-1">Body</div>
-              <pre className="text-xs whitespace-pre-wrap font-sans border border-[var(--border-soft)] rounded p-2 bg-[var(--bg-1)]">{active.body_text}</pre>
-              <div className="flex gap-2 mt-2">
-                <button className="btn text-xs" onClick={saveActive}>Save as draft</button>
-                <button className="btn btn-ghost text-xs" onClick={() => copyVariant(active)}>Copy text</button>
-                <button className="btn btn-ghost text-xs" onClick={generateVariants}>Regenerate</button>
-              </div>
-            </>
-          )}
+          <div className="text-sm font-medium mb-1">{lastSent.subject}</div>
+          <div className="text-[11px] text-[var(--text-muted)] mb-2">
+            To: {lastSent.contact_name ? `${lastSent.contact_name} <${lastSent.contact_email}>` : lastSent.contact_email}
+          </div>
+          <a
+            className="btn text-[11px] px-2 py-1"
+            href={lastSent.web_link}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open in Outlook
+          </a>
         </div>
       )}
 
-      <div className="text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-2">Saved drafts</div>
+      <div className="text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-2">Drafts</div>
       {loading ? (
         <div className="text-sm text-[var(--text-muted)]">Loading…</div>
       ) : threads.length === 0 ? (
@@ -263,7 +183,6 @@ export default function BrandOutreachCard({
         <div className="flex flex-col gap-2">
           {threads.map(t => {
             const isInOutlook = t.status === "drafted_in_outlook" && !!t.outlook_web_link;
-            const sending = sendingId === t.id;
             return (
               <div key={t.id} className="border border-[var(--border-soft)] rounded p-2">
                 <div className="flex items-center justify-between gap-2">
@@ -294,44 +213,16 @@ export default function BrandOutreachCard({
                       {t.status}
                       {t.tone ? ` · ${t.tone}` : ""}
                     </span>
-                    <div className="flex items-center gap-2">
-                      {isInOutlook ? (
-                        <>
-                          <a
-                            className="btn text-[11px] px-2 py-1"
-                            href={t.outlook_web_link ?? "#"}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Open in Outlook
-                          </a>
-                          <button
-                            className="btn btn-ghost text-[11px] px-2 py-1"
-                            onClick={() => sendToOutlook(t)}
-                            disabled={sending || !outlookConnected}
-                          >
-                            {sending ? "…" : "Re-create draft"}
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button
-                            className="btn text-[11px] px-2 py-1"
-                            onClick={() => sendToOutlook(t)}
-                            disabled={sending || !outlookConnected}
-                            title={!outlookConnected ? "Connect Outlook first" : "Create a draft in Outlook"}
-                          >
-                            {sending ? "Sending…" : "Send to Outlook Drafts"}
-                          </button>
-                          <button
-                            className="btn btn-ghost text-[11px] px-2 py-1"
-                            onClick={() => copyThread(t)}
-                          >
-                            Copy
-                          </button>
-                        </>
-                      )}
-                    </div>
+                    {isInOutlook && (
+                      <a
+                        className="btn text-[11px] px-2 py-1"
+                        href={t.outlook_web_link ?? "#"}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open in Outlook
+                      </a>
+                    )}
                   </div>
                 </div>
               </div>
