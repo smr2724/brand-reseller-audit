@@ -136,7 +136,7 @@ export async function llmCoverHeadline(input: {
       "If `annualLeak` is a number, lead with the dollar leak — e.g. " +
       "\"<Brand> is on track to lose $<X> to Amazon resellers over the next 12 months.\" " +
       "If `annualLeak` is null, do NOT say \"not measured\"; instead lead with " +
-      "the buy-box exposure — e.g. \"<Brand> has measurable reseller exposure on Amazon: top reseller <Y> holds <Z>% of buy-box share.\" " +
+      "the buy-box exposure — e.g. \"<Brand> has measurable reseller exposure on Amazon, with the top reseller <Y> holding a <Z>% share.\" " +
       "Always cite the top reseller and their % share when both are present. " +
       "No 'approximately', no exclamation points, no hedging.",
     userPayload: promptInput,
@@ -168,10 +168,10 @@ function fallbackHeadline(input: {
   // No revenue / margin inputs — soften the headline rather than print
   // "— not measured" on the cover.
   if (reseller && sharePct != null) {
-    return `${input.brandName} has measurable reseller exposure on Amazon: top reseller ${reseller} holds ${sharePct}% of buy-box share.`;
+    return `${input.brandName} has measurable reseller exposure on Amazon, with the top reseller ${reseller} holding a ${sharePct}% share.`;
   }
   if (sharePct != null) {
-    return `${input.brandName} has measurable reseller exposure on Amazon: the top reseller holds ${sharePct}% of buy-box share.`;
+    return `${input.brandName} has measurable reseller exposure on Amazon, with the top reseller holding a ${sharePct}% share.`;
   }
   return `${input.brandName} has measurable reseller exposure on Amazon — buy-box ownership is split across multiple third-party sellers.`;
 }

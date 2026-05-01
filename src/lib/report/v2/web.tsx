@@ -691,14 +691,22 @@ function repairCoverHeadline(raw: string, brandName: string): string {
   s = s.replace(/\bA[A-Z0-9]{12,13}\b/g, (id) => `Unknown 3P seller (ID: ${id})`);
   // 2. Soft-rewrite the broken-leak sentence shape.
   //    "<X> has an annual reseller leak of — not measured, with top reseller <Y> holding a <Z>% share."
-  //    →  "<X> has measurable reseller exposure on Amazon: top reseller <Y> holds <Z>% buy-box share."
+  //    →  "<X> has measurable reseller exposure on Amazon, with the top reseller <Y> holding a <Z>% share."
   const leakRe =
-    /([\w\s'&.\-]+?)\s+has\s+an\s+annual\s+reseller\s+leak\s+of\s+(?:—|--|-)\s*not\s+measured,?\s*with\s+top\s+reseller\s+([^\s,]+(?:\s+\([^)]+\))?)\s+holding\s+a?\s*([\d.]+)%\s+share\.?/i;
+    /([\w\s'&.\-]+?)\s+has\s+an\s+annual\s+reseller\s+leak\s+of\s+(?:—|--|-)\s*not\s+measured,?\s*with\s+top\s+reseller\s+(.+?)\s+holding\s+a?\s*([\d.]+)%\s+share\.?/i;
   s = s.replace(leakRe, (_m, brand, seller, pct) => {
-    return `${(brand ?? brandName).trim()} has measurable reseller exposure on Amazon: top reseller ${seller} holds ${pct}% of buy-box share.`;
+    return `${(brand ?? brandName).trim()} has measurable reseller exposure on Amazon, with the top reseller ${seller} holding a ${pct}% share.`;
   });
   // 3. Generic null-leak phrase cleanup if the regex above didn't match.
-  s = s.replace(/annual reseller leak of (?:—|--|-)\s*not measured,?/i, "measurable reseller exposure on Amazon");
+  //    Strips the leading article ("an "/"a "/"the ") that preceded the
+  //    broken noun phrase, and tightens "with top reseller" → ", with the top reseller".
+  s = s.replace(
+    /\b(an?|the)\s+annual\s+reseller\s+leak\s+of\s+(?:—|--|-)\s*not\s+measured,?/i,
+    "measurable reseller exposure on Amazon,",
+  );
+  s = s.replace(/\s+with\s+top\s+reseller\b/i, " with the top reseller");
+  // Collapse any accidental ", ," from the rewrites above.
+  s = s.replace(/,\s*,/g, ",");
   return s.trim();
 }
 
@@ -1050,18 +1058,18 @@ function V2Styles() {
 
       /* Tables (benchmark + math) */
       .rv2-table-wrap {
-        overflow-x: auto;
+        width: 100%;
         max-width: 100%;
+        overflow-x: auto;
         -webkit-overflow-scrolling: touch;
-        margin-left: -4px;
-        margin-right: -4px;
-        padding-left: 4px;
-        padding-right: 4px;
+        box-sizing: border-box;
+      }
+      .rv2-table-wrap > .rv2-table {
+        min-width: 480px;
       }
       .rv2-table {
         width: 100%; border-collapse: collapse; font-size: 14px;
         margin: 8px 0;
-        min-width: 480px;
       }
       .rv2-table th, .rv2-table td {
         text-align: left; padding: 10px 12px;
