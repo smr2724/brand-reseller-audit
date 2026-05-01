@@ -3,22 +3,23 @@ import Link from "next/link";
 export const metadata = {
   title: "Case Studies — Rolle Consulting Group",
   description:
-    "How we helped mid-market brands take their Amazon channel back from third-party resellers.",
+    "Two brands. One playbook. How RCG helps mid-market brands take their Amazon channel back from third-party resellers.",
 };
 
 export default function CaseStudiesPage() {
   return (
     <>
-      <section className="m-hero" style={{ padding: "96px 0" }}>
+      <section className="m-hero">
         <div className="container">
-          <div className="eyebrow">Case Studies</div>
-          <h1 style={{ marginTop: 24, maxWidth: "22ch" }}>
-            What channel ownership looks like in practice.
-          </h1>
-          <p className="lede" style={{ maxWidth: "60ch" }}>
-            Each engagement starts with the same audit and follows the same
-            five-step playbook. The results vary by category and starting
-            position — but the shape of the gain is consistent.
+          <div className="m-hero-eyebrow-row">
+            <span className="dot" aria-hidden />
+            <span className="eyebrow">Case studies</span>
+          </div>
+          <h1>Two brands. One playbook.</h1>
+          <p className="lede">
+            Every engagement starts with the same audit and follows the same
+            five-step framework. The categories vary. The shape of the result
+            doesn&apos;t.
           </p>
         </div>
       </section>
@@ -26,91 +27,56 @@ export default function CaseStudiesPage() {
       <section className="m-section">
         <div className="container">
           <div className="m-grid-2">
-            <Link
-              href="/case-studies/diversified-hospitality"
-              className="m-card"
-              style={{ display: "block", textDecoration: "none" }}
-            >
-              <div className="m-case meta">Hospitality consumables</div>
-              <h2 style={{ fontSize: "1.8rem", marginTop: 6 }}>
-                Diversified Hospitality Solutions
-              </h2>
-              <p style={{ marginTop: 14 }}>
-                From reseller-dependent to roughly $9M in direct Amazon
-                sales. $5M+ of accounts payable paid down. Valuation roughly
-                doubled.
+            <Link href="/case-studies/diversified-hospitality" className="m-case-card">
+              <div className="meta">Hospitality consumables · 2022–2023</div>
+              <h3>From reseller-dependent to $9M direct on Amazon.</h3>
+              <p style={{ marginTop: 16, color: "var(--color-ink-soft)" }}>
+                Diversified Hospitality Solutions had real product, real
+                distribution, and a real Amazon presence — being run by
+                everyone except them. We took it back. Revenue: $8.34M
+                (2022) → $9.02M (2023). $5M+ accounts payable paid down.
+                Valuation roughly doubled.
               </p>
-              <div style={{ marginTop: 24, display: "grid", gap: 14 }}>
-                <Result label="Direct Amazon sales by 2023" value="~$9M" />
-                <Result label="AP paid down" value="$5M+" />
-                <Result label="Valuation impact" value="~2× lift" />
-              </div>
-              <div style={{ marginTop: 28, fontWeight: 600, color: "var(--m-ink)" }}>
-                Read the case study →
-              </div>
+              <div className="arrow">Read the case study →</div>
             </Link>
 
-            <div
-              className="m-card"
-              style={{
-                background: "var(--m-bg-alt)",
-                borderStyle: "dashed",
-              }}
-            >
-              <div className="m-case meta">More case studies coming</div>
-              <h2 style={{ fontSize: "1.6rem", marginTop: 6, color: "var(--m-muted)" }}>
-                We&apos;re selective.
-              </h2>
-              <p style={{ marginTop: 14 }}>
-                Most of our engagements are confidential by request. As more
-                partner brands clear their write-up windows, we&apos;ll add
-                their stories here. If you want a reference call rather than
-                a public case study, ask — we&apos;ll arrange one for
-                serious prospects.
+            <Link href="/case-studies/legion-chemicals" className="m-case-card">
+              <div className="meta">Specialty chemicals · Worked example</div>
+              <h3>Finding the brand before anyone else knew it was broken.</h3>
+              <p style={{ marginTop: 16, color: "var(--color-ink-soft)" }}>
+                Legion Chemicals: a worked example of what a Channel
+                Ownership Audit looks like in practice. Four resellers
+                capturing &gt;60% of brand sales velocity. A 75–90% spread
+                between wholesale and Amazon retail. Capture, not growth.
               </p>
-              <div style={{ marginTop: 28 }}>
-                <Link href="/contact" className="m-link">
-                  Request a reference call →
-                </Link>
-              </div>
-            </div>
+              <div className="arrow">Read the case study →</div>
+            </Link>
           </div>
         </div>
       </section>
 
-      <section className="m-dark">
-        <div className="container" style={{ maxWidth: 760 }}>
-          <h2>Think your channel fits the pattern?</h2>
-          <p style={{ marginTop: 14, fontSize: "1.1rem" }}>
-            The free audit will tell you. Submit your brand and we&apos;ll
-            send back a written read on who&apos;s currently selling you on
-            Amazon and what the unlocked profit looks like.
+      <section className="m-incentives">
+        <div className="container">
+          <div className="eyebrow">Run yours</div>
+          <h2 style={{ marginTop: 18 }}>
+            Think your channel fits the pattern?
+          </h2>
+          <p>
+            The free Channel Ownership Audit will tell you. Submit your
+            brand and we&apos;ll send back a written read on who&apos;s
+            currently selling you on Amazon and what the unlocked profit
+            looks like.
           </p>
-          <div style={{ marginTop: 28, display: "flex", gap: 14, flexWrap: "wrap" }}>
-            <Link href="/contact" className="m-btn m-btn-light">
+          <div style={{ marginTop: 32, display: "flex", gap: 14, flexWrap: "wrap" }}>
+            <Link href="/contact" className="m-btn">
               Get your free audit →
             </Link>
-            <Link
-              href="/about"
-              className="m-btn m-btn-outline"
-              style={{ borderColor: "#fff", color: "#fff" }}
-            >
+            <Link href="/about" className="m-btn m-btn-outline">
               About RCG
             </Link>
           </div>
         </div>
       </section>
     </>
-  );
-}
-
-function Result({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderTop: "1px solid var(--m-rule-soft)", paddingTop: 14 }}>
-      <div style={{ fontSize: 13, color: "var(--m-muted)" }}>{label}</div>
-      <div style={{ fontSize: "1.2rem", fontWeight: 600, color: "var(--m-ink)", letterSpacing: "-0.02em", fontVariantNumeric: "tabular-nums" }}>
-        {value}
-      </div>
-    </div>
   );
 }

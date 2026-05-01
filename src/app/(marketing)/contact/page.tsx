@@ -2,25 +2,26 @@ import Link from "next/link";
 import AuditForm from "@/components/marketing/AuditForm";
 
 export const metadata = {
-  title: "Contact — Rolle Consulting Group",
+  title: "Free Channel Ownership Audit — Rolle Consulting Group",
   description:
-    "Request a free Channel Ownership Audit. We respond within 2 business days.",
+    "Two inputs. One roadmap. No obligation. Roadmap delivered within 2 business days.",
 };
 
 export default function ContactPage() {
   return (
     <>
-      <section className="m-hero" style={{ padding: "96px 0 48px" }}>
+      <section className="m-hero" style={{ paddingBottom: 56 }}>
         <div className="container">
-          <div className="eyebrow">Contact</div>
-          <h1 style={{ marginTop: 24, maxWidth: "22ch" }}>
-            Get your free Channel Ownership Audit.
-          </h1>
-          <p className="lede" style={{ maxWidth: "62ch" }}>
-            Tell us about your brand. We&apos;ll come back with a written
-            audit: who&apos;s currently selling you on Amazon, the estimated
-            lost margin, and what the unlocked profit looks like if you
-            take the channel back.
+          <div className="m-hero-eyebrow-row">
+            <span className="dot" aria-hidden />
+            <span className="eyebrow">Contact</span>
+          </div>
+          <h1>Your free Channel Ownership Audit.</h1>
+          <p className="lede" style={{ maxWidth: "60ch" }}>
+            Two inputs. One roadmap. No obligation. We&apos;ll come back
+            with a written audit within 2 business days: who&apos;s
+            currently selling you on Amazon, the estimated lost margin, and
+            what the unlocked profit looks like.
           </p>
         </div>
       </section>
@@ -31,35 +32,85 @@ export default function ContactPage() {
 
           <div>
             <div className="eyebrow">What happens next</div>
-            <h2 style={{ marginTop: 12, fontSize: "1.6rem" }}>
+            <h2 style={{ marginTop: 14, fontSize: "1.7rem" }}>
               A response within 2 business days.
             </h2>
-            <ul style={{ marginTop: 22, display: "grid", gap: 18, listStyle: "none", padding: 0 }}>
-              <li>
-                <strong style={{ color: "var(--m-ink)" }}>1. Read.</strong>{" "}
-                We&apos;ll review what you sent and pull a quick outside-in
-                read on the resellers currently active on your listings.
-              </li>
-              <li>
-                <strong style={{ color: "var(--m-ink)" }}>2. Audit.</strong>{" "}
-                Within 5–7 business days, you&apos;ll get a written audit:
-                active sellers, estimated lost margin per SKU, and a
-                projected unlocked profit number.
-              </li>
-              <li>
-                <strong style={{ color: "var(--m-ink)" }}>3. Decide.</strong>{" "}
-                If the math is worth it for both sides, we&apos;ll propose
-                an engagement. Fee is 50% of additional first-year profits.
-                No upfront cost. No retainer.
-              </li>
-            </ul>
 
-            <hr style={{ border: 0, borderTop: "1px solid var(--m-rule-soft)", margin: "32px 0" }} />
+            <ol style={{ marginTop: 28, display: "grid", gap: 22, listStyle: "none", padding: 0 }}>
+              <li style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 18, alignItems: "start" }}>
+                <span
+                  style={{
+                    fontFamily: "var(--font-fraunces), Georgia, serif",
+                    fontStyle: "italic",
+                    color: "var(--color-accent-ink)",
+                    fontSize: 22,
+                    fontVariantNumeric: "tabular-nums",
+                    minWidth: 28,
+                  }}
+                >
+                  01
+                </span>
+                <div>
+                  <strong style={{ color: "var(--color-ink)", display: "block", marginBottom: 4 }}>
+                    Read.
+                  </strong>
+                  We&apos;ll review what you sent and pull a quick
+                  outside-in read on the resellers currently active on your
+                  listings.
+                </div>
+              </li>
+              <li style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 18, alignItems: "start" }}>
+                <span
+                  style={{
+                    fontFamily: "var(--font-fraunces), Georgia, serif",
+                    fontStyle: "italic",
+                    color: "var(--color-accent-ink)",
+                    fontSize: 22,
+                    fontVariantNumeric: "tabular-nums",
+                    minWidth: 28,
+                  }}
+                >
+                  02
+                </span>
+                <div>
+                  <strong style={{ color: "var(--color-ink)", display: "block", marginBottom: 4 }}>
+                    Audit.
+                  </strong>
+                  Within 2 business days, you&apos;ll get a written audit:
+                  active sellers, estimated lost margin per SKU, and a
+                  projected unlocked profit number.
+                </div>
+              </li>
+              <li style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 18, alignItems: "start" }}>
+                <span
+                  style={{
+                    fontFamily: "var(--font-fraunces), Georgia, serif",
+                    fontStyle: "italic",
+                    color: "var(--color-accent-ink)",
+                    fontSize: 22,
+                    fontVariantNumeric: "tabular-nums",
+                    minWidth: 28,
+                  }}
+                >
+                  03
+                </span>
+                <div>
+                  <strong style={{ color: "var(--color-ink)", display: "block", marginBottom: 4 }}>
+                    Decide.
+                  </strong>
+                  If the math is worth it for both sides, we&apos;ll
+                  propose an engagement. 50% of the additional first-year
+                  profit. No upfront cost. No retainer.
+                </div>
+              </li>
+            </ol>
+
+            <hr className="rule" style={{ margin: "36px 0" }} />
 
             <div className="eyebrow">Prefer a call?</div>
             {/* TODO: replace with real Calendly URL */}
             <p style={{ marginTop: 14 }}>
-              Book 15 minutes with us:{" "}
+              Book 15 minutes:{" "}
               <Link
                 href="https://calendly.com/rolle-consulting/intro"
                 className="m-link"
@@ -67,7 +118,7 @@ export default function ContactPage() {
                 calendly.com/rolle-consulting/intro
               </Link>
             </p>
-            <p style={{ marginTop: 18, fontSize: 14, color: "var(--m-muted)" }}>
+            <p style={{ marginTop: 18, fontSize: 13, color: "var(--color-muted)" }}>
               No upfront cost. We&apos;re selective about engagements — the
               audit tells both sides whether it&apos;s worth doing.
             </p>
