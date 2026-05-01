@@ -14,6 +14,8 @@ import { createDraft } from "@/lib/microsoft/graph";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
 export const maxDuration = 300;
 
 const MAX_PER_TICK = 5;
