@@ -1,12 +1,13 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
-import { LayoutDashboard, Settings, LogOut, Menu, X, Zap, Building2, Upload } from "lucide-react";
+import { useEffect, useState } from "react";
+import { LayoutDashboard, Settings, LogOut, Menu, X, Zap, Building2, Upload, ClipboardCheck } from "lucide-react";
 
 const NAV = [
   { href: "/app/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/app/brands", label: "Brands", icon: Building2 },
+  { href: "/app/review", label: "Review", icon: ClipboardCheck },
   { href: "/app/imports", label: "Imports", icon: Upload },
   { href: "/app/settings", label: "Settings", icon: Settings },
 ];
@@ -14,6 +15,22 @@ const NAV = [
 export default function AppShell({ children, email }: { children: React.ReactNode; email?: string | null }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const [queueSize, setQueueSize] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetch("/api/reviews/stats", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setQueueSize(data.queue_remaining ?? 0);
+      } catch {}
+    }
+    load();
+    const t = setInterval(load, 30_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row">
@@ -45,6 +62,7 @@ export default function AppShell({ children, email }: { children: React.ReactNod
           {NAV.map(n => {
             const active = pathname === n.href || pathname.startsWith(n.href + "/");
             const Icon = n.icon;
+            const showBadge = n.href === "/app/review" && queueSize !== null && queueSize > 0;
             return (
               <Link
                 key={n.href}
@@ -58,7 +76,15 @@ export default function AppShell({ children, email }: { children: React.ReactNod
                 }}
               >
                 <Icon size={16} />
-                <span>{n.label}</span>
+                <span className="flex-1">{n.label}</span>
+                {showBadge && (
+                  <span
+                    className="px-1.5 py-0.5 rounded text-[10px] font-mono"
+                    style={{ background: "var(--accent)", color: "#0b0b0b" }}
+                  >
+                    {queueSize}
+                  </span>
+                )}
               </Link>
             );
           })}
