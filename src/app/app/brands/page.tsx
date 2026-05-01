@@ -46,6 +46,12 @@ export default async function BrandsPage({ searchParams }: { searchParams: Searc
     <div className="p-6 max-w-[1400px] mx-auto">
       <div className="flex items-baseline justify-between mb-6">
         <h1 className="text-2xl font-semibold">Brands</h1>
+        <Link
+          href="/app/brands/new"
+          className="btn btn-primary text-sm"
+        >
+          + Add Brand by Name
+        </Link>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
