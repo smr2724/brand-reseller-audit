@@ -18,6 +18,13 @@ export default async function BrandDetail({ params }: { params: { id: string } }
 
   if (!brand) notFound();
 
+  const { data: asins } = await supabase
+    .from("brand_asins")
+    .select("*")
+    .eq("brand_id", brand.id)
+    .order("offers_count", { ascending: false })
+    .limit(50);
+
   return (
     <div className="p-6 max-w-[1100px] mx-auto">
       <div className="mb-4">
@@ -25,7 +32,7 @@ export default async function BrandDetail({ params }: { params: { id: string } }
           ← All brands
         </Link>
       </div>
-      <BrandDetailClient brand={brand} />
+      <BrandDetailClient brand={brand} asins={asins ?? []} />
     </div>
   );
 }
