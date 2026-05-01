@@ -93,7 +93,15 @@ export async function GET(req: Request) {
     return NextResponse.json({ paused: true, ...budget }, { status: 200 });
   }
 
-  const { data: leadRows } = await admin
+  // Strict allowlist: only `pending` leads are eligible. Logged so the
+  // exact filter is visible in Vercel logs alongside the response.
+  console.log("[cron/audit-queue] selecting leads", {
+    filter: "audit_status='pending'",
+    order: "audit_requested_at asc",
+    limit: MAX_PER_TICK,
+  });
+
+  const { data: leadRows, error: selectErr } = await admin
     .from("leads")
     .select(
       "id, brand_name, requested_brand_name, contact_name, email, audit_status, brand_id, report_id, ip_address",
@@ -102,7 +110,17 @@ export async function GET(req: Request) {
     .order("audit_requested_at", { ascending: true })
     .limit(MAX_PER_TICK);
 
+  if (selectErr) {
+    console.error("[cron/audit-queue] lead select failed", selectErr);
+    return NextResponse.json({ error: "select_failed" }, { status: 500 });
+  }
+
   const leads = (leadRows ?? []) as LeadRow[];
+  console.log("[cron/audit-queue] select returned", {
+    count: leads.length,
+    rows: leads.map((l) => ({ id: l.id, audit_status: l.audit_status })),
+  });
+
   if (leads.length === 0) {
     return NextResponse.json({ processed: 0, budget });
   }
@@ -111,14 +129,43 @@ export async function GET(req: Request) {
   const results: Array<{ lead_id: string; status: string; error?: string }> = [];
 
   for (const lead of leads) {
-    // Defensive guard: even if the query above is ever wrong, never run
-    // the pipeline against a lead that isn't in the `pending` state.
-    // This is the safety belt that keeps a `sent` lead from being
-    // reprocessed and re-emailed if anything upstream regresses.
+    // Belt-and-suspenders guard against a stale/garbled SELECT result.
+    // The atomic claim below is the real safety belt; this just refuses
+    // obviously-wrong rows before any DB writes.
     if (lead.audit_status !== "pending") {
+      console.warn("[cron/audit-queue] select returned non-pending row, skipping", {
+        lead_id: lead.id,
+        audit_status: lead.audit_status,
+      });
       results.push({ lead_id: lead.id, status: "skipped_not_pending" });
       continue;
     }
+
+    // Atomic claim: flip pending → matching only if it is still pending
+    // at write time. This closes the race between two concurrent ticks
+    // (cron runs every minute; a slow tick can overlap the next), and
+    // also blocks any path where the SELECT result was stale relative to
+    // the database. RETURNING * tells us whether we won the claim.
+    const { data: claimedRows, error: claimErr } = await admin
+      .from("leads")
+      .update({ audit_status: "matching" })
+      .eq("id", lead.id)
+      .eq("audit_status", "pending")
+      .select("id, audit_status");
+
+    if (claimErr) {
+      console.error("[cron/audit-queue] claim update failed", { lead_id: lead.id, error: claimErr });
+      results.push({ lead_id: lead.id, status: "claim_failed", error: claimErr.message });
+      continue;
+    }
+    if (!claimedRows || claimedRows.length === 0) {
+      console.warn("[cron/audit-queue] lost claim race (lead no longer pending)", {
+        lead_id: lead.id,
+      });
+      results.push({ lead_id: lead.id, status: "skipped_claim_lost" });
+      continue;
+    }
+
     try {
       await processLead(admin, lead, ownerId);
       results.push({ lead_id: lead.id, status: "ok" });
@@ -147,8 +194,8 @@ async function processLead(
 ) {
   const brandName = lead.requested_brand_name ?? lead.brand_name;
 
-  // ---- 1. Mark matching ----
-  await admin.from("leads").update({ audit_status: "matching" }).eq("id", lead.id);
+  // ---- 1. Status already flipped to `matching` by the atomic claim
+  // in the GET handler. Skip the redundant write. ----
 
   // ---- 2. Keepa brand search ----
   const search = await searchProductsByBrand(brandName, 5);
@@ -225,8 +272,10 @@ async function processLead(
     .maybeSingle();
 
   let reportId: string;
+  let reusedReport = false;
   if (existingReport?.id && existingReport.token) {
     reportId = existingReport.id;
+    reusedReport = true;
     await admin
       .from("leads")
       .update({ audit_status: "generating_report", report_id: reportId })
@@ -283,6 +332,22 @@ async function processLead(
       audit_completed_at: new Date().toISOString(),
     })
     .eq("id", lead.id);
+
+  // If we reused a recent report, the prospect was already emailed and
+  // an Outlook draft already exists from the original tick. Re-firing
+  // both is the duplicate-email pain Steve hit in prod (14 copies).
+  // Mark the lead `sent` and exit without side effects.
+  if (reusedReport) {
+    console.log("[cron/audit-queue] reused existing report, skipping email/draft", {
+      lead_id: lead.id,
+      report_id: reportId,
+    });
+    await admin
+      .from("leads")
+      .update({ audit_status: "sent" })
+      .eq("id", lead.id);
+    return;
+  }
 
   // ---- 6. Send report-ready email via Resend ----
   if (isResendConfigured()) {
