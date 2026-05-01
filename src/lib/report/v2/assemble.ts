@@ -212,7 +212,22 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
         (bundle.dataforseo?.competitor_brands?.length ?? 0) > 0,
       dataforseo_freshness: bundle.dataforseo?.captured_at ?? null,
       reseller_dossier: finalDossier !== null,
-      competitor_benchmark: benchmarkBase.rows.length > 1,
+      // Only call the benchmark "real" if at least one competitor row
+      // has ≥ 2 measured fields. A single competitor with all-null
+      // numbers shouldn't flip this to true — the reader treats true
+      // as "we measured peers", and that's a strong claim.
+      competitor_benchmark: benchmarkBase.rows
+        .filter((r) => !r.is_audited_brand)
+        .some(
+          (r) =>
+            countNonNull([
+              r.unique_seller_count,
+              r.brand_controlled_pct,
+              r.branded_search_volume,
+              r.organic_serp_rank,
+              r.listing_health,
+            ]) >= 2,
+        ),
     },
   };
 
@@ -283,4 +298,8 @@ function buildWhyRcg(): NarrativeV2["why_rcg"] {
 function money(n: number | null): string {
   if (n == null) return "— not measured";
   return `$${Math.round(Number(n)).toLocaleString("en-US")}`;
+}
+
+function countNonNull(xs: (number | null | undefined)[]): number {
+  return xs.filter((x) => x != null).length;
 }

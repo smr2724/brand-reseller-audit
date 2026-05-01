@@ -319,6 +319,12 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
       // revenue estimator and the listing-health snapshot.
       stats: 365,
       "buybox": 1,
+      // aplus=1 / videos=1 are free add-ons (same 5-token cost as the
+      // base product call). Without them Keepa omits the `aPlus` and
+      // `videos` arrays entirely, so has_a_plus / has_video map to null
+      // even on listings that do have A+ content and product video.
+      aplus: 1,
+      videos: 1,
     });
     const products = Array.isArray(json?.products) ? json.products : [];
     const tokensLeft = Number(json?.tokensLeft ?? 0);
@@ -366,22 +372,25 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
         featuresCount = p.featuresCSV.split(",").filter(Boolean).length;
       }
 
-      // Video flag: Keepa exposes `videoCount` (number) on /product when
-      // requested, and historically `videos` (array). Either truthy = video.
+      // Video flag: with videos=1 in the request, Keepa returns `videos`
+      // as an array (sometimes also `videoCount` historically). Absent
+      // field with the request flag set means "no product video on this
+      // listing" — i.e. false, not null/unknown.
       const videosArr = Array.isArray(p?.videos) ? p.videos : null;
-      const hasVideo =
-        typeof p?.videoCount === "number" && p.videoCount > 0
+      const hasVideoCount =
+        typeof p?.videoCount === "number" ? p.videoCount > 0 : null;
+      const hasVideo: boolean =
+        videosArr !== null
+          ? videosArr.length > 0
+          : hasVideoCount === true
           ? true
-          : videosArr && videosArr.length > 0
-          ? true
-          : null;
+          : false;
 
-      // A+ content: Keepa returns `aPlus`/`aPlusContent` with various
-      // shapes (boolean, number, object, array). Treat any truthy/non-empty
-      // value as A+ present. If the field is missing from the response,
-      // leave null.
+      // A+ content: with aplus=1 in the request, Keepa returns `aPlus`
+      // as an array of modules (length > 0 means A+ is published).
+      // Absent field with the request flag set = no A+, i.e. false.
       const aPlusRaw = (p as any)?.aPlus ?? (p as any)?.aPlusContent;
-      let hasAPlus: boolean | null = null;
+      let hasAPlus: boolean = false;
       if (typeof aPlusRaw === "boolean") hasAPlus = aPlusRaw;
       else if (typeof aPlusRaw === "number") hasAPlus = aPlusRaw > 0;
       else if (Array.isArray(aPlusRaw)) hasAPlus = aPlusRaw.length > 0;

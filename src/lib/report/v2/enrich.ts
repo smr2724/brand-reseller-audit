@@ -57,6 +57,15 @@ export interface CompetitorSnapshot {
   brand_controlled_pct: number | null;
   branded_search_volume: number | null;
   organic_serp_rank: number | null;
+  /** Listing-health score (0-100) computed from the same CX rubric we
+   * apply to the audited brand: rating + reviews + images + bullets +
+   * A+ + video, averaged across the competitor's enriched ASINs. */
+  listing_health: number | null;
+  /** Number of ASINs Keepa returned for the competitor brand search +
+   * for which we successfully pulled /product details. Used by
+   * `runV2Enrichment` to drop competitors with insufficient signal so
+   * we don't ship a row of nulls in the benchmark table. */
+  enriched_asin_count: number;
 }
 
 export interface KeepaAsinDetail {
@@ -163,6 +172,7 @@ export async function runV2Enrichment(
   let asinDetails: KeepaAsinDetail[] = [];
   let revenueEstimate: RevenueEstimate | null = null;
   let productCategoryHints: string[] = [];
+  let titleVocab: string[] = [];
   try {
     const asins = (bundle.keepa.asins ?? []).map((a) => a.asin).filter(Boolean);
     if (asins.length) {
@@ -181,7 +191,9 @@ export async function runV2Enrichment(
           category_path: p.category_tree?.map((c) => c.name).join(" > ") ?? null,
         })),
       );
-      productCategoryHints = inferProductCategoryHints(products);
+      const inferred = inferProductCategoryHints(products, brand.name);
+      productCategoryHints = inferred.seeds;
+      titleVocab = inferred.titleVocab;
     }
   } catch (e) {
     console.warn("[v2/enrich] keepa /product details fetch failed:", e);
@@ -198,6 +210,7 @@ export async function runV2Enrichment(
         brand_name: brand.name,
         user_id: brand.user_id,
         category_seeds: productCategoryHints,
+        title_vocab: titleVocab,
       });
       if (snap.enrichment_error) {
         throw new EnrichmentStepError(
@@ -275,51 +288,115 @@ function toAsinDetail(p: KeepaProductDetails): KeepaAsinDetail {
 }
 
 /**
- * Infer 1-2 product-category seed words from the most common tokens
- * across the brand's ASIN titles. Used to expand top_keywords beyond
- * just the brand name (e.g. "world amenities" → "makeup remover wipes",
- * "hand wash") via DFS related_keywords.
+ * Infer product-category seed phrases + a per-title vocabulary set
+ * from the brand's ASIN titles.
  *
- * We intentionally pull bigrams and trigrams rather than single words
- * because Amazon search intent maps to phrases ("makeup remover"
- * converts; "remover" alone does not).
+ *   • `seeds` is up to 3 noun-phrase bigrams used to seed DFS
+ *     related_keywords (e.g. "makeup remover wipes", "hand wash").
+ *   • `titleVocab` is every non-stopword, non-brand token appearing in
+ *     ≥ 2 distinct titles. Used downstream to filter the related-keyword
+ *     expansion so off-topic SERP drift (e.g. "butcher paper" leaking
+ *     in from a single "kraft paper sachet" SKU) gets dropped before
+ *     it reaches the report.
+ *
+ * We deliberately pull bigrams (not single words) because Amazon search
+ * intent maps to phrases ("makeup remover" converts; "remover" alone
+ * does not).
  */
-function inferProductCategoryHints(products: KeepaProductDetails[]): string[] {
+function inferProductCategoryHints(
+  products: KeepaProductDetails[],
+  brandName: string,
+): { seeds: string[]; titleVocab: string[] } {
   const STOP = new Set([
     "the", "and", "for", "with", "from", "into", "your", "you", "our",
-    "our", "this", "that", "use", "uses", "made", "pack", "set", "size",
+    "this", "that", "use", "uses", "made", "pack", "set", "size",
     "count", "ct", "oz", "ounce", "pcs", "piece", "pieces", "fl", "fluid",
     "inch", "inches", "lb", "lbs", "kg", "g", "ml", "mg", "amazon",
     "free", "new", "best", "top", "premium", "professional", "natural",
     "organic", "fresh", "pure", "great", "value", "small", "large",
     "medium", "x", "xl", "xs",
+    "alcohol", "individually", "wrapped", "travel", "friendly", "sensitive",
+    "skin", "comfort", "long", "lasting", "deep", "all", "type", "types",
+    "hotel", "hotels", "airbnb", "airbnbs", "rental", "rentals", "suitable",
   ]);
+  const brandTokens = new Set(
+    brandName.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").split(/\s+/).filter(Boolean),
+  );
   const tokenize = (s: string): string[] =>
     s
       .toLowerCase()
       .replace(/[^a-z0-9\s-]/g, " ")
       .split(/\s+/)
-      .filter((w) => w.length >= 3 && !STOP.has(w) && !/^\d+$/.test(w));
+      .filter(
+        (w) =>
+          w.length >= 3 &&
+          !STOP.has(w) &&
+          !brandTokens.has(w) &&
+          !/^\d+$/.test(w),
+      );
 
-  const bigramCount = new Map<string, number>();
+  // Per-title token sets (so we count distinct titles, not raw repeats
+  // — a brand-name string repeated in every title shouldn't dominate).
+  const titlesTokenSets: Set<string>[] = [];
   for (const p of products) {
     if (!p.title) continue;
-    const words = tokenize(p.title);
-    for (let i = 0; i < words.length - 1; i++) {
-      const bg = `${words[i]} ${words[i + 1]}`;
-      bigramCount.set(bg, (bigramCount.get(bg) ?? 0) + 1);
+    titlesTokenSets.push(new Set(tokenize(p.title)));
+  }
+  const totalTitles = titlesTokenSets.length || 1;
+
+  const tokenDocFreq = new Map<string, number>();
+  for (const set of titlesTokenSets) {
+    set.forEach((w) => tokenDocFreq.set(w, (tokenDocFreq.get(w) ?? 0) + 1));
+  }
+  // titleVocab = words appearing in ≥ 2 distinct titles.
+  const titleVocab = Array.from(tokenDocFreq.entries())
+    .filter(([, n]) => n >= 2)
+    .map(([w]) => w);
+
+  // Bigram doc-frequency (count distinct titles that contain each bigram).
+  const bigramDocFreq = new Map<string, number>();
+  for (const p of products) {
+    if (!p.title) continue;
+    const seq = tokenize(p.title);
+    const seen = new Set<string>();
+    for (let i = 0; i < seq.length - 1; i++) {
+      const bg = `${seq[i]} ${seq[i + 1]}`;
+      if (seen.has(bg)) continue;
+      seen.add(bg);
+      bigramDocFreq.set(bg, (bigramDocFreq.get(bg) ?? 0) + 1);
     }
   }
 
-  // Drop bigrams that contain a number-like token or look like the
-  // brand fingerprint (single common token everywhere).
-  const ranked = Array.from(bigramCount.entries())
-    .filter(([bg, n]) => n >= 2 && !/\d/.test(bg))
+  // Keep only bigrams whose BOTH tokens land in the per-title vocab —
+  // this kills "kraft sachet" / "remover wipes" trailing off-topic
+  // partials that come from a single SKU.
+  const vocabSet = new Set(titleVocab);
+  const seeds = Array.from(bigramDocFreq.entries())
+    .filter(
+      ([bg, n]) =>
+        n >= 2 &&
+        !/\d/.test(bg) &&
+        bg.split(" ").every((tok) => vocabSet.has(tok)),
+    )
+    // Tie-break: prefer bigrams that cover a larger share of the catalog.
     .sort((a, b) => b[1] - a[1])
-    .map(([bg]) => bg)
+    .map(([bg]) => bg);
+
+  // Require a seed bigram to cover ≥ max(2 titles, 15% of catalog) so
+  // a single-SKU outlier (e.g. one "kraft paper sachet" listing in a
+  // 23-ASIN wipes-and-lotion catalog) can't seed an entire off-topic
+  // category. Cap at 3 — DFS related_keywords on each one already
+  // returns ~60 keywords to filter against.
+  const COVERAGE_MIN = Math.max(2, Math.ceil(totalTitles * 0.15));
+  const filteredSeeds = seeds
+    .filter((bg) => (bigramDocFreq.get(bg) ?? 0) >= COVERAGE_MIN)
     .slice(0, 3);
 
-  return ranked;
+  // Fallback: if nothing meets coverage, take the top 2 by raw doc-freq
+  // (still requiring both tokens in vocab) so we still feed DFS something.
+  const finalSeeds = filteredSeeds.length ? filteredSeeds : seeds.slice(0, 2);
+
+  return { seeds: finalSeeds, titleVocab };
 }
 
 // ----------------------------------------------------------------------
@@ -367,7 +444,11 @@ async function collectCompetitorSnapshots(
 
     if (candidates.size < 3 && competingAsins.size && isKeepaConfigured()) {
       try {
-        const products = await getProductDetails(Array.from(competingAsins).slice(0, 20), 5);
+        // Cap at 10 competing ASINs (50 tokens) to leave headroom for
+        // the per-competitor enrichment that follows. The flow is
+        // already biased toward DFS-supplied competitor brand names
+        // first; this Keepa lookup is only a top-up.
+        const products = await getProductDetails(Array.from(competingAsins).slice(0, 10), 5);
         const brandCounts = new Map<string, number>();
         for (const p of products) {
           const b = (p.brand ?? "").trim();
@@ -388,27 +469,31 @@ async function collectCompetitorSnapshots(
     }
   }
 
-  const competitors = Array.from(candidates)
+  // We may need to walk more than 3 candidates because some will fail
+  // the "≥ 2 enriched ASINs" coverage gate and get dropped — better to
+  // ship 1-2 real competitors than 3 hollow rows.
+  const candidatePool = Array.from(candidates)
     .filter((b) => b.toLowerCase().trim() !== brandName.toLowerCase().trim())
-    .slice(0, 3);
-  if (!competitors.length) return [];
+    .slice(0, 8);
+  if (!candidatePool.length) return [];
 
   const out: CompetitorSnapshot[] = [];
-  for (const name of competitors) {
+  for (const name of candidatePool) {
+    if (out.length >= 3) break;
+    let snap: CompetitorSnapshot;
     try {
-      const snap = await getOrFetchCompetitorSnapshot(admin, name);
-      out.push(snap);
+      snap = await getOrFetchCompetitorSnapshot(admin, name);
     } catch (e) {
       console.warn("[v2/enrich] competitor snapshot failed:", name, e);
-      out.push({
-        brand: name,
-        unique_seller_count: null,
-        brand_controlled_pct: null,
-        branded_search_volume: null,
-        organic_serp_rank: null,
-      });
+      continue;
     }
-    if (out.length >= 3) break;
+    if (snap.enriched_asin_count < 2) {
+      console.log(
+        `[v2/enrich] competitor "${name}" dropped — only ${snap.enriched_asin_count} ASIN(s) enriched`,
+      );
+      continue;
+    }
+    out.push(snap);
     // Throttle between competitors so we don't slam Keepa's per-second
     // limit. Two ~50-token calls per competitor is comfortable at 1Hz.
     await new Promise((r) => setTimeout(r, 1500));
@@ -416,13 +501,18 @@ async function collectCompetitorSnapshots(
   return out;
 }
 
+// Cache schema version — bumped any time CompetitorSnapshot's shape
+// changes so an older serialized payload doesn't poison fresh runs.
+const COMPETITOR_CACHE_VERSION = 2;
+
 async function getOrFetchCompetitorSnapshot(
   admin: SupabaseClient<any, any, any>,
   competitorBrand: string,
 ): Promise<CompetitorSnapshot> {
   const norm = competitorBrand.toLowerCase().trim();
 
-  // Cache hit?
+  // Cache hit? Only if the cached payload is at the current shape
+  // version (otherwise we'd silently keep returning the v1 hollow row).
   try {
     const { data } = await admin
       .from("competitor_brands_cache")
@@ -430,16 +520,26 @@ async function getOrFetchCompetitorSnapshot(
       .eq("brand_name_norm", norm)
       .maybeSingle();
     if (data && new Date(data.expires_at).getTime() > Date.now()) {
-      return data.payload as CompetitorSnapshot;
+      const cached = data.payload as any;
+      if (
+        cached &&
+        typeof cached === "object" &&
+        cached.__v === COMPETITOR_CACHE_VERSION
+      ) {
+        const { __v: _v, ...rest } = cached;
+        return rest as CompetitorSnapshot;
+      }
     }
   } catch {
     // proceed to refresh
   }
 
-  // Refresh — pull DataForSEO branded volume + SERP rank, plus a small
-  // Keepa sample (~10 ASINs, 50 tokens) to derive real channel-control
-  // numbers. Cached cross-user for 14 days to keep the average per-report
-  // token cost flat after the first warm-up.
+  // Refresh — run the same enrichment we run for the audited brand:
+  //   • Keepa brand search → /product (offers + stats + aplus + videos)
+  //     → derive brand_controlled_pct, unique_seller_count, listing_health
+  //   • DataForSEO related_keywords → branded_search_volume + SERP rank
+  // Cached cross-user for 14 days (keyed by `__v` so a future shape
+  // change automatically invalidates).
   let branded_search_volume: number | null = null;
   let organic_serp_rank: number | null = null;
   try {
@@ -468,11 +568,14 @@ async function getOrFetchCompetitorSnapshot(
 
   let unique_seller_count: number | null = null;
   let brand_controlled_pct: number | null = null;
+  let listing_health: number | null = null;
+  let enriched_asin_count = 0;
   if (isKeepaConfigured()) {
     try {
       const search = await searchProductsByBrand(competitorBrand, 10);
       if (search.asins.length) {
         const products = await getProductDetails(search.asins, 5);
+        enriched_asin_count = products.length;
         const sellers = new Set<string>();
         let brandControlled = 0;
         let counted = 0;
@@ -488,6 +591,18 @@ async function getOrFetchCompetitorSnapshot(
         }
         if (sellers.size) unique_seller_count = sellers.size;
         if (counted > 0) brand_controlled_pct = brandControlled / counted;
+
+        // Listing health — same rubric as computeCxAuditBase, averaged.
+        const scores: number[] = [];
+        for (const p of products) {
+          const s = scoreProductListing(p);
+          if (s != null) scores.push(s);
+        }
+        if (scores.length) {
+          listing_health = Math.round(
+            scores.reduce((a, b) => a + b, 0) / scores.length,
+          );
+        }
       }
     } catch (e) {
       console.warn("[v2/enrich] competitor Keepa lookup failed:", competitorBrand, e);
@@ -500,6 +615,8 @@ async function getOrFetchCompetitorSnapshot(
     brand_controlled_pct,
     branded_search_volume,
     organic_serp_rank,
+    listing_health,
+    enriched_asin_count,
   };
 
   try {
@@ -508,7 +625,7 @@ async function getOrFetchCompetitorSnapshot(
       {
         brand_name_norm: norm,
         display_name: competitorBrand,
-        payload: snapshot,
+        payload: { __v: COMPETITOR_CACHE_VERSION, ...snapshot },
         fetched_at: new Date().toISOString(),
         expires_at,
       },
@@ -519,6 +636,56 @@ async function getOrFetchCompetitorSnapshot(
   }
 
   return snapshot;
+}
+
+/**
+ * Score a single Keepa /product listing on the same 0-100 rubric the
+ * audited brand uses in computeCxAuditBase (compute.ts). Returns null
+ * if no measurable fields landed — caller should skip.
+ */
+function scoreProductListing(p: {
+  images_count?: number | null;
+  features_count?: number | null;
+  has_a_plus?: boolean | null;
+  has_video?: boolean | null;
+  rating?: number | null;
+  review_count?: number | null;
+}): number | null {
+  let score = 0;
+  let measured = 0;
+  if (p.images_count != null) {
+    score += Math.min(25, Math.round((p.images_count / 6) * 25));
+    measured += 1;
+  }
+  if (p.features_count != null) {
+    score += Math.min(15, Math.round((p.features_count / 5) * 15));
+    measured += 1;
+  }
+  if (p.has_a_plus === true) {
+    score += 10;
+    measured += 1;
+  } else if (p.has_a_plus === false) {
+    measured += 1;
+  }
+  if (p.has_video === true) {
+    score += 10;
+    measured += 1;
+  } else if (p.has_video === false) {
+    measured += 1;
+  }
+  if (p.rating != null) {
+    if (p.rating >= 4.5) score += 20;
+    else if (p.rating >= 4.0) score += 14;
+    else if (p.rating >= 3.5) score += 7;
+    measured += 1;
+  }
+  if (p.review_count != null) {
+    const r = Math.max(0, Math.min(4, Math.log10(Math.max(1, p.review_count))));
+    score += Math.round((r / 4) * 20);
+    measured += 1;
+  }
+  if (measured === 0) return null;
+  return Math.min(100, score);
 }
 
 // ----------------------------------------------------------------------

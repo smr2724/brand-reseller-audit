@@ -45,6 +45,11 @@ export interface EnrichDfsInput {
    * to pull related_keywords beyond just the brand name. Inferred from
    * the brand's most-common ASIN titles upstream. */
   category_seeds?: string[];
+  /** Per-title vocabulary (words appearing in ≥ 2 ASIN titles). Used
+   * to filter related-keyword expansions so off-topic drift (e.g.
+   * "butcher paper" leaking from a single "kraft paper sachet" SKU)
+   * never makes it into top_keywords. */
+  title_vocab?: string[];
 }
 
 // =============================================================
@@ -225,6 +230,7 @@ export async function enrichBrandWithDataForSeo(
 ): Promise<DataForSeoSnapshot> {
   const { brand_id, brand_name, user_id } = input;
   const category_seeds = input.category_seeds ?? [];
+  const title_vocab = input.title_vocab ?? [];
   const captured_at = new Date().toISOString();
 
   if (!isDataForSEOConfigured()) {
@@ -255,10 +261,11 @@ export async function enrichBrandWithDataForSeo(
       }
     }
 
-    // Merge → dedupe → take top 12 by search_volume. Tag each as
-    // "branded" or "category" so the renderer can group/colour them.
+    // Merge → dedupe → filter to keep keywords on-topic with the
+    // brand's catalog, then take top 12 by search_volume.
     const merged = mergeAndTag(branded, categoryKws, brand_name);
-    const top_keywords = merged.slice(0, MAX_KEYWORDS);
+    const filtered = filterRelevant(merged, brand_name, category_seeds, title_vocab);
+    const top_keywords = filtered.slice(0, MAX_KEYWORDS);
 
     // 2. Pull SERP for the top branded keywords (budget capped).
     const serpKeywords = top_keywords
@@ -381,6 +388,93 @@ async function fetchCategoryKeywords(
   }
   if (admin) await cachePut(admin, key, kws);
   return kws;
+}
+
+type RankedKeyword = {
+  keyword: string;
+  search_volume: number | null;
+  category?: "branded" | "category";
+};
+
+/**
+ * Filter merged related-keyword output down to keywords that look like
+ * they belong to the brand's actual catalog. Without this filter, DFS
+ * related_keywords on a category seed can drift hard (e.g. seeding
+ * "kraft paper" because one shower-cap SKU is in a kraft sachet
+ * pulled in "butcher paper", "kraft paper roll", etc).
+ *
+ * Rules, in order:
+ *   1. Always keep the brand name (we sort it to the front later).
+ *   2. Always keep keywords containing the brand name string.
+ *   3. Otherwise, every non-stopword token of the keyword must be in
+ *      `titleVocab` OR appear in one of the seed phrases. Trailing
+ *      modifier nouns from one-off SKUs ("bags", "roll", "sheets")
+ *      get dropped this way.
+ *
+ * If `titleVocab` is empty (older callers), we fall through to the
+ * looser legacy behaviour of dropping only obvious off-topic phrases.
+ */
+function filterRelevant(
+  merged: RankedKeyword[],
+  brandName: string,
+  seeds: string[],
+  titleVocab: string[],
+): RankedKeyword[] {
+  if (!merged.length) return merged;
+  const brandLower = brandName.toLowerCase().trim();
+  const STOP = new Set([
+    "the", "and", "for", "with", "from", "into", "your", "you",
+    "best", "top", "new", "free", "premium",
+  ]);
+  const vocab = new Set(titleVocab.map((w) => w.toLowerCase()));
+  const seedTokens = new Set<string>();
+  for (const s of seeds) {
+    for (const t of s.toLowerCase().split(/\s+/)) {
+      if (t && !STOP.has(t)) seedTokens.add(t);
+    }
+  }
+  const allow = new Set<string>();
+  vocab.forEach((v) => allow.add(v));
+  seedTokens.forEach((v) => allow.add(v));
+
+  // Always keep the brand keyword itself, even if vocab is empty.
+  const out: RankedKeyword[] = [];
+  for (const k of merged) {
+    const kw = k.keyword.toLowerCase().trim();
+    if (!kw) continue;
+    if (kw === brandLower || kw.includes(brandLower)) {
+      out.push(k);
+      continue;
+    }
+    if (allow.size === 0) {
+      // No vocab/seed signal — fall through to legacy permissive behaviour
+      // so we don't regress small-catalog brands.
+      out.push(k);
+      continue;
+    }
+    const tokens = kw.split(/[^a-z0-9]+/).filter((t) => t.length >= 3 && !STOP.has(t));
+    if (tokens.length === 0) continue;
+    // Every non-stopword token of the keyword must be in title vocab
+    // or in a seed phrase. The strict rule is intentional: a permissive
+    // "any token matches" filter lets "butcher paper" through (because
+    // "paper" is in vocab from a kraft-paper SKU). The downside is we
+    // also drop adjacent terms like "body wash" when "wash" only
+    // appears in one title — that's the right trade-off; the report
+    // would rather print 5 on-topic keywords than 12 with one false
+    // positive that visibly mislabels the brand's category.
+    const ok = tokens.every((t) => allow.has(t));
+    if (ok) out.push(k);
+  }
+
+  // Sort: brand keywords first, then by descending search volume.
+  out.sort((a, b) => {
+    const aBrand = a.keyword.toLowerCase().includes(brandLower) ? 1 : 0;
+    const bBrand = b.keyword.toLowerCase().includes(brandLower) ? 1 : 0;
+    if (aBrand !== bBrand) return bBrand - aBrand;
+    return (b.search_volume ?? 0) - (a.search_volume ?? 0);
+  });
+
+  return out;
 }
 
 function mergeAndTag(

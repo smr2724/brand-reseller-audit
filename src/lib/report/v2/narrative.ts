@@ -381,7 +381,12 @@ export async function llmCompetitorLine(
       required: ["one_liner"],
     },
     userInstruction:
-      "Write ONE sentence (≤ 30 words) comparing the audited brand to the competitor set on channel control. ONLY use brand names and numbers that appear in the rows array. If only one row is present (no competitors), respond with the literal string 'Competitor benchmark — not enough peers in this snapshot.' Do not invent brand names. Do not use 'XYZ Corp' or any placeholder.",
+      "Write ONE sentence (≤ 30 words) comparing the audited brand to the competitor set on channel control. " +
+      "ONLY use brand names and numbers that appear in the rows array. " +
+      "Treat null fields as MISSING DATA — do not include them in averages and do not present them as zero. " +
+      "If only one row is present (no competitors), respond with the literal string 'Competitor benchmark — not enough peers in this snapshot.' " +
+      "If every competitor's brand_controlled_pct is null, drop the buy-box comparison and lean on the next-best measured field (listing_health, branded_search_volume, or unique_seller_count). " +
+      "Do not invent brand names. Do not use 'XYZ Corp' or any placeholder.",
     userPayload: { rows: bench.rows, brand_name: brand.name },
     maxTokens: 120,
   });
@@ -398,25 +403,59 @@ function fallbackCompetitorLine(
     return "Competitor benchmark — not enough peers in this snapshot.";
   }
 
+  const named = competitors.map((c) => c.brand).slice(0, 2).join(" and ");
+  const peerLabel = `${competitors.length} competitor${
+    competitors.length === 1 ? "" : "s"
+  } (${named})`;
+
+  // Average each measured column across competitors, skipping nulls. We
+  // pick the FIRST column where both the audited row and ≥ 1 competitor
+  // have a number — guarantees we cite real data rather than printing
+  // a bogus "0-point lead" computed against a sea of nulls.
   const auditedPct = audited.brand_controlled_pct;
   const peerPcts = competitors
     .map((r) => r.brand_controlled_pct)
     .filter((p): p is number => typeof p === "number");
 
-  const named = competitors.map((c) => c.brand).slice(0, 2).join(" and ");
-
   if (auditedPct != null && peerPcts.length) {
     const avgPct = peerPcts.reduce((a, b) => a + b, 0) / peerPcts.length;
     const auditedRound = Math.round(auditedPct * 100);
     const avgRound = Math.round(avgPct * 100);
-    // When both sides are 0% it means the entire category is reseller-
-    // controlled (none of the brands win their own buy boxes). Stating
-    // a "0-point lead" reads as bad copy, so call it out explicitly.
     if (auditedRound === 0 && avgRound === 0) {
       return `${brand.name} and its peers (${named}) all sit at 0% brand-controlled — the whole category is owned by resellers right now.`;
     }
     const delta = auditedRound - avgRound;
-    return `${brand.name} controls ${auditedRound}% of buy boxes vs ${avgRound}% peer average across ${competitors.length} competitor${competitors.length === 1 ? "" : "s"} (${named}) — a ${Math.abs(delta)}-point ${delta >= 0 ? "lead" : "gap"}.`;
+    return `${brand.name} controls ${auditedRound}% of buy boxes vs ${avgRound}% peer average across ${peerLabel} — a ${Math.abs(delta)}-point ${delta >= 0 ? "lead" : "gap"}.`;
+  }
+
+  // No buy-box numbers for the peer set → fall back to listing_health,
+  // then branded_search_volume, then unique_seller_count.
+  const auditedHealth = audited.listing_health;
+  const peerHealth = competitors
+    .map((r) => r.listing_health)
+    .filter((p): p is number => typeof p === "number");
+  if (auditedHealth != null && peerHealth.length) {
+    const avg = Math.round(peerHealth.reduce((a, b) => a + b, 0) / peerHealth.length);
+    const delta = auditedHealth - avg;
+    return `${brand.name}'s listing health scores ${auditedHealth}/100 vs ${avg} peer average across ${peerLabel} — a ${Math.abs(delta)}-point ${delta >= 0 ? "lead" : "gap"}.`;
+  }
+
+  const auditedVol = audited.branded_search_volume;
+  const peerVol = competitors
+    .map((r) => r.branded_search_volume)
+    .filter((p): p is number => typeof p === "number");
+  if (auditedVol != null && peerVol.length) {
+    const avg = Math.round(peerVol.reduce((a, b) => a + b, 0) / peerVol.length);
+    return `${brand.name}'s branded search volume sits at ${auditedVol.toLocaleString("en-US")}/mo vs a ${avg.toLocaleString("en-US")}/mo average across ${peerLabel}.`;
+  }
+
+  const auditedSellers = audited.unique_seller_count;
+  const peerSellers = competitors
+    .map((r) => r.unique_seller_count)
+    .filter((p): p is number => typeof p === "number");
+  if (auditedSellers != null && peerSellers.length) {
+    const avg = Math.round(peerSellers.reduce((a, b) => a + b, 0) / peerSellers.length);
+    return `${brand.name} has ${auditedSellers} sellers competing on its catalog vs ${avg} peer average across ${peerLabel}.`;
   }
 
   return `${brand.name} sits alongside ${named} on the same SERP — full channel-control benchmark runs in the engagement.`;

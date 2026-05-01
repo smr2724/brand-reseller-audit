@@ -238,7 +238,7 @@ export function computeCompetitorBenchmark(
     brand_controlled_pct: c.brand_controlled_pct,
     branded_search_volume: c.branded_search_volume,
     organic_serp_rank: c.organic_serp_rank,
-    listing_health: null,
+    listing_health: c.listing_health,
   }));
 
   return {
