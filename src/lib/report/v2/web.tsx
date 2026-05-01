@@ -703,6 +703,7 @@ function paragraphs(md: string | null | undefined) {
 function V2Styles() {
   return (
     <style>{`
+      .rv2, .rv2 * { box-sizing: border-box; }
       .rv2 {
         --bg: #0b0b0d;
         --bg-alt: #111114;
@@ -720,23 +721,29 @@ function V2Styles() {
         min-height: 100vh;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
         line-height: 1.6;
+        overflow-x: hidden;
+        max-width: 100vw;
       }
 
       /* Layout: side nav on desktop, header + scroll on mobile */
       .rv2-main {
         max-width: 980px;
         margin: 0 auto;
-        padding: 0 24px;
+        padding: 0 clamp(16px, 4vw, 24px);
+        width: 100%;
       }
       .rv2-section {
-        padding: 64px 0;
+        padding: clamp(40px, 8vw, 64px) 0;
         border-top: 1px solid var(--border-soft);
+        position: relative;
       }
       .rv2-section:first-of-type { border-top: none; }
-      .rv2-section-alt { background: var(--bg-alt); margin-left: -9999px; padding-left: 9999px; padding-right: 9999px; margin-right: -9999px; }
-      .rv2-section-alt > * { max-width: 980px; margin-left: auto; margin-right: auto; }
-      .rv2-section-cover { padding-top: 96px; }
-      .rv2-section-cta { padding: 96px 0; text-align: center; }
+      /* Full-bleed alt background without the old -9999px margin hack
+         (which created a 20k+ px element on mobile). Use a pseudo-element
+         pinned to the viewport behind content. */
+      .rv2-section-alt { background: var(--bg-alt); }
+      .rv2-section-cover { padding-top: clamp(48px, 10vw, 96px); }
+      .rv2-section-cta { padding: clamp(48px, 10vw, 96px) 0; text-align: center; }
       .rv2-section-head { max-width: 720px; margin-bottom: 28px; }
 
       .rv2-eyebrow {
@@ -752,9 +759,10 @@ function V2Styles() {
         color: var(--text); margin: 0;
         font-family: 'Fraunces', 'Inter', serif; font-weight: 600;
         letter-spacing: -0.02em;
+        overflow-wrap: anywhere;
       }
-      .rv2-h1 { font-size: 44px; line-height: 1.15; margin: 18px 0 0; }
-      .rv2-h2 { font-size: 28px; line-height: 1.2; margin: 8px 0 6px; }
+      .rv2-h1 { font-size: clamp(28px, 6vw, 44px); line-height: 1.15; margin: 18px 0 0; }
+      .rv2-h2 { font-size: clamp(22px, 4.5vw, 28px); line-height: 1.2; margin: 8px 0 6px; }
 
       .rv2-prose { font-size: 16px; line-height: 1.7; color: var(--text); margin: 16px 0; }
       .rv2-prose p { margin: 0 0 14px; }
@@ -775,9 +783,10 @@ function V2Styles() {
       }
       .rv2-hdr-row {
         display: flex; align-items: center; gap: 16px;
-        padding: 14px 24px; max-width: 1200px; margin: 0 auto;
+        padding: 14px clamp(16px, 4vw, 24px); max-width: 1200px; margin: 0 auto;
         flex-wrap: wrap;
       }
+      .rv2-hdr-mid { min-width: 0; word-break: break-word; }
       .rv2-hdr-brand { display: inline-flex; align-items: center; }
       .rv2-hdr-logo { height: 28px; width: auto; }
       .rv2-hdr-mid { flex: 1; min-width: 0; }
@@ -819,7 +828,9 @@ function V2Styles() {
       /* Cover */
       .rv2-cover-row {
         display: flex; align-items: center; gap: 16px; margin-top: 12px;
+        flex-wrap: wrap;
       }
+      .rv2-cover-meta { min-width: 0; flex: 1; word-break: break-word; }
       .rv2-cover-logo {
         width: 64px; height: 64px; border-radius: 12px;
         background: rgba(255,255,255,0.05);
@@ -848,22 +859,29 @@ function V2Styles() {
 
       /* Reseller bars */
       .rv2-bars {
-        display: grid; gap: 6px; margin-top: 4px;
+        display: grid; gap: 10px; margin-top: 4px;
         padding: 16px; border: 1px solid var(--border-soft);
         border-radius: 12px; background: rgba(255,255,255,0.015);
+        min-width: 0;
       }
       .rv2-bar-row {
         display: grid;
-        grid-template-columns: 22px 180px 1fr 50px 70px;
+        grid-template-columns: 22px minmax(0, 180px) minmax(0, 1fr) 56px 80px;
         gap: 10px; align-items: center;
         font-size: 13px;
+        min-width: 0;
       }
       .rv2-bar-rank { color: var(--gold); font-weight: 600; }
-      .rv2-bar-name { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .rv2-bar-track { height: 14px; background: rgba(255,255,255,0.04); border-radius: 4px; overflow: hidden; }
+      .rv2-bar-name {
+        color: var(--text);
+        min-width: 0;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .rv2-bar-track { height: 14px; background: rgba(255,255,255,0.04); border-radius: 4px; overflow: hidden; min-width: 0; }
       .rv2-bar-fill { height: 100%; background: linear-gradient(90deg, var(--gold), var(--gold-soft)); }
       .rv2-bar-val { text-align: right; color: var(--gold-soft); font-variant-numeric: tabular-nums; }
-      .rv2-bar-asins { color: var(--text-muted); font-size: 11px; }
+      .rv2-bar-asins { color: var(--text-muted); font-size: 11px; text-align: right; }
 
       .rv2-checklist {
         margin-top: 24px; padding: 18px;
@@ -919,16 +937,19 @@ function V2Styles() {
       }
       .rv2-dossier-asins ul { list-style: none; padding: 0; margin: 0; }
       .rv2-dossier-asins li {
-        display: grid; grid-template-columns: 110px 1fr 80px;
+        display: grid; grid-template-columns: 110px minmax(0, 1fr) 80px;
         gap: 12px; align-items: baseline;
         padding: 10px 0; border-bottom: 1px solid var(--border-soft);
         font-size: 14px;
+        min-width: 0;
       }
       .rv2-asin {
         font-family: ui-monospace, SFMono-Regular, monospace;
         color: var(--gold); font-size: 12px; font-weight: 600;
+        overflow-wrap: anywhere;
+        word-break: break-all;
       }
-      .rv2-asin-title { color: var(--text); }
+      .rv2-asin-title { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
       .rv2-asin-price { text-align: right; color: var(--gold-soft); font-variant-numeric: tabular-nums; }
 
       /* CX audit */
@@ -984,14 +1005,24 @@ function V2Styles() {
       }
 
       /* Tables (benchmark + math) */
-      .rv2-table-wrap { overflow-x: auto; }
+      .rv2-table-wrap {
+        overflow-x: auto;
+        max-width: 100%;
+        -webkit-overflow-scrolling: touch;
+        margin-left: -4px;
+        margin-right: -4px;
+        padding-left: 4px;
+        padding-right: 4px;
+      }
       .rv2-table {
         width: 100%; border-collapse: collapse; font-size: 14px;
         margin: 8px 0;
+        min-width: 480px;
       }
       .rv2-table th, .rv2-table td {
         text-align: left; padding: 10px 12px;
         border-bottom: 1px solid var(--border-soft);
+        overflow-wrap: anywhere;
       }
       .rv2-table th {
         font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
@@ -1073,19 +1104,41 @@ function V2Styles() {
 
       /* Mobile */
       @media (max-width: 720px) {
-        .rv2-h1 { font-size: 30px; }
-        .rv2-h2 { font-size: 22px; }
-        .rv2-section { padding: 48px 0; }
-        .rv2-section-cover { padding-top: 60px; }
         .rv2-bar-row {
-          grid-template-columns: 22px 1fr 60px;
+          grid-template-columns: 22px minmax(0, 1fr) 60px;
           row-gap: 4px;
         }
         .rv2-bar-asins, .rv2-bar-track {
           grid-column: 1 / -1;
+          text-align: left;
         }
         .rv2-plan-grid { grid-template-columns: 1fr; }
         .rv2-dossier-asins li { grid-template-columns: 1fr; row-gap: 4px; }
+        .rv2-dossier-asins .rv2-asin-price { text-align: left; }
+        .rv2-bbpanel-bar {
+          flex-direction: column;
+          height: auto;
+        }
+        .rv2-bbpanel-brand, .rv2-bbpanel-reseller {
+          width: 100% !important;
+          min-height: 32px;
+          padding: 6px 8px;
+        }
+        .rv2-cases { grid-template-columns: 1fr; }
+        .rv2-stats-row { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+        .rv2-dossier-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+        .rv2-asin-scores { grid-template-columns: 1fr; }
+        .rv2-kpi-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+        .rv2-cover-logo { width: 56px; height: 56px; }
+        .rv2-hdr-actions .rv2-btn { padding: 7px 12px; font-size: 12px; }
+        .rv2-section-head { margin-bottom: 20px; }
+        .rv2-prose { font-size: 15px; }
+      }
+      @media (max-width: 480px) {
+        .rv2-bar-row { grid-template-columns: 20px minmax(0, 1fr) 56px; }
+        .rv2-kpi-grid, .rv2-stats-row, .rv2-dossier-grid { grid-template-columns: 1fr; }
+        .rv2-hdr-row { padding: 12px 16px; }
+        .rv2-hdr-mid { flex-basis: 100%; }
       }
 
       /* Print */
