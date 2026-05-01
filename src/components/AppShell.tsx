@@ -2,18 +2,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { LayoutDashboard, Settings, LogOut, Menu, X, Zap } from "lucide-react";
+import { LayoutDashboard, Settings, LogOut, Menu, X, Zap, Building2, Upload } from "lucide-react";
 
 const NAV = [
   { href: "/app/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  // Hidden in Phase 1 — routes still exist, will be repurposed in later phases:
-  // { href: "/app/scan", label: "New Scan", icon: Plus },
-  // { href: "/app/scan/batch", label: "Batch Scan", icon: Layers },
-  // { href: "/app/sweeps", label: "Sweeps", icon: History },
-  // { href: "/app/review", label: "Review Queue", icon: List },
-  // { href: "/app/suppliers", label: "Suppliers", icon: Handshake },
-  // { href: "/app/crm", label: "CRM", icon: Users },
-  // { href: "/app/manufacturers", label: "Manufacturers", icon: Factory },
+  { href: "/app/brands", label: "Brands", icon: Building2 },
+  { href: "/app/imports", label: "Imports", icon: Upload },
   { href: "/app/settings", label: "Settings", icon: Settings },
 ];
 
