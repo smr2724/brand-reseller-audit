@@ -31,11 +31,32 @@ interface Brand {
   new_profit: number | null;
   seven_x_multiple_value: number | null;
   disqualifier_tags: string[];
+  keepa_last_enriched_at?: string | null;
+  keepa_asin_count?: number | null;
+  keepa_unique_seller_count?: number | null;
+  keepa_brand_controlled_pct?: number | null;
+  keepa_top_seller?: string | null;
+  keepa_top_seller_share_pct?: number | null;
+  keepa_avg_offers?: number | null;
+  validation_score?: number | null;
+  enrichment_error?: string | null;
+}
+
+interface BrandAsin {
+  id: string;
+  asin: string;
+  title: string | null;
+  buy_box_seller: string | null;
+  buy_box_price: number | null;
+  offers_count: number | null;
+  fba_offers_count: number | null;
+  is_brand_controlled: boolean | null;
+  last_checked_at: string | null;
 }
 
 const STATUSES = ["new", "qualified", "disqualified", "contacted", "client"];
 
-export default function BrandDetailClient({ brand }: { brand: Brand }) {
+export default function BrandDetailClient({ brand, asins }: { brand: Brand; asins: BrandAsin[] }) {
   const router = useRouter();
   const [status, setStatus] = useState(brand.status);
   const [notes, setNotes] = useState(brand.manual_notes ?? "");
@@ -43,6 +64,26 @@ export default function BrandDetailClient({ brand }: { brand: Brand }) {
   const [newTag, setNewTag] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichErr, setEnrichErr] = useState<string | null>(null);
+
+  async function runEnrichment() {
+    setEnriching(true);
+    setEnrichErr(null);
+    try {
+      const res = await fetch(`/api/enrichment/brands/${brand.id}/keepa`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setEnrichErr(data.error ?? `HTTP ${res.status}`);
+      } else {
+        router.refresh();
+      }
+    } catch (e) {
+      setEnrichErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setEnriching(false);
+    }
+  }
 
   async function patch(payload: Record<string, unknown>) {
     setSaving(true);
@@ -186,6 +227,146 @@ export default function BrandDetailClient({ brand }: { brand: Brand }) {
           <div className="text-sm text-[var(--text-muted)]">Coming in Phase 6.</div>
         </Card>
       </div>
+
+      <div className="mt-6">
+        <KeepaSection
+          brand={brand}
+          asins={asins}
+          enriching={enriching}
+          enrichErr={enrichErr}
+          onEnrich={runEnrichment}
+        />
+      </div>
+    </div>
+  );
+}
+
+function KeepaSection({
+  brand,
+  asins,
+  enriching,
+  enrichErr,
+  onEnrich,
+}: {
+  brand: Brand;
+  asins: BrandAsin[];
+  enriching: boolean;
+  enrichErr: string | null;
+  onEnrich: () => void;
+}) {
+  const score = brand.validation_score;
+  const scoreColor = score == null ? "#666" : score >= 70 ? "#22c55e" : score >= 40 ? "#eab308" : "#ef4444";
+  const last = brand.keepa_last_enriched_at ? new Date(brand.keepa_last_enriched_at).toLocaleString() : null;
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Keepa validation</div>
+          <div className="text-sm text-[var(--text-muted)] mt-1">
+            {last ? `Last enriched ${last}` : "Not yet enriched"}
+          </div>
+        </div>
+        <button className="btn" onClick={onEnrich} disabled={enriching}>
+          {enriching ? "Enriching…" : last ? "Re-enrich" : "Enrich now"}
+        </button>
+      </div>
+
+      {(brand.enrichment_error || enrichErr) && (
+        <div className="mb-4 p-3 rounded border" style={{ background: "#2a1415", borderColor: "#4a1e21", color: "#f87171" }}>
+          <div className="text-sm font-medium">Enrichment error</div>
+          <div className="text-xs mt-1">{enrichErr ?? brand.enrichment_error}</div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
+        <Tile label="ASINs found" value={brand.keepa_asin_count ?? "—"} />
+        <Tile label="Unique sellers" value={brand.keepa_unique_seller_count ?? "—"} />
+        <Tile
+          label="Brand controlled"
+          value={brand.keepa_brand_controlled_pct == null ? "—" : `${Math.round(brand.keepa_brand_controlled_pct * 100)}%`}
+        />
+        <Tile
+          label="Top seller"
+          value={brand.keepa_top_seller ?? "—"}
+          sub={brand.keepa_top_seller_share_pct != null ? `${Math.round(brand.keepa_top_seller_share_pct * 100)}%` : undefined}
+        />
+        <Tile
+          label="Avg offers"
+          value={brand.keepa_avg_offers != null ? brand.keepa_avg_offers.toFixed(1) : "—"}
+        />
+      </div>
+
+      <div className="mb-5">
+        <div className="flex items-baseline justify-between mb-2">
+          <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Validation score</div>
+          <div className="text-3xl font-semibold" style={{ color: scoreColor }}>
+            {score == null ? "—" : Math.round(score)}
+          </div>
+        </div>
+        <div className="h-2 rounded bg-[var(--bg-3)] overflow-hidden">
+          <div
+            className="h-full transition-all"
+            style={{ width: `${score ?? 0}%`, background: scoreColor }}
+          />
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-2">ASINs</div>
+        {asins.length === 0 ? (
+          <div className="text-sm text-[var(--text-muted)]">No ASIN data yet.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[var(--text-muted)] border-b border-[var(--border-soft)]">
+                  <th className="py-2 pr-3">ASIN</th>
+                  <th className="py-2 pr-3">Title</th>
+                  <th className="py-2 pr-3">Buy box</th>
+                  <th className="py-2 pr-3">Price</th>
+                  <th className="py-2 pr-3">Offers</th>
+                </tr>
+              </thead>
+              <tbody>
+                {asins.map((a) => (
+                  <tr key={a.id} className="border-b border-[var(--border-soft)]">
+                    <td className="py-2 pr-3 font-mono text-xs">
+                      <a
+                        href={`https://www.amazon.com/dp/${a.asin}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="hover:underline"
+                      >
+                        {a.asin}
+                      </a>
+                    </td>
+                    <td className="py-2 pr-3 max-w-[360px] truncate" title={a.title ?? ""}>{a.title ?? "—"}</td>
+                    <td className="py-2 pr-3">
+                      <span style={{ color: a.is_brand_controlled ? "#22c55e" : "#f87171" }}>
+                        {a.is_brand_controlled ? "✓" : "✗"}
+                      </span>{" "}
+                      {a.buy_box_seller ?? "—"}
+                    </td>
+                    <td className="py-2 pr-3">{a.buy_box_price != null ? `$${a.buy_box_price.toFixed(2)}` : "—"}</td>
+                    <td className="py-2 pr-3">{a.offers_count ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Tile({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
+  return (
+    <div className="rounded-lg p-3 border border-[var(--border-soft)] bg-[var(--bg-2)]">
+      <div className="text-[11px] uppercase tracking-wide text-[var(--text-muted)]">{label}</div>
+      <div className="text-base font-medium mt-1 truncate" title={String(value)}>{value}</div>
+      {sub && <div className="text-[11px] text-[var(--text-muted)] mt-1">{sub}</div>}
     </div>
   );
 }
