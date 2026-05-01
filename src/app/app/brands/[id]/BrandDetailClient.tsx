@@ -1,7 +1,8 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { formatNumber, formatMoney } from "@/lib/utils";
+import { formatNumber, formatMoney, formatDateTime } from "@/lib/utils";
 
 interface Brand {
   id: string;
@@ -237,6 +238,10 @@ export default function BrandDetailClient({ brand, asins }: { brand: Brand; asin
           onEnrich={runEnrichment}
         />
       </div>
+
+      <div className="mt-6">
+        <ReportsSection brandId={brand.id} brandName={brand.name} />
+      </div>
     </div>
   );
 }
@@ -369,6 +374,131 @@ function Tile({ label, value, sub }: { label: string; value: React.ReactNode; su
       {sub && <div className="text-[11px] text-[var(--text-muted)] mt-1">{sub}</div>}
     </div>
   );
+}
+
+interface BrandReportRow {
+  id: string;
+  status: string;
+  generated_at: string | null;
+  created_at: string;
+  error_message: string | null;
+}
+
+function ReportsSection({ brandId, brandName }: { brandId: string; brandName: string }) {
+  const [reports, setReports] = useState<BrandReportRow[] | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const res = await fetch(`/api/reports?brand_id=${brandId}`, { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) setReports(data.reports ?? []);
+    } catch {}
+  }
+
+  useEffect(() => {
+    load();
+    // Poll while anything is generating
+    const t = setInterval(() => {
+      if ((reports ?? []).some((r) => r.status === "generating")) load();
+    }, 4000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brandId, reports?.length]);
+
+  async function generate() {
+    setGenerating(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/reports/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brand_id: brandId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setMsg(`Failed: ${data.error ?? "unknown"}`);
+      } else {
+        setMsg("Generation started.");
+        await load();
+      }
+    } catch (e) {
+      setMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  const list = reports ?? [];
+  const hasAny = list.length > 0;
+
+  return (
+    <div className="card p-4">
+      <div className="flex items-baseline justify-between mb-3">
+        <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Reports</div>
+        {hasAny && (
+          <button className="btn btn-ghost text-xs" onClick={generate} disabled={generating}>
+            {generating ? "Starting…" : "Regenerate"}
+          </button>
+        )}
+      </div>
+
+      {!hasAny ? (
+        <div className="flex flex-col items-start gap-3">
+          <div className="text-sm text-[var(--text-muted)]">
+            No reports yet for {brandName}. Generate a Channel Ownership Audit — a brand-specific PDF
+            in the webinar narrative arc, ready to email.
+          </div>
+          <button className="btn" onClick={generate} disabled={generating}>
+            {generating ? "Starting…" : "Generate Channel Ownership Audit"}
+          </button>
+          {msg && <div className="text-xs text-[var(--text-muted)]">{msg}</div>}
+        </div>
+      ) : (
+        <div>
+          <ul className="divide-y divide-[var(--border-soft)]">
+            {list.map((r) => (
+              <li key={r.id} className="py-2 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium truncate">
+                    <Link href={`/app/reports/${r.id}`} className="hover:text-[var(--accent)]">
+                      Channel Ownership Audit
+                    </Link>
+                  </div>
+                  <div className="text-xs text-[var(--text-muted)]">
+                    {formatDateTime(r.generated_at ?? r.created_at)}
+                  </div>
+                  {r.status === "failed" && r.error_message && (
+                    <div className="text-xs text-[#f87171] mt-1">{r.error_message}</div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <ReportStatusBadge status={r.status} />
+                  {r.status === "completed" && (
+                    <a className="btn btn-ghost text-xs" href={`/api/reports/${r.id}/download`}>
+                      Download
+                    </a>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+          {msg && <div className="text-xs text-[var(--text-muted)] mt-2">{msg}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReportStatusBadge({ status }: { status: string }) {
+  const styles: Record<string, string> = {
+    generating: "bg-[#2a2410] text-[#facc15] border-[#4a3e1e]",
+    completed: "bg-[#102a14] text-[#4ade80] border-[#1e4a28]",
+    failed: "bg-[#2a1415] text-[#f87171] border-[#4a1e21]",
+  };
+  const cls = styles[status] ?? "bg-[var(--bg-3)] text-[var(--text-muted)] border-[var(--border)]";
+  return <span className={`px-2 py-1 rounded text-[10px] border ${cls}`}>{status}</span>;
 }
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {

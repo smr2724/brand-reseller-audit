@@ -2,13 +2,14 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Settings, LogOut, Menu, X, Zap, Building2, Upload, ClipboardCheck, Database } from "lucide-react";
+import { LayoutDashboard, Settings, LogOut, Menu, X, Zap, Building2, Upload, ClipboardCheck, Database, FileText } from "lucide-react";
 
 const NAV = [
   { href: "/app/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/app/brands", label: "Brands", icon: Building2 },
   { href: "/app/review", label: "Review", icon: ClipboardCheck },
   { href: "/app/enrichment", label: "Enrichment", icon: Database },
+  { href: "/app/reports", label: "Reports", icon: FileText },
   { href: "/app/imports", label: "Imports", icon: Upload },
   { href: "/app/settings", label: "Settings", icon: Settings },
 ];
