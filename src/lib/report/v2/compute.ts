@@ -10,7 +10,7 @@
  */
 import type { BrandEnrichmentBundle } from "@/lib/enrichment";
 import type { BrandForReport } from "@/lib/report/narrative";
-import type { CompetitorSnapshot } from "./enrich";
+import type { CompetitorSnapshot, KeepaAsinDetail } from "./enrich";
 import type {
   CompetitorRow,
   CxAuditAsinScore,
@@ -120,39 +120,80 @@ export function computeDossierBase(
 
 export function computeCxAuditBase(
   bundle: BrandEnrichmentBundle,
+  asinDetails: KeepaAsinDetail[] = [],
 ): Omit<NarrativeCxAudit, "whats_broken"> {
   const dfs = bundle.dataforseo;
-  // We don't currently capture per-ASIN bullet/image/A+/video stats in
-  // the bundle, so listing scores are a heuristic from what we do have:
-  // offers_count (lower = healthier listing), reviews proxy via title
-  // present, and brand_controlled flag.
+  const detailsByAsin = new Map<string, KeepaAsinDetail>();
+  for (const d of asinDetails) detailsByAsin.set(d.asin, d);
+
+  // Score 0-100. When we have real listing fields from Keepa /product,
+  // each piece of the listing pulls weight:
+  //   • images       (≤6: scaled out of 25)
+  //   • bullets      (≤5 features: scaled out of 15)
+  //   • A+ / video   (10 each)
+  //   • rating       (out of 20: ≥4.5 = full, <3.5 = 0)
+  //   • reviews      (log-scaled to 20)
+  // When the listing fields are null (no /product data), fall back to
+  // the prior heuristic so existing reports don't regress.
   const asin_scores: CxAuditAsinScore[] = (bundle.keepa.asins ?? [])
     .slice(0, 3)
     .map((a) => {
-      // Heuristic 0-100. Brand-controlled +50, low offer count +25,
-      // title present +15, has price +10. Best we can do without listing
-      // crawler data — labelled as such in the renderer.
+      const d = detailsByAsin.get(a.asin) ?? null;
+      const have = d != null;
       let score = 0;
-      if (a.is_brand_controlled === true) score += 50;
-      else if (a.is_brand_controlled === false) score += 10;
-      if ((a.offers_count ?? 99) <= 3) score += 25;
-      else if ((a.offers_count ?? 99) <= 6) score += 12;
-      if (a.title && a.title.length > 10) score += 15;
-      if (a.buy_box_price != null) score += 10;
+      let bullets: number | null = null;
+      let images: number | null = null;
+      let hasAPlus: boolean | null = null;
+      let hasVideo: boolean | null = null;
+      let reviews: number | null = null;
+      let rating: number | null = null;
+
+      if (have) {
+        images = d!.images_count;
+        bullets = d!.features_count;
+        hasAPlus = d!.has_a_plus;
+        hasVideo = d!.has_video;
+        reviews = d!.review_count;
+        rating = d!.rating;
+
+        if (images != null) score += Math.min(25, Math.round((images / 6) * 25));
+        if (bullets != null) score += Math.min(15, Math.round((bullets / 5) * 15));
+        if (hasAPlus === true) score += 10;
+        if (hasVideo === true) score += 10;
+        if (rating != null) {
+          if (rating >= 4.5) score += 20;
+          else if (rating >= 4.0) score += 14;
+          else if (rating >= 3.5) score += 7;
+        }
+        if (reviews != null) {
+          // log10(reviews) capped at 4 (10000 reviews) → 20 points.
+          const r = Math.max(0, Math.min(4, Math.log10(Math.max(1, reviews))));
+          score += Math.round((r / 4) * 20);
+        }
+      } else {
+        // Legacy heuristic when /product data is unavailable.
+        if (a.is_brand_controlled === true) score += 50;
+        else if (a.is_brand_controlled === false) score += 10;
+        if ((a.offers_count ?? 99) <= 3) score += 25;
+        else if ((a.offers_count ?? 99) <= 6) score += 12;
+        if (a.title && a.title.length > 10) score += 15;
+        if (a.buy_box_price != null) score += 10;
+      }
+
       return {
         asin: a.asin,
         title: a.title,
-        score: score || null,
-        bullets: null,
-        images: null,
-        has_a_plus: null,
-        has_video: null,
-        reviews: null,
-        rating: null,
+        score: score > 0 ? Math.min(100, score) : null,
+        bullets,
+        images,
+        has_a_plus: hasAPlus,
+        has_video: hasVideo,
+        reviews,
+        rating,
       };
     });
 
-  const top_keywords = (dfs?.top_keywords ?? []).slice(0, 5).map((k) => ({
+  const top_keywords = (dfs?.top_keywords ?? []).slice(0, 12).map((k) => ({
     keyword: k.keyword,
     search_volume: k.search_volume ?? null,
   }));
@@ -221,25 +262,34 @@ export interface MathContext {
   current_profit: number | null;
   keepaDate: string | null;
   assumptions: ReportAssumptions;
+  /** Source string for the revenue line. Defaults to "Keepa, <date>". */
+  revenueSource?: string;
+  /** When revenue is estimator-derived, append this footnote to math.notes. */
+  revenueFootnote?: string | null;
 }
 
 export function computeMath(ctx: MathContext): NarrativeMath {
   const lines: MathLine[] = [];
   const a = ctx.assumptions;
   const revenue = ctx.trailing_12mo_revenue;
+  // Bug fix: brand_controlled_pct null vs 0 used to coerce to null down
+  // the chain, zeroing reseller_revenue. Treat null = unknown (skip the
+  // calc) and 0 = the brand controls 0% of buy boxes (full revenue is
+  // reseller-controlled).
   const brandPct =
     a.brand_controlled_pct_override != null
       ? a.brand_controlled_pct_override
       : ctx.brand_controlled_pct;
 
   const keepaSrc = ctx.keepaDate ? `Keepa, ${ctx.keepaDate.slice(0, 10)}` : "Keepa";
+  const revenueSrc = ctx.revenueSource ?? keepaSrc;
 
   lines.push({
     key: "revenue",
     label: "Trailing 12mo Amazon revenue",
     value: revenue,
     format: "money",
-    source: keepaSrc,
+    source: revenueSrc,
   });
 
   lines.push({

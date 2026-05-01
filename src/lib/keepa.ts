@@ -137,6 +137,20 @@ export interface KeepaProductDetails {
   fba_offers_count: number;
   offers: KeepaOffer[];
   last_updated?: string;
+  // Listing-health + revenue-estimator fields (from /product stats=365)
+  sales_rank_avg365?: number | null;
+  sales_rank_current?: number | null;
+  buy_box_avg365?: number | null;
+  buy_box_current?: number | null;
+  category_tree?: { catId: number; name: string }[] | null;
+  product_group?: string | null;
+  root_category?: number | null;
+  images_count?: number | null;
+  rating?: number | null;          // 0..5
+  review_count?: number | null;
+  features_count?: number | null;
+  has_video?: boolean | null;
+  has_a_plus?: boolean | null;
   raw?: any;
 }
 
@@ -301,7 +315,9 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
     const { json } = await keepaFetch("/product", {
       asin: chunk.join(","),
       offers: 20,
-      stats: 30,
+      // 365-day stats power both the buy-box price avg used by the
+      // revenue estimator and the listing-health snapshot.
+      stats: 365,
       "buybox": 1,
     });
     const products = Array.isArray(json?.products) ? json.products : [];
@@ -315,6 +331,73 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
       const stats = p?.stats ?? {};
       const total = Number(stats?.offerCountNew ?? offers.length ?? 0);
       const fba = offers.filter((o) => o.is_fba).length;
+
+      // Keepa stats CSV indices we use:
+      //   3  = SALES_RANK
+      //   16 = RATING (× 10, so divide by 10 for display)
+      //   17 = COUNT_REVIEWS
+      //   18 = BUY_BOX_SHIPPING (price in cents, includes shipping)
+      const cur: any[] = Array.isArray(stats?.current) ? stats.current : [];
+      const avg365: any[] = Array.isArray(stats?.avg365) ? stats.avg365 : [];
+      const salesRankCurrent =
+        typeof cur[3] === "number" && cur[3] > 0 ? cur[3] : null;
+      const salesRankAvg365 =
+        typeof avg365[3] === "number" && avg365[3] > 0 ? avg365[3] : null;
+      const bbCurrentCents =
+        typeof cur[18] === "number" && cur[18] > 0 ? cur[18] : null;
+      const bbAvg365Cents =
+        typeof avg365[18] === "number" && avg365[18] > 0 ? avg365[18] : null;
+      const ratingRaw = typeof cur[16] === "number" && cur[16] > 0 ? cur[16] : null;
+      const reviewsRaw = typeof cur[17] === "number" && cur[17] > 0 ? cur[17] : null;
+
+      // Image count: Keepa returns `imagesCSV` as comma-separated relative
+      // paths; sometimes also `images` (already an array of ids), or
+      // `imagesCount`. Use whichever shape we get back.
+      let imagesCount: number | null = null;
+      if (typeof p?.imagesCount === "number") imagesCount = p.imagesCount;
+      else if (Array.isArray(p?.images)) imagesCount = p.images.length;
+      else if (typeof p?.imagesCSV === "string" && p.imagesCSV.length) {
+        imagesCount = p.imagesCSV.split(",").filter(Boolean).length;
+      }
+
+      let featuresCount: number | null = null;
+      if (Array.isArray(p?.features)) featuresCount = p.features.length;
+      else if (typeof p?.featuresCSV === "string" && p.featuresCSV.length) {
+        featuresCount = p.featuresCSV.split(",").filter(Boolean).length;
+      }
+
+      // Video flag: Keepa exposes `videoCount` (number) on /product when
+      // requested, and historically `videos` (array). Either truthy = video.
+      const videosArr = Array.isArray(p?.videos) ? p.videos : null;
+      const hasVideo =
+        typeof p?.videoCount === "number" && p.videoCount > 0
+          ? true
+          : videosArr && videosArr.length > 0
+          ? true
+          : null;
+
+      // A+ content: Keepa returns `aPlus`/`aPlusContent` with various
+      // shapes (boolean, number, object, array). Treat any truthy/non-empty
+      // value as A+ present. If the field is missing from the response,
+      // leave null.
+      const aPlusRaw = (p as any)?.aPlus ?? (p as any)?.aPlusContent;
+      let hasAPlus: boolean | null = null;
+      if (typeof aPlusRaw === "boolean") hasAPlus = aPlusRaw;
+      else if (typeof aPlusRaw === "number") hasAPlus = aPlusRaw > 0;
+      else if (Array.isArray(aPlusRaw)) hasAPlus = aPlusRaw.length > 0;
+      else if (aPlusRaw && typeof aPlusRaw === "object")
+        hasAPlus = Object.keys(aPlusRaw).length > 0;
+
+      const categoryTree = Array.isArray(p?.categoryTree)
+        ? p.categoryTree
+            .map((c: any) =>
+              c && typeof c.catId === "number"
+                ? { catId: c.catId, name: c?.name ?? "" }
+                : null,
+            )
+            .filter((c: any): c is { catId: number; name: string } => !!c)
+        : null;
+
       const details: KeepaProductDetails = {
         asin,
         title: p?.title,
@@ -328,6 +411,21 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
         fba_offers_count: fba,
         offers,
         last_updated: p?.lastUpdate ? new Date((p.lastUpdate + 21564000) * 60 * 1000).toISOString() : new Date().toISOString(),
+        sales_rank_avg365: salesRankAvg365,
+        sales_rank_current: salesRankCurrent,
+        buy_box_avg365: bbAvg365Cents != null ? bbAvg365Cents / 100 : null,
+        buy_box_current: bbCurrentCents != null ? bbCurrentCents / 100 : null,
+        category_tree: categoryTree,
+        product_group:
+          typeof p?.productGroup === "string" ? p.productGroup : null,
+        root_category:
+          typeof p?.rootCategory === "number" ? p.rootCategory : null,
+        images_count: imagesCount,
+        rating: ratingRaw != null ? ratingRaw / 10 : null,
+        review_count: reviewsRaw,
+        features_count: featuresCount,
+        has_video: hasVideo,
+        has_a_plus: hasAPlus,
         raw: { tokensLeft, lastPriceChange: p?.lastPriceChange },
       };
       PRODUCT_CACHE.set(asin, { t: Date.now(), v: details });

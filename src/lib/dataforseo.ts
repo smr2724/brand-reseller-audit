@@ -223,6 +223,53 @@ export async function amazonSerpLive(keyword: string, opts: { depth?: number; lo
 }
 
 // -----------------------------------------------------------------------------
+// Google Ads Search Volume — provides 12-month monthly_searches[] history
+// for keywords. Used to derive branded_trend_pct (last_3 vs prior_3).
+// -----------------------------------------------------------------------------
+export interface GoogleAdsMonthlySearch {
+  year: number;
+  month: number;
+  search_volume: number | null;
+}
+
+export interface GoogleAdsKeywordVolume {
+  keyword: string;
+  search_volume: number | null;
+  monthly_searches: GoogleAdsMonthlySearch[];
+}
+
+export async function googleAdsSearchVolumeLive(
+  keywords: string[],
+  opts: { locationCode?: number } = {},
+): Promise<GoogleAdsKeywordVolume[]> {
+  if (!keywords.length) return [];
+  const body = [{
+    keywords: keywords.slice(0, 1000),
+    location_code: opts.locationCode ?? 2840, // US
+    language_code: "en",
+    sort_by: "search_volume",
+  }];
+  const out = await dfs<any>("/v3/keywords_data/google_ads/search_volume/live", body);
+  const result = out?.tasks?.[0]?.result ?? [];
+  const list: GoogleAdsKeywordVolume[] = [];
+  for (const r of result) {
+    const kw = r?.keyword;
+    if (!kw) continue;
+    const monthlyRaw = Array.isArray(r?.monthly_searches) ? r.monthly_searches : [];
+    list.push({
+      keyword: String(kw),
+      search_volume: typeof r?.search_volume === "number" ? r.search_volume : null,
+      monthly_searches: monthlyRaw.map((m: any) => ({
+        year: Number(m?.year ?? 0),
+        month: Number(m?.month ?? 0),
+        search_volume: typeof m?.search_volume === "number" ? m.search_volume : null,
+      })),
+    });
+  }
+  return list;
+}
+
+// -----------------------------------------------------------------------------
 // Google SERP (live) — used for supplier discovery on the open web.
 // -----------------------------------------------------------------------------
 export interface GoogleSerpItem {

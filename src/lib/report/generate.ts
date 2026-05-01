@@ -86,6 +86,9 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       contactEmail,
       calendlyUrl,
       generatedAt,
+      asinDetails: enrichResult.asinDetails,
+      revenueEstimate: enrichResult.revenueEstimate,
+      productCategoryHints: enrichResult.productCategoryHints,
     });
     logStep(reportId, currentStep, t);
 

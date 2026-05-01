@@ -16,7 +16,8 @@ import {
   computeMath,
   computeResellerReality,
 } from "./compute";
-import type { CompetitorSnapshot } from "./enrich";
+import type { CompetitorSnapshot, KeepaAsinDetail } from "./enrich";
+import type { RevenueEstimate } from "@/lib/enrichment/revenue-estimator";
 import {
   llmCompetitorLine,
   llmCoverHeadline,
@@ -46,6 +47,9 @@ export interface AssembleInput {
   calendlyUrl: string | null;
   generatedAt: Date;
   assumptions?: ReportAssumptions;
+  asinDetails?: KeepaAsinDetail[];
+  revenueEstimate?: RevenueEstimate | null;
+  productCategoryHints?: string[];
 }
 
 export interface AssembleOutput {
@@ -59,23 +63,48 @@ export interface AssembleOutput {
 export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> {
   const { brand, bundle, competitors, brandLogoUrl, contactEmail, calendlyUrl, generatedAt } = input;
   const assumptions: ReportAssumptions = { ...DEFAULT_ASSUMPTIONS, ...(input.assumptions ?? {}) };
+  const asinDetails = input.asinDetails ?? [];
+  const revenueEstimate = input.revenueEstimate ?? null;
 
   // 1. Pure compute (no I/O).
   const reality = computeResellerReality(bundle);
   const dossierBase = computeDossierBase(bundle);
-  const cxBase = computeCxAuditBase(bundle);
+  const cxBase = computeCxAuditBase(bundle, asinDetails);
   const benchmarkBase = computeCompetitorBenchmark(brand, bundle, competitors, cxBase);
 
   // 2. Math — uses assumptions + brand row + Keepa freshness.
-  const trailing12 =
+  // Revenue precedence:
+  //   1. brand.trailing_12_months    (from upload / deal terms)
+  //   2. brand.est_monthly_revenue × 12 (legacy import field)
+  //   3. revenueEstimate.total_ttm_revenue (Keepa BSR + price)
+  // This way real numbers always win over the estimator. The estimator
+  // also supplies the source string + footnote when it is the basis.
+  const importedTrailing12 =
     brand.trailing_12_months ??
     (brand.est_monthly_revenue != null ? Number(brand.est_monthly_revenue) * 12 : null);
+  const usingEstimate = importedTrailing12 == null && revenueEstimate?.total_ttm_revenue != null;
+  const trailing12 = importedTrailing12 ?? revenueEstimate?.total_ttm_revenue ?? null;
+
+  const revenueSource = usingEstimate
+    ? revenueEstimate?.source_note ?? "Keepa salesRank+price · 365-day avg"
+    : importedTrailing12 != null
+    ? "Imported / deal terms"
+    : bundle.keepa.last_enriched_at
+    ? `Keepa, ${bundle.keepa.last_enriched_at.slice(0, 10)}`
+    : "Keepa";
+
   const math: NarrativeMath = computeMath({
     trailing_12mo_revenue: trailing12,
     brand_controlled_pct: bundle.keepa.brand_controlled_pct,
     current_profit: brand.current_profit,
     keepaDate: bundle.keepa.last_enriched_at,
     assumptions,
+    revenueSource,
+    revenueFootnote:
+      usingEstimate
+        ? revenueEstimate?.methodology_footnote ??
+          "Estimate from Keepa BSR + buy-box price. Replace with seller's actual TTM in deal terms."
+        : null,
   });
 
   // Annual leak for the cover headline = the "delta_profit" line.
@@ -133,7 +162,12 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     one_liner: competitorLine,
   };
 
-  const finalMath: NarrativeMath = { ...math, notes: mathNotes };
+  // Append the revenue-estimator footnote when revenue came from the
+  // Keepa BSR estimator rather than imported deal terms.
+  const finalNotes = usingEstimate && revenueEstimate?.methodology_footnote
+    ? `${mathNotes}\n\nRevenue note: ${revenueEstimate.methodology_footnote}`.trim()
+    : mathNotes;
+  const finalMath: NarrativeMath = { ...math, notes: finalNotes };
 
   // 5. Top-level NarrativeV2.
   const narrative: NarrativeV2 = {

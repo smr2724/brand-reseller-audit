@@ -14,9 +14,11 @@ import {
   amazonRelatedKeywords,
   amazonBulkSearchVolume,
   amazonSerpLive,
+  googleAdsSearchVolumeLive,
   isDataForSEOConfigured,
   type DfsKeyword,
   type DfsProduct,
+  type GoogleAdsMonthlySearch,
 } from "@/lib/dataforseo";
 
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -39,6 +41,10 @@ export interface EnrichDfsInput {
   brand_id: string;
   brand_name: string;
   user_id: string;
+  /** Optional category-seed phrases (e.g. "makeup remover wipes") used
+   * to pull related_keywords beyond just the brand name. Inferred from
+   * the brand's most-common ASIN titles upstream. */
+  category_seeds?: string[];
 }
 
 // =============================================================
@@ -218,6 +224,7 @@ export async function enrichBrandWithDataForSeo(
   input: EnrichDfsInput,
 ): Promise<DataForSeoSnapshot> {
   const { brand_id, brand_name, user_id } = input;
+  const category_seeds = input.category_seeds ?? [];
   const captured_at = new Date().toISOString();
 
   if (!isDataForSEOConfigured()) {
@@ -226,19 +233,32 @@ export async function enrichBrandWithDataForSeo(
 
   let snapshot: DataForSeoSnapshot;
   try {
-    // 1. Pull related keywords + branded volumes.
-    const keywords = await fetchBrandKeywords(admin, brand_name);
-    const branded = brandedFilter(keywords, brand_name);
+    // 1. Pull related keywords seeded with the brand name AND with any
+    // category-seed phrases inferred from the catalog (e.g. "makeup
+    // remover wipes" for World Amenities). Branded volume is computed
+    // only from the brand-seeded set; category seeds are merged in to
+    // expand top_keywords beyond a single branded search row.
+    const brandedKws = await fetchBrandKeywords(admin, brand_name);
+    const branded = brandedFilter(brandedKws, brand_name);
     const branded_search_volume = branded.reduce(
       (a, k) => a + (typeof k.search_volume === "number" ? k.search_volume : 0),
       0,
     );
 
-    const top_keywords = (branded.length ? branded : keywords)
-      .slice()
-      .sort((a, b) => (b.search_volume ?? 0) - (a.search_volume ?? 0))
-      .slice(0, MAX_KEYWORDS)
-      .map((k) => ({ keyword: k.keyword, search_volume: k.search_volume }));
+    const categoryKws: DfsKeyword[] = [];
+    for (const seed of category_seeds.slice(0, 2)) {
+      try {
+        const kws = await fetchCategoryKeywords(admin, seed);
+        for (const k of kws) categoryKws.push(k);
+      } catch (e) {
+        console.warn("[dfs] category-seed related_keywords failed:", seed, e);
+      }
+    }
+
+    // Merge → dedupe → take top 12 by search_volume. Tag each as
+    // "branded" or "category" so the renderer can group/colour them.
+    const merged = mergeAndTag(branded, categoryKws, brand_name);
+    const top_keywords = merged.slice(0, MAX_KEYWORDS);
 
     // 2. Pull SERP for the top branded keywords (budget capped).
     const serpKeywords = top_keywords
@@ -255,11 +275,14 @@ export async function enrichBrandWithDataForSeo(
     const serp_positions = flattenSerpPositions(serpByKeyword, brand_name);
     const organic_traffic_value = estimateTrafficValue(branded);
 
-    // 3. Trend — DataForSEO volumes are not historical here, so we fall back
-    // to comparing to the most recent prior brand_search_metrics row.
-    const branded_trend_pct = await computeTrendPct(
+    // 3. Trend — pull Google Ads monthly_searches[] for the brand
+    // keyword and compute (last_3 − prior_3) / prior_3. This is the
+    // authoritative number the report cites; the prior brand_search_metrics
+    // delta is a fallback for when Google Ads has no data on the brand.
+    const branded_trend_pct = await computeBrandedTrendPct(
       admin,
       brand_id,
+      brand_name,
       branded_search_volume,
     );
 
@@ -330,6 +353,114 @@ async function computeTrendPct(
   } catch {
     return null;
   }
+}
+
+/**
+ * Pull related keywords for a category-seed phrase (e.g. "makeup remover
+ * wipes"). Cached cross-user for 30 days under a `dfs:catkw:<seed>` key
+ * so different brands in the same category share the lookup.
+ */
+async function fetchCategoryKeywords(
+  admin: SupabaseClient<any, any, any> | null,
+  seed: string,
+): Promise<DfsKeyword[]> {
+  const key = `dfs:catkw:${seed.toLowerCase()}`;
+  if (admin) {
+    const cached = await cacheGet<DfsKeyword[]>(admin, key);
+    if (cached) return cached;
+  }
+  let kws: DfsKeyword[] = [];
+  try {
+    kws = await amazonRelatedKeywords(seed, { limit: 60 });
+  } catch {
+    try {
+      kws = await amazonBulkSearchVolume([seed]);
+    } catch {
+      kws = [];
+    }
+  }
+  if (admin) await cachePut(admin, key, kws);
+  return kws;
+}
+
+function mergeAndTag(
+  branded: DfsKeyword[],
+  category: DfsKeyword[],
+  brandName: string,
+): { keyword: string; search_volume: number | null; category?: "branded" | "category" }[] {
+  const seen = new Map<string, { keyword: string; search_volume: number | null; category: "branded" | "category" }>();
+  for (const k of branded) {
+    const key = k.keyword.toLowerCase();
+    if (!seen.has(key)) {
+      seen.set(key, { keyword: k.keyword, search_volume: k.search_volume, category: "branded" });
+    }
+  }
+  for (const k of category) {
+    const key = k.keyword.toLowerCase();
+    // Skip phrases that are essentially the brand name; they're already
+    // counted on the branded side.
+    if (key.includes(brandName.toLowerCase())) continue;
+    if (!seen.has(key)) {
+      seen.set(key, { keyword: k.keyword, search_volume: k.search_volume, category: "category" });
+    }
+  }
+  return Array.from(seen.values()).sort(
+    (a, b) => (b.search_volume ?? 0) - (a.search_volume ?? 0),
+  );
+}
+
+/**
+ * Compute (last_3_avg − prior_3_avg) / prior_3_avg from Google Ads
+ * monthly_searches[]. Returns the trend as a percentage rounded to 1
+ * decimal place (e.g. 12.4 means +12.4%). Falls back to the prior
+ * brand_search_metrics snapshot when Google Ads returns no usable
+ * history for the brand keyword.
+ */
+async function computeBrandedTrendPct(
+  admin: SupabaseClient<any, any, any>,
+  brandId: string,
+  brandName: string,
+  currentVolume: number,
+): Promise<number | null> {
+  try {
+    const series = await googleAdsSearchVolumeLive([brandName]);
+    const months = pickMonthlySeries(series, brandName);
+    if (months.length >= 6) {
+      const sorted = months
+        .slice()
+        .sort((a, b) => (b.year * 12 + b.month) - (a.year * 12 + a.month));
+      const last3 = sorted.slice(0, 3);
+      const prior3 = sorted.slice(3, 6);
+      const last3avg = avg(last3.map((m) => m.search_volume ?? 0));
+      const prior3avg = avg(prior3.map((m) => m.search_volume ?? 0));
+      if (prior3avg > 0) {
+        return Math.round(((last3avg - prior3avg) / prior3avg) * 1000) / 10;
+      }
+      // prior_3_avg = 0 with last_3_avg > 0 → effectively new demand.
+      // Returning a number isn't meaningful (divide by zero), so fall
+      // back rather than claim "+infinity".
+    }
+  } catch (e) {
+    console.warn("[dfs] google_ads search_volume failed:", e);
+  }
+  // Fallback: snapshot-vs-snapshot delta.
+  return computeTrendPct(admin, brandId, currentVolume);
+}
+
+function pickMonthlySeries(
+  series: { keyword: string; monthly_searches: GoogleAdsMonthlySearch[] }[],
+  brandName: string,
+): GoogleAdsMonthlySearch[] {
+  const target = brandName.toLowerCase().trim();
+  const exact = series.find((s) => s.keyword.toLowerCase().trim() === target);
+  if (exact?.monthly_searches?.length) return exact.monthly_searches;
+  const partial = series.find((s) => s.keyword.toLowerCase().includes(target));
+  return partial?.monthly_searches ?? [];
+}
+
+function avg(xs: number[]): number {
+  if (!xs.length) return 0;
+  return xs.reduce((a, b) => a + b, 0) / xs.length;
 }
 
 function emptySnapshot(error: string | null): DataForSeoSnapshot {

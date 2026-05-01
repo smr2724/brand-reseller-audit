@@ -313,24 +313,46 @@ function fallbackCxBroken(
   brand: BrandForReport,
 ): string[] {
   const out: string[] = [];
-  const lowScore = cx.asin_scores.find((a) => (a.score ?? 100) < 60);
-  if (lowScore) {
+  // Surface concrete listing problems from the per-ASIN scorecard.
+  const lowImages = cx.asin_scores.find((a) => a.images != null && a.images < 5);
+  const noAPlus = cx.asin_scores.find((a) => a.has_a_plus === false);
+  const noVideo = cx.asin_scores.find((a) => a.has_video === false);
+  const lowRating = cx.asin_scores.find((a) => a.rating != null && a.rating < 4.0);
+
+  if (lowImages) {
     out.push(
-      `Listing for ${lowScore.asin} scores ${lowScore.score ?? "—"}/100 — buy-box and listing-health signals point to weak brand control.`,
+      `Listing ${lowImages.asin} ships with only ${lowImages.images} images — Amazon's content rubric expects 6+ for the buy-box gallery.`,
     );
-  } else {
-    out.push(`Listing-health signals across the top ASINs are uneven — full audit pending listing crawl.`);
   }
-  if (cx.branded_search_volume != null && cx.branded_search_volume > 0) {
+  if (out.length < 3 && lowRating) {
     out.push(
-      `Branded demand at ${cx.branded_search_volume.toLocaleString("en-US")}/mo (DataForSEO) is being routed to reseller storefronts, not your brand store.`,
+      `Listing ${lowRating.asin} carries a ${lowRating.rating!.toFixed(1)} star rating — every tenth of a point compounds against organic rank.`,
     );
-  } else {
-    out.push(`Branded search volume — not measured this run; widen the keyword seed in the engagement.`);
   }
-  out.push(
-    `Top branded keywords aren't owned by ${brand.name}'s storefront on the SERP, so paid demand converts to reseller margin.`,
-  );
+  if (out.length < 3 && noAPlus) {
+    out.push(
+      `Listing ${noAPlus.asin} has no A+ content — that's a free conversion lift Amazon gives Brand Registered sellers.`,
+    );
+  }
+  if (out.length < 3 && noVideo) {
+    out.push(
+      `Listing ${noVideo.asin} ships without product video — a known buy-box conversion gap on Amazon.`,
+    );
+  }
+  if (out.length < 3) {
+    if (cx.branded_search_volume != null && cx.branded_search_volume > 0) {
+      out.push(
+        `Branded demand at ${cx.branded_search_volume.toLocaleString("en-US")}/mo (DataForSEO) is being routed to reseller storefronts, not your brand store.`,
+      );
+    } else {
+      out.push(`Branded search volume — not measured this run; widen the keyword seed in the engagement.`);
+    }
+  }
+  if (out.length < 3) {
+    out.push(
+      `Top branded keywords aren't owned by ${brand.name}'s storefront on the SERP, so paid demand converts to reseller margin.`,
+    );
+  }
   return out.slice(0, 3);
 }
 
@@ -359,7 +381,7 @@ export async function llmCompetitorLine(
       required: ["one_liner"],
     },
     userInstruction:
-      "Write one sentence (≤ 30 words) comparing the audited brand to the competitor set on channel control. Cite a specific competitor name and a delta. If the data is too thin, say '— not measured'.",
+      "Write ONE sentence (≤ 30 words) comparing the audited brand to the competitor set on channel control. ONLY use brand names and numbers that appear in the rows array. If only one row is present (no competitors), respond with the literal string 'Competitor benchmark — not enough peers in this snapshot.' Do not invent brand names. Do not use 'XYZ Corp' or any placeholder.",
     userPayload: { rows: bench.rows, brand_name: brand.name },
     maxTokens: 120,
   });
@@ -371,13 +393,33 @@ function fallbackCompetitorLine(
   brand: BrandForReport,
 ): string {
   const audited = bench.rows.find((r) => r.is_audited_brand);
-  const competitor = bench.rows.find(
-    (r) => !r.is_audited_brand && r.branded_search_volume != null,
-  );
-  if (!audited || !competitor) {
-    return `${brand.name} sits inside a competitive set — channel-control deltas are partial in this snapshot.`;
+  const competitors = bench.rows.filter((r) => !r.is_audited_brand);
+  if (!audited || competitors.length === 0) {
+    return "Competitor benchmark — not enough peers in this snapshot.";
   }
-  return `${brand.name} faces ${competitor.brand} on the same SERP — channel-control gap will be measured side-by-side in the engagement.`;
+
+  const auditedPct = audited.brand_controlled_pct;
+  const peerPcts = competitors
+    .map((r) => r.brand_controlled_pct)
+    .filter((p): p is number => typeof p === "number");
+
+  const named = competitors.map((c) => c.brand).slice(0, 2).join(" and ");
+
+  if (auditedPct != null && peerPcts.length) {
+    const avgPct = peerPcts.reduce((a, b) => a + b, 0) / peerPcts.length;
+    const auditedRound = Math.round(auditedPct * 100);
+    const avgRound = Math.round(avgPct * 100);
+    // When both sides are 0% it means the entire category is reseller-
+    // controlled (none of the brands win their own buy boxes). Stating
+    // a "0-point lead" reads as bad copy, so call it out explicitly.
+    if (auditedRound === 0 && avgRound === 0) {
+      return `${brand.name} and its peers (${named}) all sit at 0% brand-controlled — the whole category is owned by resellers right now.`;
+    }
+    const delta = auditedRound - avgRound;
+    return `${brand.name} controls ${auditedRound}% of buy boxes vs ${avgRound}% peer average across ${competitors.length} competitor${competitors.length === 1 ? "" : "s"} (${named}) — a ${Math.abs(delta)}-point ${delta >= 0 ? "lead" : "gap"}.`;
+  }
+
+  return `${brand.name} sits alongside ${named} on the same SERP — full channel-control benchmark runs in the engagement.`;
 }
 
 // =====================================================================

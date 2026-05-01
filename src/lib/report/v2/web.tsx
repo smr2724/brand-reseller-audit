@@ -401,6 +401,15 @@ function SectionCxAudit({ narrative }: { narrative: NarrativeV2 }) {
 
 function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
   const pct = score.score ?? 0;
+  const facts: { label: string; value: string }[] = [];
+  if (score.images != null) facts.push({ label: "Images", value: String(score.images) });
+  if (score.bullets != null) facts.push({ label: "Bullets", value: String(score.bullets) });
+  if (score.rating != null) facts.push({ label: "Rating", value: score.rating.toFixed(1) });
+  if (score.reviews != null)
+    facts.push({ label: "Reviews", value: score.reviews.toLocaleString("en-US") });
+  if (score.has_a_plus != null) facts.push({ label: "A+", value: score.has_a_plus ? "Yes" : "No" });
+  if (score.has_video != null)
+    facts.push({ label: "Video", value: score.has_video ? "Yes" : "No" });
   return (
     <div className="rv2-asincard">
       <div className="rv2-asincard-top">
@@ -415,8 +424,18 @@ function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
           aria-hidden
         />
       </div>
+      {facts.length > 0 && (
+        <div className="rv2-asincard-facts">
+          {facts.map((f) => (
+            <span key={f.label} className="rv2-asincard-fact">
+              <span className="rv2-asincard-fact-lbl">{f.label}</span>
+              <span className="rv2-asincard-fact-val">{f.value}</span>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="rv2-asincard-note">
-        Heuristic listing-health score. Full crawl (bullets, images, A+, video, reviews) runs in week one.
+        Listing-health from Keepa /product (rating, reviews, images, bullets, A+, video).
       </div>
     </div>
   );
@@ -1043,6 +1062,18 @@ function V2Styles() {
       .rv2-asincard-bar { height: 6px; background: rgba(255,255,255,0.04); border-radius: 3px; overflow: hidden; }
       .rv2-asincard-bar-fill { height: 100%; background: var(--gold); }
       .rv2-asincard-note { font-size: 11px; color: var(--text-muted); margin-top: 8px; }
+      .rv2-asincard-facts {
+        display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;
+      }
+      .rv2-asincard-fact {
+        display: inline-flex; align-items: baseline; gap: 4px;
+        padding: 3px 8px; border-radius: 6px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid var(--border-soft);
+        font-size: 11px;
+      }
+      .rv2-asincard-fact-lbl { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; }
+      .rv2-asincard-fact-val { color: var(--gold-soft); font-variant-numeric: tabular-nums; font-weight: 600; }
 
       .rv2-callouts {
         margin-top: 24px; padding: 16px;
