@@ -88,41 +88,11 @@ export async function GET(req: Request) {
     );
   }
 
-  // ---- DEBUG INSTRUMENTATION (temporary) ----
-  // Captures everything we need to diagnose the "phantom lead" bug
-  // where the cron returns a lead_id that does not exist in the DB.
-  const debug: {
-    timestamp: string;
-    commit_sha: string | undefined;
-    supabase_url: string | undefined;
-    service_role_key_tail: string | undefined;
-    select_count: number | null;
-    select_rows: Array<{ id: string; audit_status: string }>;
-    select_error: string | null;
-    raw_count_check: { count: number | null; error: string | null } | null;
-    claim_attempts: Array<{
-      lead_id: string;
-      claimed: boolean;
-      claimed_rows: Array<{ id: string; audit_status: string }> | null;
-      claim_error: string | null;
-    }>;
-  } = {
-    timestamp: new Date().toISOString(),
-    commit_sha: process.env.VERCEL_GIT_COMMIT_SHA,
-    supabase_url: process.env.NEXT_PUBLIC_SUPABASE_URL,
-    service_role_key_tail: process.env.SUPABASE_SERVICE_ROLE_KEY?.slice(-6),
-    select_count: null,
-    select_rows: [],
-    select_error: null,
-    raw_count_check: null,
-    claim_attempts: [],
-  };
-
   // Daily budget circuit breaker.
   const budget = await dailyEnrichmentBudget(admin);
   if (budget.over) {
     console.warn("[cron/audit-queue] daily enrichment budget exhausted", budget);
-    return NextResponse.json({ paused: true, debug, ...budget }, { status: 200 });
+    return NextResponse.json({ paused: true, ...budget }, { status: 200 });
   }
 
   // Strict allowlist: only `pending` leads are eligible. Logged so the
@@ -144,32 +114,17 @@ export async function GET(req: Request) {
 
   if (selectErr) {
     console.error("[cron/audit-queue] lead select failed", selectErr);
-    debug.select_error = selectErr.message;
-    return NextResponse.json({ error: "select_failed", debug }, { status: 500 });
+    return NextResponse.json({ error: "select_failed" }, { status: 500 });
   }
 
   const leads = (leadRows ?? []) as LeadRow[];
-  debug.select_count = leads.length;
-  debug.select_rows = leads.map((l) => ({ id: l.id, audit_status: l.audit_status }));
   console.log("[cron/audit-queue] select returned", {
     count: leads.length,
-    rows: debug.select_rows,
+    rows: leads.map((l) => ({ id: l.id, audit_status: l.audit_status })),
   });
 
-  // Cross-check: ask supabase how many pending rows it sees, head-only.
-  // If this disagrees with the SELECT above, we are being served from a
-  // different project / schema / replica.
-  const { count: pendingCount, error: countErr } = await admin
-    .from("leads")
-    .select("id", { count: "exact", head: true })
-    .eq("audit_status", "pending");
-  debug.raw_count_check = {
-    count: pendingCount ?? null,
-    error: countErr?.message ?? null,
-  };
-
   if (leads.length === 0) {
-    return NextResponse.json({ processed: 0, budget, debug });
+    return NextResponse.json({ processed: 0, budget });
   }
 
   const ownerId = ownerUserId();
@@ -199,13 +154,6 @@ export async function GET(req: Request) {
       .eq("id", lead.id)
       .eq("audit_status", "pending")
       .select("id, audit_status");
-
-    debug.claim_attempts.push({
-      lead_id: lead.id,
-      claimed: !!(claimedRows && claimedRows.length > 0),
-      claimed_rows: claimedRows ?? null,
-      claim_error: claimErr?.message ?? null,
-    });
 
     if (claimErr) {
       console.error("[cron/audit-queue] claim update failed", { lead_id: lead.id, error: claimErr });
@@ -238,7 +186,7 @@ export async function GET(req: Request) {
     }
   }
 
-  return NextResponse.json({ processed: results.length, results, budget, debug });
+  return NextResponse.json({ processed: results.length, results, budget });
 }
 
 async function processLead(
