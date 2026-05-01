@@ -47,12 +47,21 @@ export async function testDataForSEO() {
     const out = await dfs<any>("/v3/appendix/user_data", null, "GET");
     const status = out?.status_code;
     const user = out?.tasks?.[0]?.result?.[0];
+    // user.money is an object like { total, balance, used, ... }; the settings UI
+    // expects a single numeric "credits" value.
+    // TODO(phase1): verify DataForSEO money balance shape — best guess is `balance`.
+    const moneyObj = user?.money;
+    const balance =
+      typeof moneyObj === "number"
+        ? moneyObj
+        : moneyObj?.balance ?? moneyObj?.total ?? null;
     return {
       ok: status === 20000,
       status_code: status,
       status_message: out?.status_message,
       login: user?.login,
-      money: user?.money,
+      money: typeof balance === "number" ? balance : null,
+      money_raw: moneyObj ?? null,
     };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
