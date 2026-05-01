@@ -197,3 +197,163 @@ export async function testApollo(): Promise<{ ok: boolean; error?: string; credi
   if (r.ok) return { ok: true };
   return { ok: false, error: r.error };
 }
+
+// =====================================================================
+//  Phase 6 extensions — organization + decision-maker discovery.
+// =====================================================================
+
+export interface ApolloOrganization {
+  id: string;
+  name?: string;
+  website_url?: string;
+  primary_domain?: string;
+  industry?: string;
+  estimated_num_employees?: number;
+  raw?: any;
+}
+
+export const PHASE6_DECISION_MAKER_TITLES = [
+  "CEO",
+  "Chief Executive Officer",
+  "Founder",
+  "Co-Founder",
+  "Owner",
+  "President",
+  "COO",
+  "Chief Operating Officer",
+  "Head of Ecommerce",
+  "VP of Ecommerce",
+  "Director of Ecommerce",
+  "Head of Amazon",
+  "Brand Manager",
+];
+
+/**
+ * Sleep helper for 429 backoff.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch wrapper with exponential backoff on 429 (Apollo rate limit).
+ * Up to 4 attempts: 0s, 1s, 2s, 4s.
+ */
+async function apolloFetch(path: string, body: unknown, key: string): Promise<Response> {
+  let attempt = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const r = await fetch(`${APOLLO_BASE}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
+        "X-Api-Key": key,
+      },
+      body: JSON.stringify(body),
+    });
+    if (r.status !== 429 || attempt >= 3) return r;
+    const retryAfter = Number(r.headers.get("retry-after"));
+    const delay = Number.isFinite(retryAfter) && retryAfter > 0
+      ? retryAfter * 1000
+      : Math.min(8000, 1000 * Math.pow(2, attempt));
+    await sleep(delay);
+    attempt++;
+  }
+}
+
+/**
+ * Phase 6: Search Apollo organizations by domain. Returns up to 5 candidates
+ * so the caller can fuzzy-match against the brand name.
+ */
+export async function searchOrganizations(
+  domain: string
+): Promise<{ ok: true; organizations: ApolloOrganization[] } | SearchError> {
+  const key = process.env.APOLLO_API_KEY;
+  if (!key) return { ok: false, error: "APOLLO_API_KEY missing" };
+  const cleaned = domain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+  if (!cleaned) return { ok: false, error: "domain required" };
+
+  try {
+    const r = await apolloFetch("/organizations/search", {
+      page: 1,
+      per_page: 5,
+      q_organization_domains_list: [cleaned],
+    }, key);
+    if (!r.ok) {
+      const text = await r.text();
+      return { ok: false, error: `Apollo ${r.status}: ${text.slice(0, 200)}` };
+    }
+    const data = await r.json();
+    const orgs: ApolloOrganization[] = (data.organizations ?? data.accounts ?? []).map((o: any) => ({
+      id: o.id,
+      name: o.name,
+      website_url: o.website_url,
+      primary_domain: o.primary_domain,
+      industry: o.industry,
+      estimated_num_employees: o.estimated_num_employees,
+      raw: o,
+    }));
+    return { ok: true, organizations: orgs };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
+/**
+ * Phase 6: Search people at a known organization filtered by decision-maker titles.
+ * Uses the supported `mixed_people/api_search` endpoint with organization_ids.
+ */
+export async function searchPeople(opts: {
+  organizationId: string;
+  titles?: string[];
+  perPage?: number;
+}): Promise<SearchResult | SearchError> {
+  const key = process.env.APOLLO_API_KEY;
+  if (!key) return { ok: false, error: "APOLLO_API_KEY missing" };
+  if (!opts.organizationId) return { ok: false, error: "organizationId required" };
+
+  const body: Record<string, unknown> = {
+    page: 1,
+    per_page: opts.perPage ?? 10,
+    organization_ids: [opts.organizationId],
+    person_titles: opts.titles ?? PHASE6_DECISION_MAKER_TITLES,
+    person_seniorities: ["owner", "founder", "c_suite", "partner", "vp", "head", "director", "manager"],
+  };
+
+  try {
+    const r = await apolloFetch("/mixed_people/api_search", body, key);
+    if (!r.ok) {
+      const text = await r.text();
+      return { ok: false, error: `Apollo ${r.status}: ${text.slice(0, 200)}` };
+    }
+    const data = await r.json();
+    const people: ApolloPerson[] = (data.people ?? []).map((p: any) => ({
+      id: p.id,
+      first_name: p.first_name,
+      last_name: p.last_name,
+      name: p.name,
+      title: p.title,
+      seniority: p.seniority,
+      departments: p.departments,
+      linkedin_url: p.linkedin_url,
+      city: p.city,
+      state: p.state,
+      country: p.country,
+      email: p.email,
+      email_status: p.email_status,
+      organization: p.organization
+        ? {
+            id: p.organization.id,
+            name: p.organization.name,
+            website_url: p.organization.website_url,
+            primary_domain: p.organization.primary_domain,
+          }
+        : undefined,
+    }));
+    const total = data.pagination?.total_entries ?? data.total_entries ?? people.length;
+    return { ok: true, total, people };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}

@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { formatNumber, formatMoney, formatDateTime } from "@/lib/utils";
+import BrandContactsCard from "./BrandContactsCard";
+import BrandOutreachCard from "./BrandOutreachCard";
 
 interface Brand {
   id: string;
@@ -67,6 +69,7 @@ export default function BrandDetailClient({ brand, asins }: { brand: Brand; asin
   const [msg, setMsg] = useState<string | null>(null);
   const [enriching, setEnriching] = useState(false);
   const [enrichErr, setEnrichErr] = useState<string | null>(null);
+  const [primaryContact, setPrimaryContact] = useState<{ id: string; full_name: string; first_name: string | null; title: string | null } | null>(null);
 
   async function runEnrichment() {
     setEnriching(true);
@@ -220,13 +223,11 @@ export default function BrandDetailClient({ brand, asins }: { brand: Brand; asin
           </div>
         </Card>
 
-        <Card title="Contacts">
-          <div className="text-sm text-[var(--text-muted)]">Coming in Phase 6.</div>
-        </Card>
+      </div>
 
-        <Card title="Outreach">
-          <div className="text-sm text-[var(--text-muted)]">Coming in Phase 6.</div>
-        </Card>
+      <div className="mt-4 grid grid-cols-1 gap-4">
+        <BrandContactsCard brandId={brand.id} onPrimaryContact={setPrimaryContact} />
+        <BrandOutreachCard brandId={brand.id} primaryContact={primaryContact} />
       </div>
 
       <div className="mt-6">
