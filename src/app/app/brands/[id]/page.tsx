@@ -25,6 +25,16 @@ export default async function BrandDetail({ params }: { params: { id: string } }
     .order("offers_count", { ascending: false })
     .limit(50);
 
+  const { data: dfs } = await supabase
+    .from("brand_search_metrics")
+    .select(
+      "branded_search_volume, branded_trend_pct, top_keywords, competitor_brands, organic_traffic_value, captured_at",
+    )
+    .eq("brand_id", brand.id)
+    .order("captured_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
   return (
     <div className="p-6 max-w-[1100px] mx-auto">
       <div className="mb-4">
@@ -32,7 +42,7 @@ export default async function BrandDetail({ params }: { params: { id: string } }
           ← All brands
         </Link>
       </div>
-      <BrandDetailClient brand={brand} asins={asins ?? []} />
+      <BrandDetailClient brand={brand} asins={asins ?? []} dfsMetrics={dfs ?? null} />
     </div>
   );
 }

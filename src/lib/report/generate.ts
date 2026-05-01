@@ -1,4 +1,9 @@
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import {
+  getBrandEnrichmentBundle,
+  buildDataSourcesProvenance,
+  type BrandEnrichmentBundle,
+} from "@/lib/enrichment";
 import { generateNarrative, type BrandForReport } from "./narrative";
 import { renderAuditPdf } from "./pdf";
 import { uploadReportPdf } from "./storage";
@@ -15,6 +20,9 @@ export interface GenerateInput {
 /**
  * Orchestrator: assumes the reports row already exists in 'generating' status.
  * Updates the row to 'completed' on success or 'failed' on error.
+ *
+ * Reports consume `getBrandEnrichmentBundle` only — never call Keepa or
+ * DataForSEO directly from this file.
  */
 export async function generateAuditReport(input: GenerateInput): Promise<void> {
   const admin = createSupabaseAdminClient();
@@ -24,7 +32,7 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
 
   const { reportId, userId, brandId } = input;
   try {
-    // 1. Load brand row
+    // 1. Load brand row + enrichment bundle (single contract for both pillars).
     const { data: brand, error: brandErr } = await admin
       .from("brands")
       .select("*")
@@ -36,8 +44,20 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
 
     const brandTyped = brand as BrandForReport;
 
-    // 2. LLM narrative
-    const narrative = await generateNarrative(brandTyped);
+    let bundle: BrandEnrichmentBundle | null = null;
+    try {
+      bundle = await getBrandEnrichmentBundle(admin, brandId);
+    } catch (e) {
+      console.warn("[report/generate] enrichment bundle fetch failed:", e);
+      bundle = null;
+    }
+
+    const dataSources = bundle
+      ? buildDataSourcesProvenance(bundle)
+      : { keepa: false, dataforseo: false, keepa_freshness: null, dataforseo_freshness: null };
+
+    // 2. LLM narrative (uses the bundle for Keepa + DataForSEO context).
+    const narrative = await generateNarrative(brandTyped, bundle);
 
     // 3. PDF render
     const generatedAt = new Date();
@@ -45,6 +65,7 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
     const buffer = await renderAuditPdf({
       brand: brandTyped,
       narrative,
+      bundle,
       contactEmail,
       generatedAt,
     });
@@ -57,7 +78,7 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       buffer,
     });
 
-    // 5. Mark complete
+    // 5. Mark complete (persist data_sources jsonb).
     const { error: updErr } = await admin
       .from("reports")
       .update({
@@ -65,6 +86,7 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
         pdf_storage_path: path,
         pdf_public_url: signedUrl,
         narrative_json: narrative as unknown as Record<string, unknown>,
+        data_sources: dataSources,
         generated_at: generatedAt.toISOString(),
         title: `${brandTyped.name} — Channel Ownership Audit`,
         error_message: null,
