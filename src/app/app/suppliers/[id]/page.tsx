@@ -225,7 +225,7 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
                     ) : <span className="font-semibold">—</span>}
                     {opp && (
                       <div className="text-xs text-[var(--text-muted)] mt-0.5">
-                        Legion {opp.legion_score} · {opp.main_keyword}
+                        Score {opp.legion_score} · {opp.main_keyword}
                       </div>
                     )}
                   </div>

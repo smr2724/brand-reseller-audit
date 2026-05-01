@@ -21,7 +21,7 @@ export default function AppShell({ children, email }: { children: React.ReactNod
       <header className="md:hidden flex items-center justify-between px-4 h-14 border-b border-[var(--border)] bg-[var(--bg-2)] sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <Zap size={18} style={{ color: "var(--accent)" }} />
-          <span className="font-semibold tracking-tight">Legion Scanner</span>
+          <span className="font-semibold tracking-tight">Channel Scanner</span>
         </div>
         <button className="btn-ghost p-2" aria-label="Menu" onClick={() => setOpen(v => !v)}>
           {open ? <X size={20} /> : <Menu size={20} />}
@@ -36,8 +36,8 @@ export default function AppShell({ children, email }: { children: React.ReactNod
         <div className="hidden md:flex items-center gap-2 px-5 pt-5 pb-6">
           <Zap size={20} style={{ color: "var(--accent)" }} />
           <div>
-            <div className="font-semibold tracking-tight leading-tight">Legion</div>
-            <div className="text-[11px] text-[var(--text-muted)] leading-tight">Opportunity Scanner</div>
+            <div className="font-semibold tracking-tight leading-tight">Channel</div>
+            <div className="text-[11px] text-[var(--text-muted)] leading-tight">Ownership Scanner</div>
           </div>
         </div>
 
