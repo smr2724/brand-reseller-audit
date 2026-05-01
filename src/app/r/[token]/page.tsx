@@ -19,6 +19,8 @@ import { freshSignedUrl } from "@/lib/report/storage";
 import { getBrandEnrichmentBundle } from "@/lib/enrichment";
 import { PublicReportView, type PublicReportBrand, type PublicReportRow } from "@/lib/report/public-renderer";
 import type { NarrativeOutput } from "@/lib/report/narrative";
+import { PublicReportV2 } from "@/lib/report/v2/web";
+import type { NarrativeV2 } from "@/lib/report/v2/types";
 
 // ISR: the report row is largely immutable once `status='completed'`, but
 // enrichment (Keepa / DataForSEO) can refresh underneath it. 5 minutes is
@@ -55,10 +57,16 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     brandName = b?.name ?? null;
   }
 
-  const narrative = report.narrative_json as NarrativeOutput | null;
-  const description =
-    firstSentence(narrative?.reseller_reality_md) ||
-    "Channel ownership audit by Rolle Consulting Group.";
+  const rawNarrative = report.narrative_json as
+    | (NarrativeOutput & { version?: number })
+    | NarrativeV2
+    | null;
+  const isV2 = !!rawNarrative && (rawNarrative as NarrativeV2).version === 2;
+  const description = isV2
+    ? ((rawNarrative as NarrativeV2).cover.headline.slice(0, 320) ||
+        "Channel ownership audit by Rolle Consulting Group.")
+    : firstSentence((rawNarrative as NarrativeOutput | null)?.reseller_reality_md) ||
+      "Channel ownership audit by Rolle Consulting Group.";
   const title = brandName
     ? `${brandName} — Channel Ownership Audit by Rolle Consulting Group`
     : "Channel Ownership Audit — Rolle Consulting Group";
@@ -144,6 +152,24 @@ export default async function ReportPage({ params }: PageProps) {
       }
     }
 
+    // Phase 8 — v2 narratives ship with `version: 2`. Anything else
+    // (including null) falls through to the v1 renderer so legacy
+    // reports keep working.
+    const rawNarrative = report.narrative_json as
+      | (NarrativeOutput & { version?: number })
+      | NarrativeV2
+      | null;
+    if (rawNarrative && (rawNarrative as NarrativeV2).version === 2) {
+      return (
+        <PublicReportV2
+          narrative={rawNarrative as NarrativeV2}
+          brand={brand as { id: string; name: string; category: string | null; est_monthly_revenue: number | null }}
+          bundle={bundle}
+          pdfUrl={pdfUrl}
+        />
+      );
+    }
+
     const reportRow: PublicReportRow = {
       id: report.id,
       token: report.token!,
@@ -151,7 +177,7 @@ export default async function ReportPage({ params }: PageProps) {
       created_at: report.created_at,
       status: report.status,
       pdf_storage_path: report.pdf_storage_path ?? null,
-      narrative_json: (report.narrative_json as NarrativeOutput | null) ?? null,
+      narrative_json: (rawNarrative as NarrativeOutput | null) ?? null,
     };
     const brandRow: PublicReportBrand = brand as PublicReportBrand;
 
