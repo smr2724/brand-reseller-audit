@@ -9,12 +9,15 @@
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createDraft } from "@/lib/microsoft/graph";
-import { getReportLongLivedUrl } from "@/lib/report/storage";
 import {
   renderReportEmail,
   type ReportTemplateBrand,
 } from "@/lib/outreach/report-template";
 import type { InitialTemplateContact } from "@/lib/outreach/initial-template";
+
+// `getReportLongLivedUrl` is intentionally still exported from
+// `@/lib/report/storage` for the "Download PDF" button on the public
+// report page — we just don't email the raw signed URL anymore.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,7 +52,7 @@ export async function POST(req: Request) {
       .maybeSingle(),
     supabase
       .from("reports")
-      .select("id, brand_id, user_id, status, pdf_storage_path")
+      .select("id, brand_id, user_id, status, pdf_storage_path, token")
       .eq("id", reportId)
       .eq("user_id", user.id)
       .maybeSingle(),
@@ -87,12 +90,14 @@ export async function POST(req: Request) {
     );
   }
 
-  // 3. 30-day signed URL for the PDF.
-  let reportUrl: string;
-  try {
-    reportUrl = await getReportLongLivedUrl(reportId, 30);
-  } catch (e) {
-    return NextResponse.json({ error: `report URL: ${(e as Error).message}` }, { status: 500 });
+  // 3. Resolve the public branded report URL (Phase 6.7). We email
+  //    `/r/{token}` on our own domain, not a raw Supabase signed URL.
+  const reportToken = report.token as string | null;
+  if (!reportToken) {
+    return NextResponse.json(
+      { error: "report missing public token — re-run migration 0018 to backfill" },
+      { status: 500 },
+    );
   }
 
   // 4. Render email + create draft.
@@ -105,7 +110,7 @@ export async function POST(req: Request) {
     full_name: contactRow.full_name ?? null,
     first_name: contactRow.first_name ?? null,
   };
-  const rendered = renderReportEmail({ brand, contact, reportUrl });
+  const rendered = renderReportEmail({ brand, contact, reportToken });
 
   const draft = await createDraft({
     userId: user.id,

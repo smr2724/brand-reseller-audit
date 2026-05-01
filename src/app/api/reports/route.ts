@@ -18,7 +18,7 @@ export async function GET(req: Request) {
   let q = supabase
     .from("reports")
     .select(
-      "id, brand_id, title, kind, status, generated_at, created_at, error_message, pdf_storage_path, brands:brand_id(name)"
+      "id, brand_id, title, kind, status, generated_at, created_at, error_message, pdf_storage_path, token, brands:brand_id(name)"
     )
     .eq("user_id", user.id)
     .eq("kind", kind)
