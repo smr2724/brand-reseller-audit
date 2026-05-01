@@ -2,6 +2,9 @@ import { createSupabaseAdminClient } from "@/lib/supabase/server";
 
 const BUCKET = "reports";
 const SIGNED_URL_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+// 30-day URLs are used in outbound report-followup emails; a recipient
+// who clicks ~3 weeks after Steve drops the draft should still see the PDF.
+const EMAIL_SIGNED_URL_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
 function adminOrThrow() {
   const admin = createSupabaseAdminClient();
@@ -70,3 +73,34 @@ export async function freshSignedUrl(path: string): Promise<string> {
   }
   return data.signedUrl;
 }
+
+/**
+ * Phase 6.5 — Sign a long-lived (default 30-day) URL specifically for
+ * embedding in outbound emails. Distinct from the 7-day in-app URL so the
+ * recipient still has a working link weeks later.
+ */
+export async function getReportLongLivedUrl(reportId: string, days = 30): Promise<string> {
+  const admin = adminOrThrow();
+  const { data: row, error: rowErr } = await admin
+    .from("reports")
+    .select("pdf_storage_path, status")
+    .eq("id", reportId)
+    .maybeSingle();
+  if (rowErr) throw new Error(`report lookup failed: ${rowErr.message}`);
+  if (!row) throw new Error("report not found");
+  if (row.status !== "completed" || !row.pdf_storage_path) {
+    throw new Error(`report not ready (${row.status ?? "unknown"})`);
+  }
+  const ttl = Math.max(60, Math.round(days * 24 * 60 * 60));
+  const { data, error } = await admin.storage
+    .from(BUCKET)
+    .createSignedUrl(row.pdf_storage_path, ttl);
+  if (error || !data?.signedUrl) {
+    throw new Error(`signed url failed: ${error?.message ?? "no url"}`);
+  }
+  return data.signedUrl;
+}
+
+// Re-exported for tests that want to confirm the email-TTL constant is
+// long enough for the default 30-day window.
+export { EMAIL_SIGNED_URL_TTL_SECONDS };

@@ -295,7 +295,7 @@ export default function BrandDetailClient({
       </div>
 
       <div className="mt-6">
-        <ReportsSection brandId={brand.id} brandName={brand.name} />
+        <ReportsSection brandId={brand.id} brandName={brand.name} primaryContact={primaryContact} />
       </div>
     </div>
   );
@@ -550,10 +550,30 @@ interface BrandReportRow {
   error_message: string | null;
 }
 
-function ReportsSection({ brandId, brandName }: { brandId: string; brandName: string }) {
+function ReportsSection({
+  brandId,
+  brandName,
+  primaryContact,
+}: {
+  brandId: string;
+  brandName: string;
+  primaryContact: { id: string; full_name: string; first_name: string | null; title: string | null } | null;
+}) {
   const [reports, setReports] = useState<BrandReportRow[] | null>(null);
   const [generating, setGenerating] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [emailingId, setEmailingId] = useState<string | null>(null);
+  const [emailedLinks, setEmailedLinks] = useState<Record<string, string>>({});
+  const [outlookConnected, setOutlookConnected] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/outlook/status", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => { if (alive) setOutlookConnected(!!d?.connected); })
+      .catch(() => { if (alive) setOutlookConnected(false); });
+    return () => { alive = false; };
+  }, []);
 
   async function load() {
     try {
@@ -561,6 +581,39 @@ function ReportsSection({ brandId, brandName }: { brandId: string; brandName: st
       const data = await res.json();
       if (res.ok) setReports(data.reports ?? []);
     } catch {}
+  }
+
+  async function emailReport(reportId: string) {
+    setEmailingId(reportId);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/outreach/email-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brand_id: brandId, report_id: reportId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data?.error === "outlook_reauth_required") {
+          setMsg("Outlook authorization expired — reconnect to continue.");
+          setOutlookConnected(false);
+        } else if (data?.error === "no_primary_contact") {
+          setMsg("Set a primary contact for this brand before emailing the report.");
+        } else {
+          setMsg(`Email draft failed: ${data?.error ?? "unknown"}`);
+        }
+      } else {
+        setMsg("Report draft created in Outlook.");
+        if (data?.web_link) {
+          setEmailedLinks((prev) => ({ ...prev, [reportId]: data.web_link as string }));
+        }
+      }
+    } catch (e) {
+      setMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setEmailingId(null);
+      setTimeout(() => setMsg(null), 6000);
+    }
   }
 
   useEffect(() => {
@@ -642,9 +695,45 @@ function ReportsSection({ brandId, brandName }: { brandId: string; brandName: st
                 <div className="flex items-center gap-2 shrink-0">
                   <ReportStatusBadge status={r.status} />
                   {r.status === "completed" && (
-                    <a className="btn btn-ghost text-xs" href={`/api/reports/${r.id}/download`}>
-                      Download
-                    </a>
+                    <>
+                      <a
+                        className="btn btn-ghost text-xs"
+                        href={`/api/reports/${r.id}/download`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        View Report
+                      </a>
+                      {emailedLinks[r.id] ? (
+                        <a
+                          className="btn text-xs"
+                          href={emailedLinks[r.id]}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Open in Outlook
+                        </a>
+                      ) : (
+                        <button
+                          className="btn text-xs"
+                          onClick={() => emailReport(r.id)}
+                          disabled={
+                            emailingId === r.id ||
+                            !primaryContact ||
+                            outlookConnected === false
+                          }
+                          title={
+                            !primaryContact
+                              ? "Add a primary contact to email this report"
+                              : outlookConnected === false
+                                ? "Connect Outlook first"
+                                : ""
+                          }
+                        >
+                          {emailingId === r.id ? "Drafting…" : "Email the Report"}
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               </li>
