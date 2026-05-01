@@ -340,3 +340,134 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
 export function clearKeepaProductCache() {
   PRODUCT_CACHE.clear();
 }
+
+// =============================================================
+// Seller-name resolver (Keepa /seller endpoint)
+// =============================================================
+
+const SELLER_NAME_CACHE = new Map<string, { t: number; name: string | null }>();
+const SELLER_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const SELLER_ID_RE = /^A[A-Z0-9]{12,13}$/;
+
+export function isAmazonSellerId(s: string | null | undefined): boolean {
+  return !!s && SELLER_ID_RE.test(s.trim());
+}
+
+interface SellerCacheReader {
+  read(ids: string[]): Promise<Record<string, { name: string | null; fetched_at: string }>>;
+  write(rows: { seller_id: string; seller_name: string | null; payload: any }[]): Promise<void>;
+}
+
+/**
+ * Resolve a list of Amazon seller IDs to human-readable names via
+ * Keepa's /seller endpoint. Batches up to 100 per request, 1 token per
+ * resolved seller. Names are cached in memory for 30 days; pass a
+ * `SellerCacheReader` (backed by `keepa_seller_cache`) to share across
+ * lambda invocations.
+ *
+ * Returns a map { sellerId -> name|null }. `null` means Keepa returned
+ * no name for that ID (rare — usually means ID is malformed or the
+ * seller has been delisted). Caller should fall back to the raw ID.
+ */
+export async function resolveSellerNames(
+  sellerIds: Iterable<string>,
+  cache?: SellerCacheReader,
+): Promise<Record<string, string | null>> {
+  const out: Record<string, string | null> = {};
+  const ids = Array.from(new Set(Array.from(sellerIds).map((s) => (s ?? "").trim()).filter((s) => SELLER_ID_RE.test(s))));
+  if (!ids.length) return out;
+
+  const now = Date.now();
+  const need: string[] = [];
+  for (const id of ids) {
+    const c = SELLER_NAME_CACHE.get(id);
+    if (c && now - c.t < SELLER_CACHE_TTL_MS) {
+      out[id] = c.name;
+    } else {
+      need.push(id);
+    }
+  }
+
+  // Optional shared cache (Supabase). Best-effort; ignore errors.
+  if (cache && need.length) {
+    try {
+      const rows = await cache.read(need);
+      const stillNeed: string[] = [];
+      for (const id of need) {
+        const r = rows[id];
+        if (r && now - new Date(r.fetched_at).getTime() < SELLER_CACHE_TTL_MS) {
+          SELLER_NAME_CACHE.set(id, { t: now, name: r.name });
+          out[id] = r.name;
+        } else {
+          stillNeed.push(id);
+        }
+      }
+      need.length = 0;
+      need.push(...stillNeed);
+    } catch {
+      // proceed without cache
+    }
+  }
+
+  // Hardcoded fast-path for Amazon US — saves 1 token per audit.
+  for (let i = need.length - 1; i >= 0; i--) {
+    if (need[i] === "ATVPDKIKX0DER") {
+      out["ATVPDKIKX0DER"] = "Amazon.com";
+      SELLER_NAME_CACHE.set("ATVPDKIKX0DER", { t: now, name: "Amazon.com" });
+      need.splice(i, 1);
+    }
+  }
+
+  if (!need.length) return out;
+
+  const key = process.env.KEEPA_API_KEY;
+  if (!key) return out;
+
+  const writeRows: { seller_id: string; seller_name: string | null; payload: any }[] = [];
+
+  for (let i = 0; i < need.length; i += 100) {
+    const chunk = need.slice(i, i + 100);
+    const url = `${BASE}/seller?key=${key}&domain=${DOMAIN_ID}&seller=${chunk.join(",")}`;
+    let json: any = null;
+    try {
+      const res = await fetch(url, {
+        cache: "no-store",
+        headers: { "Accept-Encoding": "gzip" },
+      });
+      if (!res.ok) {
+        // soft fail — leave these IDs unresolved
+        continue;
+      }
+      json = await res.json().catch(() => null);
+    } catch {
+      continue;
+    }
+    if (!json) continue;
+    const tokensLeft = Number(json?.tokensLeft ?? 0);
+    if (tokensLeft) {
+      TOKEN_CACHE = { t: Date.now(), v: { tokens_left: tokensLeft, refill_in_ms: Number(json?.refillIn ?? 0), refill_rate: Number(json?.refillRate ?? 0) } };
+    }
+    const sellers = json?.sellers ?? {};
+    for (const id of chunk) {
+      const entry = sellers?.[id];
+      const name = (entry?.sellerName ?? null) as string | null;
+      out[id] = name;
+      SELLER_NAME_CACHE.set(id, { t: now, name });
+      writeRows.push({ seller_id: id, seller_name: name, payload: entry ?? null });
+    }
+  }
+
+  if (cache && writeRows.length) {
+    try {
+      await cache.write(writeRows);
+    } catch {
+      // best-effort
+    }
+  }
+
+  return out;
+}
+
+export function clearKeepaSellerCache() {
+  SELLER_NAME_CACHE.clear();
+}

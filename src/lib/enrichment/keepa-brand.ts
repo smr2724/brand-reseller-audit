@@ -14,8 +14,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   searchProductsByBrand,
   getProductDetails,
+  resolveSellerNames,
+  isAmazonSellerId,
   type KeepaProductDetails,
 } from "@/lib/keepa";
+import { makeSellerCache } from "./keepa-seller-cache";
 import {
   computeValidationScore,
   computeCombinedValidationScore,
@@ -176,17 +179,46 @@ export async function enrichBrandWithKeepa(
       .eq("brand_id", brand_id);
     if (delErr) throw new Error(`brand_sellers delete: ${delErr.message}`);
 
+    // Resolve real seller names for any IDs that came back as bare
+    // sellerIds (e.g. "AP3VA1GJZM3EQ"). Keepa's /seller endpoint costs
+    // 1 token per ID and accepts up to 100 per call. Cached 30 days.
+    const idsToResolve = new Set<string>();
+    for (const s of Array.from(sellerMap.values())) {
+      if (s.seller_id && isAmazonSellerId(s.seller_id) && (
+        !s.seller_name ||
+        s.seller_name === s.seller_id ||
+        isAmazonSellerId(s.seller_name)
+      )) {
+        idsToResolve.add(s.seller_id);
+      }
+    }
+    let resolvedNames: Record<string, string | null> = {};
+    try {
+      resolvedNames = await resolveSellerNames(idsToResolve, makeSellerCache(supabase));
+    } catch {
+      // soft fail — fall back to IDs
+    }
+
     const totalWon = Array.from(sellerMap.values()).reduce((a, s) => a + s.asins_won, 0);
-    const sellerRows = Array.from(sellerMap.values()).map((s) => ({
-      brand_id,
-      seller_name: s.seller_name,
-      seller_id: s.seller_id ?? null,
-      seller_country: s.seller_country ?? null,
-      share_pct: totalWon > 0 ? s.asins_won / totalWon : null,
-      asins_won: s.asins_won,
-      is_fba: s.is_fba ?? null,
-      last_seen_at: new Date().toISOString(),
-    }));
+    const sellerRows = Array.from(sellerMap.values()).map((s) => {
+      const resolved = s.seller_id ? resolvedNames[s.seller_id] : null;
+      const finalName =
+        resolved && resolved.trim()
+          ? resolved
+          : s.seller_name && !isAmazonSellerId(s.seller_name)
+          ? s.seller_name
+          : s.seller_id ?? s.seller_name;
+      return {
+        brand_id,
+        seller_name: finalName,
+        seller_id: s.seller_id ?? null,
+        seller_country: s.seller_country ?? null,
+        share_pct: totalWon > 0 ? s.asins_won / totalWon : null,
+        asins_won: s.asins_won,
+        is_fba: s.is_fba ?? null,
+        last_seen_at: new Date().toISOString(),
+      };
+    });
 
     if (sellerRows.length) {
       const { error: insErr } = await supabase
