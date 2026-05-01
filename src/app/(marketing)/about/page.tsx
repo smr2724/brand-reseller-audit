@@ -3,185 +3,184 @@ import Link from "next/link";
 export const metadata = {
   title: "About — Rolle Consulting Group",
   description:
-    "Operator-led Amazon channel ownership consulting for mid-market brands. Aligned incentives. Free audit.",
+    "Operator-led Amazon channel ownership consulting for mid-market brands. Aligned incentives. We've run this playbook ourselves.",
 };
 
 export default function AboutPage() {
   return (
     <>
-      <section className="m-hero" style={{ padding: "96px 0" }}>
+      <section className="m-hero">
         <div className="container">
-          <div className="eyebrow">About</div>
-          <h1 style={{ marginTop: 24, maxWidth: "22ch" }}>
-            We help mid-market brands take their Amazon channel back.
-          </h1>
-          <p className="lede" style={{ maxWidth: "62ch" }}>
-            Rolle Consulting Group is an Amazon channel ownership
-            consultancy. We work with brands whose product is already in
-            distribution — but whose Amazon presence is being run, listed,
-            and priced by someone else.
+          <div className="m-hero-eyebrow-row">
+            <span className="dot" aria-hidden />
+            <span className="eyebrow">About</span>
+          </div>
+          <h1>We&apos;ve run this playbook ourselves.</h1>
+          <p className="lede">
+            Rolle Consulting Group is a small, operator-led consultancy. We
+            help mid-market brands take their Amazon channel back from
+            third-party resellers — and turn it into the most defensible
+            piece of enterprise value they own.
           </p>
         </div>
       </section>
 
+      {/* Operator narrative */}
       <section className="m-section">
-        <div className="container m-grid-2">
-          <div>
-            <div className="eyebrow">Why we exist</div>
-            <h2 style={{ marginTop: 12 }}>
-              Brand owners lose millions because the channel is being run
-              by third parties.
-            </h2>
-            <p style={{ marginTop: 18 }}>
-              Most mid-market brands we look at have a meaningful Amazon
-              footprint they don&apos;t operate. Wholesale customers,
-              distributors, and unauthorized resellers list the SKUs, run
-              the pricing, and capture the retail margin. The brand is
-              quietly subsidizing somebody else&apos;s Amazon business.
-            </p>
-            <p style={{ marginTop: 18 }}>
-              The fix isn&apos;t a deck. It&apos;s a sequenced operating
-              plan: audit, enroll, remove, take over, scale. Run cleanly,
-              the channel typically doubles in profit and contributes
-              materially to enterprise value at exit.
-            </p>
-          </div>
+        <div className="container prose">
+          <div className="eyebrow">Why we exist</div>
+          <h2 style={{ marginTop: 14 }}>
+            Brand owners losing seven figures of margin to resellers who add no value.
+          </h2>
 
-          <div>
-            <div className="eyebrow">How we&apos;re different</div>
-            <h2 style={{ marginTop: 12 }}>Aligned incentives, operator depth, data first.</h2>
-            <ul style={{ display: "grid", gap: 18, marginTop: 18, listStyle: "none", padding: 0 }}>
-              <li>
-                <strong style={{ color: "var(--m-ink)" }}>Aligned.</strong>{" "}
-                Our fee is 50% of additional first-year profits. No
-                retainer, no upfront cost. We only earn if the channel
-                actually grows.
-              </li>
-              <li>
-                <strong style={{ color: "var(--m-ink)" }}>Operator-led.</strong>{" "}
-                Brand Registry, gating, MAP enforcement, FBA takeover,
-                listing rebuild — done by people who&apos;ve actually run
-                channels at this scale.
-              </li>
-              <li>
-                <strong style={{ color: "var(--m-ink)" }}>Data first.</strong>{" "}
-                Every engagement starts with a quantitative audit. Active
-                resellers, lost margin, unit economics, projected lift —
-                written down, before anyone signs anything.
-              </li>
-              <li>
-                <strong style={{ color: "var(--m-ink)" }}>Selective.</strong>{" "}
-                We don&apos;t take engagements where we can&apos;t move
-                the number. The audit tells both sides whether it&apos;s
-                worth doing.
-              </li>
-            </ul>
+          <div style={{ marginTop: 32, display: "grid", gap: 22 }}>
+            <p>
+              Steve is a brand owner. A few years ago, he looked at his own
+              Amazon channel and realized that his wholesale customers were
+              quietly running a second business on top of his — pricing it,
+              listing it, capturing the retail spread, and walking away with
+              the margin that was supposed to be his. He took the channel
+              back. The result was the doubling that started this firm.
+            </p>
+            <p>
+              RCG exists because too many mid-market brands are leaking
+              seven-figure margin and enterprise value to resellers who
+              aren&apos;t adding value. The reason isn&apos;t skill or
+              effort. It&apos;s that the in-house playbook isn&apos;t
+              obvious — it&apos;s a sequence of legal, operational, and
+              channel moves that have to happen in the right order, and
+              there&apos;s no good template for it. So most brands stay
+              stuck.
+            </p>
+            <p>
+              We work the way we&apos;d want a partner to work for us. A
+              quantitative audit comes first — written down, sourced,
+              defensible. The fee is aligned with the outcome: 50% of the
+              additional first-year profit we create. We do the work
+              ourselves rather than hand it off to junior consultants. And
+              we leave you with a trained team that can run the channel for
+              the next decade. Twelve months in, twelve months out, you own
+              the channel.
+            </p>
           </div>
         </div>
       </section>
 
+      {/* Three principle cards */}
       <section className="m-section alt">
         <div className="container">
           <div className="m-section-head">
-            <div className="eyebrow">Team</div>
-            <h2>The people behind RCG.</h2>
-            <p className="lede">
-              We&apos;re a small operator-led team. We do the work
-              ourselves rather than hand engagements to junior staff.
-            </p>
+            <div className="eyebrow">Principles</div>
+            <h2>Three rules we don&apos;t bend.</h2>
           </div>
 
-          {/* TODO: fill in real team bios + replace placeholder headshots */}
           <div className="m-grid-3">
             <div className="m-card">
-              <div
-                aria-hidden
-                style={{
-                  width: "100%",
-                  aspectRatio: "1 / 1",
-                  background:
-                    "linear-gradient(135deg, var(--m-bg-alt) 0%, #ddd9cc 100%)",
-                  marginBottom: 20,
-                  borderRadius: 2,
-                }}
-              />
-              <h3>Steve Rolle</h3>
-              <div style={{ marginTop: 4, fontSize: 13, color: "var(--m-muted)" }}>
-                Founder
-              </div>
-              <p style={{ marginTop: 14, fontSize: 14 }}>
-                A decade running Amazon and e-commerce P&amp;Ls inside
-                manufacturing businesses. Led the channel at Diversified
-                Hospitality Solutions through its takeover from
-                reseller-dependent to direct.
+              <div className="eyebrow" style={{ color: "var(--color-accent-ink)" }}>01 — Aligned</div>
+              <h3 style={{ marginTop: 14 }}>We only make money when you make more money.</h3>
+              <p style={{ marginTop: 14 }}>
+                No retainer. No upfront cost. 50% of the additional
+                first-year profit we create. If we can&apos;t move the
+                number, we don&apos;t earn — and we&apos;ll tell you so
+                during the audit.
               </p>
             </div>
             <div className="m-card">
-              <div
-                aria-hidden
-                style={{
-                  width: "100%",
-                  aspectRatio: "1 / 1",
-                  background:
-                    "linear-gradient(135deg, var(--m-bg-alt) 0%, #d6d2c4 100%)",
-                  marginBottom: 20,
-                  borderRadius: 2,
-                }}
-              />
-              <h3>Channel Operations</h3>
-              <div style={{ marginTop: 4, fontSize: 13, color: "var(--m-muted)" }}>
-                Listings, ads, FBA
-              </div>
-              <p style={{ marginTop: 14, fontSize: 14 }}>
-                Day-to-day operators handling listing rebuilds, advertising,
-                inventory planning, and FBA takeover work across active
-                engagements.
+              <div className="eyebrow" style={{ color: "var(--color-accent-ink)" }}>02 — Operator-led</div>
+              <h3 style={{ marginTop: 14 }}>We&apos;ve lived the playbook, not just written about it.</h3>
+              <p style={{ marginTop: 14 }}>
+                Brand Registry, MAP enforcement, FBA takeover, listing
+                rebuilds, in-house team build — done by people who&apos;ve
+                actually run channels at this scale, not by interns
+                reading a deck.
               </p>
             </div>
             <div className="m-card">
-              <div
-                aria-hidden
-                style={{
-                  width: "100%",
-                  aspectRatio: "1 / 1",
-                  background:
-                    "linear-gradient(135deg, var(--m-bg-alt) 0%, #cfcabb 100%)",
-                  marginBottom: 20,
-                  borderRadius: 2,
-                }}
-              />
-              <h3>Brand Enforcement</h3>
-              <div style={{ marginTop: 4, fontSize: 13, color: "var(--m-muted)" }}>
-                Brand Registry, MAP
-              </div>
-              <p style={{ marginTop: 14, fontSize: 14 }}>
-                Brand Registry, gating, MAP policy authoring, and
-                unauthorized-reseller enforcement on behalf of partner
-                brands.
+              <div className="eyebrow" style={{ color: "var(--color-accent-ink)" }}>03 — Finite</div>
+              <h3 style={{ marginTop: 14 }}>Twelve-month engagement. You own the channel when we leave.</h3>
+              <p style={{ marginTop: 14 }}>
+                We&apos;re not a retainer agency you keep paying forever.
+                We come in, run the playbook, train your team, and go.
+                You leave with the channel, the playbook, and the
+                operators.
               </p>
             </div>
           </div>
         </div>
       </section>
 
+      {/* Founder placeholder card */}
+      <section className="m-section">
+        <div className="container m-grid-2" style={{ alignItems: "center" }}>
+          <div
+            aria-hidden
+            style={{
+              aspectRatio: "1 / 1",
+              maxWidth: 360,
+              background:
+                "linear-gradient(135deg, var(--color-paper-2) 0%, #ddd9cc 100%)",
+              border: "1px solid var(--color-rule)",
+              borderRadius: 2,
+              position: "relative",
+            }}
+          >
+            {/* TODO: replace with real founder photo */}
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--color-faint)",
+                fontSize: 12,
+                letterSpacing: "0.18em",
+                textTransform: "uppercase",
+              }}
+            >
+              Portrait
+            </div>
+          </div>
+          <div>
+            <div className="eyebrow">Founder</div>
+            <h2 style={{ marginTop: 14 }}>Steve Rolle</h2>
+            <p style={{ marginTop: 18 }}>
+              Brand owner. Operator. Took his own Amazon channel back from
+              resellers and roughly doubled the value of the underlying
+              business. Started RCG to run the same playbook for other
+              mid-market brands stuck in the same trap.
+            </p>
+            <p style={{ marginTop: 18 }}>
+              &ldquo;Your brand deserves to thrive. Don&apos;t let resellers
+              control your story, your reputation, or your profits. Take
+              ownership.&rdquo;
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* CTA strip */}
       <section className="m-dark">
-        <div className="container" style={{ maxWidth: 800 }}>
-          <h2>Want to see what this looks like in practice?</h2>
-          <p style={{ marginTop: 14, fontSize: "1.1rem" }}>
-            The Diversified Hospitality Solutions case study walks through
-            exactly what changed, what we did, and what the channel looked
-            like a year later.
+        <div className="container narrow">
+          <div className="eyebrow">Next step</div>
+          <h2 style={{ marginTop: 18 }}>
+            Want to know what&apos;s sitting in your channel?
+          </h2>
+          <p style={{ marginTop: 22, fontSize: "1.1rem", color: "#D5D8DD" }}>
+            Free Channel Ownership Audit. We&apos;ll quantify the gap between
+            what your brand is earning on Amazon and what it could earn —
+            written, sourced, no obligation.
           </p>
-          <div style={{ marginTop: 28, display: "flex", gap: 14, flexWrap: "wrap" }}>
-            <Link href="/case-studies" className="m-btn m-btn-light">
-              Read the case study →
+          <div style={{ marginTop: 32, display: "flex", gap: 14, flexWrap: "wrap" }}>
+            <Link href="/contact" className="m-btn m-btn-light">
+              Get my free audit →
             </Link>
             <Link
-              href="/contact"
+              href="/case-studies"
               className="m-btn m-btn-outline"
               style={{ borderColor: "#fff", color: "#fff" }}
             >
-              Request a free audit
+              See case studies
             </Link>
           </div>
         </div>
