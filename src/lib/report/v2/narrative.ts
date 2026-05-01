@@ -95,6 +95,15 @@ const MODEL = process.env.OPENAI_MODEL_REPORTS || "gpt-4o-mini";
 // Cover headline (≤ 30 words)
 // =====================================================================
 
+// Amazon merchant IDs (e.g. AP3VA1GJZM3EQ) read like junk on the cover.
+const AMAZON_SELLER_ID_RE = /^A[A-Z0-9]{12,13}$/;
+function friendlyResellerLabel(raw: string | null): string | null {
+  if (!raw) return null;
+  const s = raw.trim();
+  if (!s) return null;
+  return AMAZON_SELLER_ID_RE.test(s) ? `an unbranded 3P seller (Amazon ID: ${s})` : s;
+}
+
 export async function llmCoverHeadline(input: {
   brandName: string;
   topReseller: string | null;
@@ -103,7 +112,9 @@ export async function llmCoverHeadline(input: {
   brandedSearchVolume: number | null;
 }): Promise<string> {
   const client = getClient();
-  const fb = fallbackHeadline(input);
+  const friendlyTopReseller = friendlyResellerLabel(input.topReseller);
+  const promptInput = { ...input, topReseller: friendlyTopReseller };
+  const fb = fallbackHeadline(promptInput);
   if (!client) return fb;
 
   type Out = { headline: string };
@@ -121,9 +132,15 @@ export async function llmCoverHeadline(input: {
       required: ["headline"],
     },
     userInstruction:
-      "Write one sentence headline (max 30 words) naming the brand, the dollar amount of annual reseller leak, and the top reseller's share. No 'approximately', no exclamation points.",
-    userPayload: input,
-    maxTokens: 120,
+      "Write one sentence headline (max 30 words) for the audit cover. " +
+      "If `annualLeak` is a number, lead with the dollar leak — e.g. " +
+      "\"<Brand> is on track to lose $<X> to Amazon resellers over the next 12 months.\" " +
+      "If `annualLeak` is null, do NOT say \"not measured\"; instead lead with " +
+      "the buy-box exposure — e.g. \"<Brand> has measurable reseller exposure on Amazon: top reseller <Y> holds <Z>% of buy-box share.\" " +
+      "Always cite the top reseller and their % share when both are present. " +
+      "No 'approximately', no exclamation points, no hedging.",
+    userPayload: promptInput,
+    maxTokens: 140,
   });
   const out = result?.headline?.trim();
   return out || fb;
@@ -135,15 +152,28 @@ function fallbackHeadline(input: {
   topResellerSharePct: number | null;
   annualLeak: number | null;
 }): string {
-  const leak =
-    input.annualLeak != null
-      ? `$${Math.round(input.annualLeak).toLocaleString("en-US")}`
-      : "— not measured";
-  const reseller =
-    input.topReseller && input.topResellerSharePct != null
-      ? `${input.topReseller} alone takes ${Math.round(input.topResellerSharePct * 100)}% of every dollar.`
-      : "";
-  return `${input.brandName} is on track to lose ${leak} in profit to Amazon resellers over the next 12 months. ${reseller}`.trim();
+  const sharePct =
+    input.topResellerSharePct != null ? Math.round(input.topResellerSharePct * 100) : null;
+  const reseller = input.topReseller;
+
+  if (input.annualLeak != null) {
+    const leak = `$${Math.round(input.annualLeak).toLocaleString("en-US")}`;
+    const tail =
+      reseller && sharePct != null
+        ? ` ${reseller} alone holds ${sharePct}% of buy-box share.`
+        : "";
+    return `${input.brandName} is on track to lose ${leak} in profit to Amazon resellers over the next 12 months.${tail}`.trim();
+  }
+
+  // No revenue / margin inputs — soften the headline rather than print
+  // "— not measured" on the cover.
+  if (reseller && sharePct != null) {
+    return `${input.brandName} has measurable reseller exposure on Amazon: top reseller ${reseller} holds ${sharePct}% of buy-box share.`;
+  }
+  if (sharePct != null) {
+    return `${input.brandName} has measurable reseller exposure on Amazon: the top reseller holds ${sharePct}% of buy-box share.`;
+  }
+  return `${input.brandName} has measurable reseller exposure on Amazon — buy-box ownership is split across multiple third-party sellers.`;
 }
 
 // =====================================================================

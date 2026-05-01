@@ -157,7 +157,7 @@ function SectionCover({ narrative, brand }: { narrative: NarrativeV2; brand: Pub
           </div>
         </div>
       </div>
-      <h1 className="rv2-h1">{c.headline}</h1>
+      <h1 className="rv2-h1">{repairCoverHeadline(c.headline, brand.name)}</h1>
 
       {c.kpis.length > 0 && (
         <div className="rv2-kpi-grid">
@@ -165,7 +165,11 @@ function SectionCover({ narrative, brand }: { narrative: NarrativeV2; brand: Pub
             <div key={i} className="rv2-kpi">
               <div className="rv2-kpi-num">{k.value}</div>
               <div className="rv2-kpi-lbl">{k.label}</div>
-              {k.sub && <div className="rv2-kpi-sub">{k.sub}</div>}
+              {k.sub && (
+                <div className="rv2-kpi-sub">
+                  {k.sub.replace(/\bA[A-Z0-9]{12,13}\b/g, (id) => `Unknown 3P seller (ID: ${id})`)}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -208,7 +212,7 @@ function SectionResellerReality({
               {sellers.slice(0, 5).map((s, i) => (
                 <li key={`auth-${i}`}>
                   <span className="rv2-q">?</span>
-                  <span>{s.seller_name}</span>
+                  <span>{friendlySellerName(s.seller_name)}</span>
                 </li>
               ))}
             </ul>
@@ -231,11 +235,12 @@ function SectionResellerReality({
 function ResellerBar({ row, maxShare }: { row: ResellerRow; maxShare: number }) {
   const pct = row.share_pct ?? 0;
   const widthPct = Math.max(2, Math.round((pct / maxShare) * 100));
+  const name = friendlySellerName(row.seller_name);
   return (
     <div className="rv2-bar-row">
       <div className="rv2-bar-rank">{row.rank}.</div>
-      <div className="rv2-bar-name" title={row.seller_name}>
-        {row.seller_name}
+      <div className="rv2-bar-name" title={name}>
+        {name}
       </div>
       <div className="rv2-bar-track">
         <div className="rv2-bar-fill" style={{ width: `${widthPct}%` }} aria-hidden />
@@ -275,17 +280,18 @@ function BuyBoxPanel({ pct }: { pct: number }) {
 
 function SectionResellerDossier({ narrative }: { narrative: NarrativeV2 }) {
   const d = narrative.reseller_dossier;
+  const friendly = d ? friendlySellerName(d.seller_name) : null;
   return (
     <section id="s-dossier" className="rv2-section">
       <SectionHead
         eyebrow="Reseller Dossier"
-        title={d ? `Inside ${d.seller_name}` : "Top sellers snapshot"}
+        title={d ? `Inside ${friendly}` : "Top sellers snapshot"}
         source="Keepa · seller profile"
       />
       {d ? (
         <>
           <div className="rv2-dossier-grid">
-            <Fact label="Seller name" value={d.seller_name} />
+            <Fact label="Seller name" value={friendly ?? d.seller_name} />
             <Fact label="Marketplace ID" value={d.seller_id ?? "— not measured"} />
             <Fact label="Country" value={d.country ?? "— not measured"} />
             <Fact
@@ -657,6 +663,44 @@ function Fact({ label, value }: { label: string; value: string }) {
 // ====================================================================
 // Helpers
 // ====================================================================
+
+// Amazon merchant IDs are 13-14 chars, all caps, start with "A".
+// When Keepa doesn't return a friendly storefront name we'd otherwise
+// show this raw ID to the prospect, which reads like a bug.
+const AMAZON_SELLER_ID_RE = /^A[A-Z0-9]{12,13}$/;
+
+function isAmazonSellerId(s: string | null | undefined): boolean {
+  return !!s && AMAZON_SELLER_ID_RE.test(s.trim());
+}
+
+function friendlySellerName(name: string | null | undefined, fallbackId?: string | null): string {
+  const n = (name ?? "").trim();
+  if (!n) return "Unknown 3P seller";
+  if (isAmazonSellerId(n)) return `Unknown 3P seller (ID: ${n})`;
+  // Sometimes Keepa hands back a name plus the ID concatenated — keep the name.
+  return n;
+}
+
+// Repair a previously-generated cover headline that contains the
+// "annual reseller leak of — not measured" pattern. Existing rows in
+// Supabase have already-baked headlines we can't re-run; this scrubs
+// at render time without changing the stored narrative.
+function repairCoverHeadline(raw: string, brandName: string): string {
+  let s = raw;
+  // 1. Replace seller-id tokens with friendly form.
+  s = s.replace(/\bA[A-Z0-9]{12,13}\b/g, (id) => `Unknown 3P seller (ID: ${id})`);
+  // 2. Soft-rewrite the broken-leak sentence shape.
+  //    "<X> has an annual reseller leak of — not measured, with top reseller <Y> holding a <Z>% share."
+  //    →  "<X> has measurable reseller exposure on Amazon: top reseller <Y> holds <Z>% buy-box share."
+  const leakRe =
+    /([\w\s'&.\-]+?)\s+has\s+an\s+annual\s+reseller\s+leak\s+of\s+(?:—|--|-)\s*not\s+measured,?\s*with\s+top\s+reseller\s+([^\s,]+(?:\s+\([^)]+\))?)\s+holding\s+a?\s*([\d.]+)%\s+share\.?/i;
+  s = s.replace(leakRe, (_m, brand, seller, pct) => {
+    return `${(brand ?? brandName).trim()} has measurable reseller exposure on Amazon: top reseller ${seller} holds ${pct}% of buy-box share.`;
+  });
+  // 3. Generic null-leak phrase cleanup if the regex above didn't match.
+  s = s.replace(/annual reseller leak of (?:—|--|-)\s*not measured,?/i, "measurable reseller exposure on Amazon");
+  return s.trim();
+}
 
 function formatVolume(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
