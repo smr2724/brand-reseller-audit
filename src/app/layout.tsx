@@ -8,10 +8,11 @@ const inter = Inter({
   variable: "--font-inter",
 });
 
+// TODO: add OG image
 export const metadata: Metadata = {
-  title: "Rolle Management Group",
+  title: "Rolle Consulting Group — Amazon Channel Ownership Audits",
   description:
-    "Rolle Management Group partners with established manufacturers to find overlooked niche e-commerce opportunities, then builds and operates the Amazon marketplace engine around them.",
+    "We help mid-market brands take back their Amazon channel from third-party resellers — and double its contribution to enterprise value. Free audit. No upfront cost.",
 };
 
 export const viewport: Viewport = {
