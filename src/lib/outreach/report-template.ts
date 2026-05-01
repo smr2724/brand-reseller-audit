@@ -1,8 +1,10 @@
 /**
- * Phase 6.5 — Report follow-up email template ("Short tease + link").
+ * Phase 6.5/6.7 — Report follow-up email template ("Short tease + link").
  *
  * Used by `/api/outreach/email-report` to drop a draft into the user's
- * Outlook with the long-lived signed URL of the freshly generated PDF.
+ * Outlook with a public branded report URL (Phase 6.7) — `/r/{token}` on
+ * our domain rather than a raw Supabase signed URL.
+ *
  * Verbatim per spec — do not rewrite without Steve's approval.
  */
 
@@ -17,7 +19,11 @@ export interface ReportTemplateBrand {
 export interface RenderReportEmailInput {
   brand: ReportTemplateBrand;
   contact: InitialTemplateContact;
-  reportUrl: string;
+  /**
+   * The report's public token (`reports.token`). The renderer builds
+   * `${APP_URL}/r/{token}`. Required.
+   */
+  reportToken: string;
 }
 
 function firstName(contact: InitialTemplateContact): string {
@@ -29,12 +35,18 @@ function firstName(contact: InitialTemplateContact): string {
   return "there";
 }
 
+function publicReportUrl(token: string): string {
+  const base =
+    (process.env.NEXT_PUBLIC_APP_URL || "https://brand-reseller-audit.vercel.app").replace(/\/+$/, "");
+  return `${base}/r/${encodeURIComponent(token)}`;
+}
+
 export function renderReportEmail(input: RenderReportEmailInput): RenderedEmail {
   const brandName = input.brand.name;
   const first = firstName(input.contact);
   const sellers = input.brand.keepa_unique_seller_count;
   const brandControlled = input.brand.keepa_brand_controlled_pct; // 0..1
-  const reportUrl = input.reportUrl;
+  const reportUrl = publicReportUrl(input.reportToken);
 
   // Spec fallback: if channel-control % is missing, drop the second clause.
   let findingSentence: string;

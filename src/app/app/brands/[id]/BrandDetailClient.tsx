@@ -548,6 +548,7 @@ interface BrandReportRow {
   generated_at: string | null;
   created_at: string;
   error_message: string | null;
+  token: string | null;
 }
 
 function ReportsSection({
@@ -762,13 +763,25 @@ function ReportsSection({
                   )}
                   {r.status === "completed" && (
                     <>
+                      {r.token && (
+                        <a
+                          className="btn btn-ghost text-xs"
+                          href={`/r/${r.token}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="Open the branded public report page"
+                        >
+                          View Report
+                        </a>
+                      )}
                       <a
                         className="btn btn-ghost text-xs"
                         href={`/api/reports/${r.id}/download`}
                         target="_blank"
                         rel="noreferrer"
+                        title="Download the underlying PDF"
                       >
-                        View Report
+                        Download PDF
                       </a>
                       {emailedLinks[r.id] ? (
                         <a
