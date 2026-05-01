@@ -209,7 +209,7 @@ export default function SettingsPage() {
                   <div className="mt-2 text-xs">
                     {ok ? (
                       <div className="flex items-center gap-1.5 text-[var(--green)]"><Check size={12} />
-                        {r.key === "dataforseo" && s.money != null ? `Credits: $${s.money}` : null}
+                        {r.key === "dataforseo" && s.money != null ? `Credits: $${typeof s.money === "number" ? s.money.toFixed(2) : JSON.stringify(s.money)}` : null}
                         {r.key === "keepa" && s.tokens_left != null ? `Tokens: ${s.tokens_left}` : null}
                         {r.key === "openai" && s.models_count ? `${s.models_count} models available` : null}
                         {r.key === "supabase" && s.user_email ? `Signed in: ${s.user_email}` : null}

@@ -250,7 +250,7 @@ export async function generateOutreachDraft(input: OutreachDraftInput): Promise<
   const onAmazon = input.supplierSellsOnAmazon === true;
   const marketingUrl =
     process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") ||
-    "https://legion-opportunity-scanner.vercel.app";
+    "https://brand-reseller-audit.vercel.app";
 
   const userPayload = {
     recipient: {
@@ -301,7 +301,7 @@ function placeholderOutreach(input: OutreachDraftInput): OutreachDraftOutput {
   const onAmazon = input.supplierSellsOnAmazon === true;
   const url =
     process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") ||
-    "https://legion-opportunity-scanner.vercel.app";
+    "https://brand-reseller-audit.vercel.app";
   const sig = `Steve Rolle\nFounder, Rolle Management Group\nsteve@rollemanagementgroup.com`;
 
   if (!onAmazon) {

@@ -1,22 +1,31 @@
-# Amazon Brand Reseller Audit
+# Amazon Channel Ownership Scanner
 
-Cloned from `legion-opportunity-scanner` on 2026-04-30 as a clean duplicate environment for a new use case.
+Internal tool for [Rolle Consulting Group](https://rolleconsulting.com) — finds brands whose Amazon channel is being run by third-party resellers, estimates lost revenue, and produces channel-ownership audit reports for prospective clients.
 
-- **App**: Next.js 14 (App Router)
-- **Database**: Supabase
-- **Hosting**: Vercel
-- **Email**: Microsoft Graph (Outlook drafts) via OAuth
-- **External APIs**: Keepa, DataForSEO, OpenAI
+## Stack
 
-This is currently a verbatim clone of the Legion scanner. Business logic will be repurposed in subsequent commits.
+- Next.js 14 (App Router) + TypeScript
+- Supabase (auth, Postgres, RLS, Storage)
+- Tailwind CSS
+- Keepa, DataForSEO, Apollo.io, OpenAI
+- Microsoft Graph (Outlook drafts)
+- Hosted on Vercel
 
-## Deploy URLs
+## Local dev
 
-- Production: TBD (Vercel)
-- Repo: https://github.com/smr2724/brand-reseller-audit
+```bash
+pnpm install   # or npm install
+cp .env.example .env.local   # populate from Vercel env vars
+pnpm dev
+```
 
-## Setup
+## Deploy
 
-1. Copy `.env.local.example` → `.env.local` and fill in keys.
-2. `npm install`
-3. `npm run dev`
+Auto-deploys on push to `main` via Vercel.
+
+## Architecture
+
+- `src/app/app/*` — authenticated app pages
+- `src/app/api/*` — API route handlers
+- `src/lib/*` — service clients (keepa, apollo, etc.) + business logic
+- `supabase/migrations/*` — DB schema; apply via Supabase CLI or dashboard

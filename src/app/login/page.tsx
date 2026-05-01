@@ -52,8 +52,8 @@ function LoginForm() {
         <div className="flex items-center gap-2 mb-5">
           <Zap size={22} style={{ color: "var(--accent)" }} />
           <div>
-            <div className="font-semibold text-lg tracking-tight leading-tight">Legion Opportunity Scanner</div>
-            <div className="text-xs text-[var(--text-muted)]">Find the next Legion before anyone else does.</div>
+            <div className="font-semibold text-lg tracking-tight leading-tight">Amazon Channel Ownership Scanner</div>
+            <div className="text-xs text-[var(--text-muted)]">Find the brands whose Amazon channel is being run by someone else.</div>
           </div>
         </div>
 

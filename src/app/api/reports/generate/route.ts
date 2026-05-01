@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
   if (existing) {
     const baseUrl =
       process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") ||
-      "https://legion-opportunity-scanner.vercel.app";
+      "https://brand-reseller-audit.vercel.app";
     return NextResponse.json({
       token: existing.token,
       url: `${baseUrl}/r/${existing.token}`,
@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
 
   const baseUrl =
     process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") ||
-    "https://legion-opportunity-scanner.vercel.app";
+    "https://brand-reseller-audit.vercel.app";
 
   return NextResponse.json({
     token,
