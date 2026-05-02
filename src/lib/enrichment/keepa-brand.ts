@@ -16,6 +16,7 @@ import {
   getProductDetails,
   resolveSellerNames,
   isAmazonSellerId,
+  expandVariationAsins,
   type KeepaProductDetails,
 } from "@/lib/keepa";
 import { makeSellerCache } from "./keepa-seller-cache";
@@ -70,9 +71,37 @@ export async function enrichBrandWithKeepa(
 
   let tokensUsed = 0;
   try {
-    const search = await searchProductsByBrand(brand_name, 20);
+    // Pull up to 40 brand parents from Keepa (the previous cap of 20
+    // left mid-tail SKUs on the floor and undercounted revenue for
+    // catalogs with 30+ SKUs). The variation expansion below adds child
+    // ASINs on top, capped at 200 total per brand. We bias toward 40
+    // (not 50/100) to keep the per-audit Keepa token cost bounded —
+    // 40×5 + ~10 children×5 = 250 tokens per brand on a cold cache.
+    const search = await searchProductsByBrand(brand_name, 40);
     tokensUsed += search.tokens_used;
-    const asins = search.asins;
+    // Keepa's brand search returns parents only. Expand child variations
+    // so Beauty/Health/Grocery brands (where 1 parent listing maps to
+    // 5–20 child SKUs each with its own BSR + price) get fully measured.
+    // Cap at 200 to bound Keepa token cost.
+    let asins = search.asins;
+    let expansion: { children: string[]; hit_cap: boolean } = { children: [], hit_cap: false };
+    if (asins.length) {
+      try {
+        const exp = await expandVariationAsins(asins, 200);
+        asins = exp.combined;
+        expansion = { children: exp.children, hit_cap: exp.hit_cap };
+        if (exp.hit_cap) {
+          console.warn(
+            `[keepa-brand] variation cap hit for "${brand_name}" — capped at 200 ASINs`,
+          );
+        }
+        console.log(
+          `[keepa-brand] "${brand_name}" expanded: parents=${search.asins.length} children=${exp.children.length} total=${asins.length}`,
+        );
+      } catch (e) {
+        console.warn(`[keepa-brand] variation expansion failed for "${brand_name}":`, e);
+      }
+    }
 
     if (!asins.length) {
       const summary: EnrichmentSummary = {
@@ -125,7 +154,9 @@ export async function enrichBrandWithKeepa(
     const products = await getProductDetails(asins, 5);
     tokensUsed += products.length * 5; // rough estimate (cache hits don't count perfectly)
 
-    // Upsert brand_asins rows
+    // Upsert brand_asins rows. We don't have a `parent_asin` column on
+    // brand_asins today (Phase 4 schema), so the parent linkage lives only
+    // on the in-memory product details and is recorded in the run log.
     const asinRows = products.map((p) => ({
       brand_id,
       asin: p.asin,

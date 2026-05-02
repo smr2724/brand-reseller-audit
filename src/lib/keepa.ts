@@ -151,6 +151,13 @@ export interface KeepaProductDetails {
   features_count?: number | null;
   has_video?: boolean | null;
   has_a_plus?: boolean | null;
+  /**
+   * If this ASIN is a child variation, the parent's ASIN. If it is itself
+   * a parent, this is undefined and `variation_asins` lists its children.
+   */
+  parent_asin?: string | null;
+  /** Child ASINs returned by Keepa's `variationCSV` / `variations[]`. */
+  variation_asins?: string[];
   raw?: any;
 }
 
@@ -213,11 +220,22 @@ export async function getKeepaTokenStatus(force = false): Promise<KeepaTokenStat
 }
 
 async function ensureTokens(min = 20) {
-  const s = await getKeepaTokenStatus(true);
-  if (s.tokens_left >= min) return s;
-  const wait = Math.min(60_000, Math.max(2_000, s.refill_in_ms || 30_000));
-  await sleep(wait);
-  return getKeepaTokenStatus(true);
+  // Loop until we have enough tokens. We give callers up to
+  // 30 minutes of total wait per call so a backfill against a low-tier
+  // Keepa account (refillRate 5/min) can grind through ~150 tokens of
+  // catchup. Production /generate runs that take this long will exceed
+  // upstream timeouts on their own; that's the same failure path as
+  // before, just routed through the timeout instead of a hard error.
+  const startedAt = Date.now();
+  const TOTAL_BUDGET_MS = 1_800_000; // 30 minutes
+  let s = await getKeepaTokenStatus(true);
+  while (s.tokens_left < min) {
+    if (Date.now() - startedAt > TOTAL_BUDGET_MS) return s;
+    const wait = Math.min(60_000, Math.max(2_000, s.refill_in_ms || 30_000));
+    await sleep(wait);
+    s = await getKeepaTokenStatus(true);
+  }
+  return s;
 }
 
 /**
@@ -397,6 +415,35 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
       else if (aPlusRaw && typeof aPlusRaw === "object")
         hasAPlus = Object.keys(aPlusRaw).length > 0;
 
+      // Variation children. Keepa returns these in two shapes; we prefer
+      // the richer `variations[]` (each entry has `.asin` + attribute set)
+      // and fall back to the comma-separated `variationCSV` string. The
+      // parent ASIN can also point to itself if Keepa flagged it as the
+      // parent of a variation family.
+      const variationAsins: string[] = (() => {
+        const set = new Set<string>();
+        const asArr = Array.isArray((p as any)?.variations) ? (p as any).variations : null;
+        if (asArr) {
+          for (const v of asArr) {
+            const a = (v?.asin ?? "").toString().toUpperCase();
+            if (/^[A-Z0-9]{10}$/.test(a) && a !== asin) set.add(a);
+          }
+        }
+        const csv = (p as any)?.variationCSV;
+        if (typeof csv === "string" && csv.length) {
+          for (const tok of csv.split(/[, ]+/)) {
+            const a = tok.trim().toUpperCase();
+            if (/^[A-Z0-9]{10}$/.test(a) && a !== asin) set.add(a);
+          }
+        }
+        return Array.from(set);
+      })();
+      const parentAsinRaw = (p as any)?.parentAsin ?? (p as any)?.parentASIN ?? null;
+      const parentAsin =
+        typeof parentAsinRaw === "string" && /^[A-Z0-9]{10}$/i.test(parentAsinRaw.trim())
+          ? parentAsinRaw.trim().toUpperCase()
+          : null;
+
       const categoryTree = Array.isArray(p?.categoryTree)
         ? p.categoryTree
             .map((c: any) =>
@@ -435,6 +482,8 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
         features_count: featuresCount,
         has_video: hasVideo,
         has_a_plus: hasAPlus,
+        parent_asin: parentAsin,
+        variation_asins: variationAsins,
         raw: { tokensLeft, lastPriceChange: p?.lastPriceChange },
       };
       PRODUCT_CACHE.set(asin, { t: Date.now(), v: details });
@@ -446,6 +495,74 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
 
 export function clearKeepaProductCache() {
   PRODUCT_CACHE.clear();
+}
+
+/**
+ * Walk Keepa variation links from a set of seed ASINs (typically the
+ * brand-search hits, which Keepa returns at the parent level). For each
+ * parent we follow `variations[]` / `variationCSV` and collect the
+ * child ASINs, then return:
+ *
+ *   • `seeds`      — the initial input, deduped
+ *   • `children`   — newly discovered child ASINs (excluding seeds)
+ *   • `combined`   — seeds ∪ children, capped at `maxTotal`
+ *
+ * We do NOT enrich the children here — the caller decides whether to
+ * pass `combined` back through `getProductDetails`. This separation keeps
+ * the function cheap (1 token per seed parent we don't yet have cached)
+ * and lets callers cap by token budget.
+ *
+ * Why we need it: the brand search returns parents only, and Beauty/
+ * Health brands often have one parent listing per fragrance/scent with
+ * 10–20 child SKUs that each carry their own BSR + price. Without this
+ * step the revenue estimator only sees the parent's stats — usually 0
+ * sales rank — and undercounts by 5–20×.
+ */
+export interface ExpandVariationsResult {
+  seeds: string[];
+  children: string[];
+  combined: string[];
+  hit_cap: boolean;
+}
+
+export async function expandVariationAsins(
+  seedAsins: string[],
+  maxTotal = 200,
+): Promise<ExpandVariationsResult> {
+  const seeds = Array.from(
+    new Set(
+      seedAsins
+        .map((a) => (a ?? "").toString().toUpperCase())
+        .filter((a) => /^[A-Z0-9]{10}$/.test(a)),
+    ),
+  );
+  if (!seeds.length) {
+    return { seeds: [], children: [], combined: [], hit_cap: false };
+  }
+  const parents = await getProductDetails(seeds, 5);
+  const seedSet = new Set(seeds);
+  const childSet = new Set<string>();
+  for (const p of parents) {
+    for (const c of p.variation_asins ?? []) {
+      if (!seedSet.has(c)) childSet.add(c);
+    }
+  }
+  const combined: string[] = [...seeds];
+  const childArr = Array.from(childSet);
+  let hit_cap = false;
+  for (const c of childArr) {
+    if (combined.length >= maxTotal) {
+      hit_cap = true;
+      break;
+    }
+    combined.push(c);
+  }
+  return {
+    seeds,
+    children: Array.from(childSet),
+    combined,
+    hit_cap,
+  };
 }
 
 // =============================================================

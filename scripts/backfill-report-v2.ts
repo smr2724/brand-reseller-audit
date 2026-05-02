@@ -93,6 +93,31 @@ async function main() {
     asins_excluded: enrich.revenueEstimate?.asins_excluded,
     source: enrich.revenueEstimate?.source_note,
   }, null, 2));
+  if (enrich.spApiTrailing) {
+    console.log("[backfill] SP-API override ACTIVE:", JSON.stringify({
+      trailing_12mo_revenue: enrich.spApiTrailing.trailing_12mo_revenue,
+      asins: enrich.spApiTrailing.asins.length,
+      source: enrich.spApiTrailing.source_note,
+    }, null, 2));
+  }
+  if (enrich.revenueEstimate?.per_asin) {
+    const tiers = new Map<string, number>();
+    for (const a of enrich.revenueEstimate.per_asin) {
+      const k = a.velocity_tier ?? "n/a";
+      tiers.set(k, (tiers.get(k) ?? 0) + 1);
+    }
+    console.log("[backfill] velocity tier breakdown:", JSON.stringify(Object.fromEntries(tiers)));
+    const top = enrich.revenueEstimate.per_asin
+      .filter((a) => a.ttm_revenue != null)
+      .sort((a, b) => (b.ttm_revenue ?? 0) - (a.ttm_revenue ?? 0))
+      .slice(0, 8);
+    console.log("[backfill] top revenue ASINs:");
+    for (const a of top) {
+      console.log(
+        `  ${a.asin} rank=${a.sales_rank} price=$${a.buy_box_price?.toFixed(2)} tier=${a.velocity_tier} units/mo=${a.monthly_units} ttm=$${a.ttm_revenue?.toLocaleString("en-US")}`,
+      );
+    }
+  }
   console.log(`[backfill] asin_details=${enrich.asinDetails.length} competitor_snapshots=${enrich.competitorSnapshots.length} category_hints=${enrich.productCategoryHints.join(", ") || "(none)"}`);
 
   console.log("[backfill] assembling v2 narrative_json…");
@@ -112,6 +137,7 @@ async function main() {
     generatedAt,
     asinDetails: enrich.asinDetails,
     revenueEstimate: enrich.revenueEstimate,
+    spApiTrailing: enrich.spApiTrailing,
     productCategoryHints: enrich.productCategoryHints,
   });
 

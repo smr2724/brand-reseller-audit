@@ -115,6 +115,11 @@ export interface MathLine {
   source: string; // "Keepa, 2026-04-15" | "calc: A × B" | "Assumption: 20% margin"
   is_total?: boolean;
   editable?: boolean; // assumption lines are editable per-prospect later
+  /** Optional badge rendered next to the value:
+   *   "actual"   — green badge (SP-API or imported real number)
+   *   "estimate" — amber badge with diligence-replacement footnote
+   * Currently only set on the `revenue` row. */
+  badge?: "actual" | "estimate" | null;
 }
 
 export interface NarrativeMath {

@@ -266,6 +266,11 @@ export interface MathContext {
   revenueSource?: string;
   /** When revenue is estimator-derived, append this footnote to math.notes. */
   revenueFootnote?: string | null;
+  /** Badge to render next to the revenue value:
+   *   "actual"   — SP-API or imported real number (green)
+   *   "estimate" — Keepa BSR + price (amber, with footnote)
+   * Default null (no badge). */
+  revenueBadge?: "actual" | "estimate" | null;
 }
 
 export function computeMath(ctx: MathContext): NarrativeMath {
@@ -290,6 +295,11 @@ export function computeMath(ctx: MathContext): NarrativeMath {
     value: revenue,
     format: "money",
     source: revenueSrc,
+    // Always editable so a sales-team user can override on the page if
+    // they have a real number from the seller. Persistence path TBD —
+    // for now the override flows back through brand.trailing_12_months.
+    editable: true,
+    badge: ctx.revenueBadge ?? null,
   });
 
   lines.push({

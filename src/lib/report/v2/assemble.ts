@@ -18,6 +18,7 @@ import {
 } from "./compute";
 import type { CompetitorSnapshot, KeepaAsinDetail } from "./enrich";
 import type { RevenueEstimate } from "@/lib/enrichment/revenue-estimator";
+import type { SpApiTrailingResult } from "@/lib/enrichment/sp-api-override";
 import {
   llmCompetitorLine,
   llmCoverHeadline,
@@ -49,6 +50,9 @@ export interface AssembleInput {
   assumptions?: ReportAssumptions;
   asinDetails?: KeepaAsinDetail[];
   revenueEstimate?: RevenueEstimate | null;
+  /** Real SP-API trailing-12mo pull (override path). When non-null,
+   * supersedes both `revenueEstimate` and any imported revenue. */
+  spApiTrailing?: SpApiTrailingResult | null;
   productCategoryHints?: string[];
 }
 
@@ -65,6 +69,7 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
   const assumptions: ReportAssumptions = { ...DEFAULT_ASSUMPTIONS, ...(input.assumptions ?? {}) };
   const asinDetails = input.asinDetails ?? [];
   const revenueEstimate = input.revenueEstimate ?? null;
+  const spApiTrailing = input.spApiTrailing ?? null;
 
   // 1. Pure compute (no I/O).
   const reality = computeResellerReality(bundle);
@@ -74,24 +79,52 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
 
   // 2. Math — uses assumptions + brand row + Keepa freshness.
   // Revenue precedence:
-  //   1. brand.trailing_12_months    (from upload / deal terms)
-  //   2. brand.est_monthly_revenue × 12 (legacy import field)
-  //   3. revenueEstimate.total_ttm_revenue (Keepa BSR + price)
+  //   1. SP-API trailing-12mo pull (real seller data, override path)
+  //   2. brand.trailing_12_months    (from upload / deal terms)
+  //   3. brand.est_monthly_revenue × 12 (legacy import field)
+  //   4. revenueEstimate.total_ttm_revenue (Keepa BSR + price)
   // This way real numbers always win over the estimator. The estimator
   // also supplies the source string + footnote when it is the basis.
   const importedTrailing12 =
     brand.trailing_12_months ??
     (brand.est_monthly_revenue != null ? Number(brand.est_monthly_revenue) * 12 : null);
-  const usingEstimate = importedTrailing12 == null && revenueEstimate?.total_ttm_revenue != null;
-  const trailing12 = importedTrailing12 ?? revenueEstimate?.total_ttm_revenue ?? null;
 
-  const revenueSource = usingEstimate
-    ? revenueEstimate?.source_note ?? "Keepa salesRank+price · 365-day avg"
-    : importedTrailing12 != null
-    ? "Imported / deal terms"
-    : bundle.keepa.last_enriched_at
-    ? `Keepa, ${bundle.keepa.last_enriched_at.slice(0, 10)}`
-    : "Keepa";
+  // revenue_kind drives the badge (Actual vs Estimate) and the footnote.
+  // "spapi" → green Actual badge, no estimator footnote
+  // "imported" → green Actual badge, no estimator footnote
+  // "estimate" → amber Estimate badge + diligence-replacement footnote
+  // "missing" → no badge, "— not measured"
+  type RevenueKind = "spapi" | "imported" | "estimate" | "missing";
+  let trailing12: number | null = null;
+  let revenueKind: RevenueKind = "missing";
+  let revenueSource = "Keepa";
+
+  if (spApiTrailing && spApiTrailing.trailing_12mo_revenue > 0) {
+    trailing12 = spApiTrailing.trailing_12mo_revenue;
+    revenueKind = "spapi";
+    revenueSource = spApiTrailing.source_note;
+  } else if (importedTrailing12 != null) {
+    trailing12 = importedTrailing12;
+    revenueKind = "imported";
+    revenueSource = "Imported / deal terms";
+  } else if (revenueEstimate?.total_ttm_revenue != null) {
+    trailing12 = revenueEstimate.total_ttm_revenue;
+    revenueKind = "estimate";
+    revenueSource = revenueEstimate.source_note ?? "Keepa BSR + price · 365-day avg";
+  } else {
+    revenueSource = bundle.keepa.last_enriched_at
+      ? `Keepa, ${bundle.keepa.last_enriched_at.slice(0, 10)}`
+      : "Keepa";
+  }
+
+  const usingEstimate = revenueKind === "estimate";
+
+  const revenueBadge: "actual" | "estimate" | null =
+    revenueKind === "spapi" || revenueKind === "imported"
+      ? "actual"
+      : revenueKind === "estimate"
+      ? "estimate"
+      : null;
 
   const math: NarrativeMath = computeMath({
     trailing_12mo_revenue: trailing12,
@@ -103,8 +136,9 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     revenueFootnote:
       usingEstimate
         ? revenueEstimate?.methodology_footnote ??
-          "Estimate from Keepa BSR + buy-box price. Replace with seller's actual TTM in deal terms."
+          "Directional estimate from Keepa BSR + buy-box price. Replace with seller's actual TTM during diligence."
         : null,
+    revenueBadge,
   });
 
   // Annual leak for the cover headline = the "delta_profit" line.

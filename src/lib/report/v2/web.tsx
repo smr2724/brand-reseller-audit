@@ -535,7 +535,19 @@ function SectionMath({ narrative }: { narrative: NarrativeV2 }) {
 function MathRow({ line }: { line: MathLine }) {
   return (
     <tr className={line.is_total ? "rv2-math-total" : ""}>
-      <td>{line.label}</td>
+      <td>
+        {line.label}
+        {line.badge === "actual" && (
+          <span className="rv2-rev-badge rv2-rev-badge-actual" title="Real seller-reported revenue">
+            Actual
+          </span>
+        )}
+        {line.badge === "estimate" && (
+          <span className="rv2-rev-badge rv2-rev-badge-est" title="Directional estimate from Keepa BSR + buy-box price">
+            Estimate
+          </span>
+        )}
+      </td>
       <td className="rv2-num">{formatMath(line)}</td>
       <td>
         <span className={line.editable ? "rv2-tag rv2-tag-edit" : "rv2-muted-small"}>
@@ -1124,6 +1136,23 @@ function V2Styles() {
       .rv2-num { text-align: right; font-variant-numeric: tabular-nums; color: var(--gold-soft); }
       .rv2-math-total td { font-weight: 700; color: var(--text); border-top: 1px solid var(--border); }
       .rv2-math-total .rv2-num { color: var(--gold); }
+
+      /* Revenue actual/estimate badges */
+      .rv2-rev-badge {
+        display: inline-block; margin-left: 8px;
+        padding: 2px 8px; border-radius: 999px;
+        font-size: 10px; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 0.08em;
+        vertical-align: middle;
+      }
+      .rv2-rev-badge-actual {
+        background: rgba(108,185,138,0.15); color: var(--green);
+        border: 1px solid rgba(108,185,138,0.4);
+      }
+      .rv2-rev-badge-est {
+        background: rgba(224,170,76,0.15); color: var(--gold-soft);
+        border: 1px solid rgba(224,170,76,0.4);
+      }
 
       /* Plan */
       .rv2-plan-grid {

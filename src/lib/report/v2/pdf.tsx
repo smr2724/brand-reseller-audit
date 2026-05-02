@@ -378,6 +378,8 @@ function MathPage({ narrative }: { narrative: NarrativeV2 }) {
           <View key={l.key} style={[styles.tableRow, l.is_total ? { backgroundColor: "#F4ECD4" } : {}]}>
             <Text style={[styles.tableCell, { flex: 3, fontFamily: l.is_total ? "Helvetica-Bold" : "Helvetica" }]}>
               {l.label}
+              {l.badge === "actual" && " [Actual]"}
+              {l.badge === "estimate" && " [Estimate]"}
             </Text>
             <Text style={[styles.tableCellNum, { flex: 1.2, fontFamily: l.is_total ? "Helvetica-Bold" : "Helvetica" }]}>
               {l.value == null

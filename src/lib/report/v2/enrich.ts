@@ -24,6 +24,10 @@ import {
   type RevenueEstimate,
 } from "@/lib/enrichment/revenue-estimator";
 import {
+  pullTrailing12FromSpApi,
+  type SpApiTrailingResult,
+} from "@/lib/enrichment/sp-api-override";
+import {
   getProductDetails,
   isKeepaConfigured,
   searchProductsByBrand,
@@ -92,6 +96,11 @@ export interface EnrichResult {
   asinDetails: KeepaAsinDetail[];
   /** Keepa salesRank+price-derived TTM revenue estimate. */
   revenueEstimate: RevenueEstimate | null;
+  /** Real SP-API trailing-12mo pull when the brand has an override row.
+   * Null for cold prospects (the common case). When non-null, downstream
+   * code uses this in place of `revenueEstimate` and labels the math
+   * source as "Amazon SP-API · trailing 12 months". */
+  spApiTrailing: SpApiTrailingResult | null;
   /** Inferred from the most-common product titles — used to seed extra
    * top_keywords beyond the bare brand name. */
   productCategoryHints: string[];
@@ -113,6 +122,28 @@ export async function runV2Enrichment(
   admin: SupabaseClient<any, any, any>,
   brand: BrandRowMin,
 ): Promise<EnrichResult> {
+  // 0. SP-API override — if the brand has a row in brand_sp_api_links,
+  // attempt to pull real trailing-12mo sales from the seller's SP-API
+  // before doing any Keepa work. We still run Keepa for the
+  // reseller / CX / benchmark sections (those don't need seller-side
+  // data), but the math section will use SP-API revenue when available.
+  let spApiTrailing: SpApiTrailingResult | null = null;
+  try {
+    const spResult = await pullTrailing12FromSpApi(admin, brand.id);
+    if (spResult.ok) {
+      spApiTrailing = spResult;
+      console.log(
+        `[v2/enrich] SP-API override succeeded for "${brand.name}" — $${spResult.trailing_12mo_revenue.toLocaleString("en-US")} across ${spResult.asins.length} ASINs`,
+      );
+    } else if (spResult.reason !== "no_link") {
+      console.warn(
+        `[v2/enrich] SP-API override miss for "${brand.name}": ${spResult.reason}${spResult.detail ? ` (${spResult.detail})` : ""}`,
+      );
+    }
+  } catch (e) {
+    console.warn("[v2/enrich] SP-API override failed:", e);
+  }
+
   // 1. Keepa.
   if (!isFresh(brand.keepa_last_enriched_at)) {
     try {
@@ -265,6 +296,7 @@ export async function runV2Enrichment(
     brandLogoUrl,
     asinDetails,
     revenueEstimate,
+    spApiTrailing,
     productCategoryHints,
   };
 }
