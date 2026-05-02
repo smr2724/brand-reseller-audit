@@ -569,7 +569,7 @@ export async function expandVariationAsins(
 // Seller-name resolver (Keepa /seller endpoint)
 // =============================================================
 
-const SELLER_NAME_CACHE = new Map<string, { t: number; name: string | null }>();
+const SELLER_NAME_CACHE = new Map<string, { t: number; name: string | null; country: string | null }>();
 const SELLER_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SELLER_ID_RE = /^A[A-Z0-9]{12,13}$/;
 
@@ -578,8 +578,32 @@ export function isAmazonSellerId(s: string | null | undefined): boolean {
 }
 
 interface SellerCacheReader {
-  read(ids: string[]): Promise<Record<string, { name: string | null; fetched_at: string }>>;
+  read(ids: string[]): Promise<Record<string, { name: string | null; fetched_at: string; payload?: any }>>;
   write(rows: { seller_id: string; seller_name: string | null; payload: any }[]): Promise<void>;
+}
+
+/**
+ * Pull the ISO country code out of a Keepa /seller payload. Keepa returns
+ * `address` as a string array whose final element is the 2-letter country
+ * code (e.g. ["3161 STATE ROAD", "UNIT A", "BENSALEM", "PA", "19020", "US"]).
+ * Some payloads also expose `countryCode` directly.
+ */
+export function extractSellerCountry(payload: any): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  if (typeof payload.countryCode === "string" && payload.countryCode.trim()) {
+    return payload.countryCode.trim().toUpperCase();
+  }
+  const addr = payload.address;
+  if (Array.isArray(addr) && addr.length) {
+    const last = addr[addr.length - 1];
+    if (typeof last === "string" && /^[A-Z]{2}$/i.test(last.trim())) {
+      return last.trim().toUpperCase();
+    }
+  }
+  if (addr && typeof addr === "object" && typeof addr.country === "string") {
+    return addr.country.trim().toUpperCase();
+  }
+  return null;
 }
 
 /**
@@ -593,11 +617,34 @@ interface SellerCacheReader {
  * no name for that ID (rare — usually means ID is malformed or the
  * seller has been delisted). Caller should fall back to the raw ID.
  */
+export interface ResolvedSellerInfo {
+  name: string | null;
+  country: string | null;
+}
+
 export async function resolveSellerNames(
   sellerIds: Iterable<string>,
   cache?: SellerCacheReader,
 ): Promise<Record<string, string | null>> {
+  const full = await resolveSellerInfo(sellerIds, cache);
   const out: Record<string, string | null> = {};
+  for (const [id, info] of Object.entries(full)) {
+    out[id] = info.name;
+  }
+  return out;
+}
+
+/**
+ * Like `resolveSellerNames`, but returns both the seller's display name
+ * and its country code (parsed from the Keepa `address` array). Cached
+ * for 30 days in memory; if a Supabase-backed cache is supplied, the
+ * country falls out of the cached payload too — no extra Keepa calls.
+ */
+export async function resolveSellerInfo(
+  sellerIds: Iterable<string>,
+  cache?: SellerCacheReader,
+): Promise<Record<string, ResolvedSellerInfo>> {
+  const out: Record<string, ResolvedSellerInfo> = {};
   const ids = Array.from(new Set(Array.from(sellerIds).map((s) => (s ?? "").trim()).filter((s) => SELLER_ID_RE.test(s))));
   if (!ids.length) return out;
 
@@ -606,7 +653,7 @@ export async function resolveSellerNames(
   for (const id of ids) {
     const c = SELLER_NAME_CACHE.get(id);
     if (c && now - c.t < SELLER_CACHE_TTL_MS) {
-      out[id] = c.name;
+      out[id] = { name: c.name, country: c.country };
     } else {
       need.push(id);
     }
@@ -620,8 +667,9 @@ export async function resolveSellerNames(
       for (const id of need) {
         const r = rows[id];
         if (r && now - new Date(r.fetched_at).getTime() < SELLER_CACHE_TTL_MS) {
-          SELLER_NAME_CACHE.set(id, { t: now, name: r.name });
-          out[id] = r.name;
+          const country = extractSellerCountry(r.payload);
+          SELLER_NAME_CACHE.set(id, { t: now, name: r.name, country });
+          out[id] = { name: r.name, country };
         } else {
           stillNeed.push(id);
         }
@@ -636,8 +684,8 @@ export async function resolveSellerNames(
   // Hardcoded fast-path for Amazon US — saves 1 token per audit.
   for (let i = need.length - 1; i >= 0; i--) {
     if (need[i] === "ATVPDKIKX0DER") {
-      out["ATVPDKIKX0DER"] = "Amazon.com";
-      SELLER_NAME_CACHE.set("ATVPDKIKX0DER", { t: now, name: "Amazon.com" });
+      out["ATVPDKIKX0DER"] = { name: "Amazon.com", country: "US" };
+      SELLER_NAME_CACHE.set("ATVPDKIKX0DER", { t: now, name: "Amazon.com", country: "US" });
       need.splice(i, 1);
     }
   }
@@ -675,8 +723,9 @@ export async function resolveSellerNames(
     for (const id of chunk) {
       const entry = sellers?.[id];
       const name = (entry?.sellerName ?? null) as string | null;
-      out[id] = name;
-      SELLER_NAME_CACHE.set(id, { t: now, name });
+      const country = extractSellerCountry(entry);
+      out[id] = { name, country };
+      SELLER_NAME_CACHE.set(id, { t: now, name, country });
       writeRows.push({ seller_id: id, seller_name: name, payload: entry ?? null });
     }
   }

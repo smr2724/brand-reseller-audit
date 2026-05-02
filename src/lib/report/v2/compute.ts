@@ -11,6 +11,7 @@
 import type { BrandEnrichmentBundle } from "@/lib/enrichment";
 import type { BrandForReport } from "@/lib/report/narrative";
 import type { CompetitorSnapshot, KeepaAsinDetail } from "./enrich";
+import type { RevenueEstimate, RevenueEstimatePerAsin } from "@/lib/enrichment/revenue-estimator";
 import type {
   CompetitorRow,
   CxAuditAsinScore,
@@ -121,10 +122,13 @@ export function computeDossierBase(
 export function computeCxAuditBase(
   bundle: BrandEnrichmentBundle,
   asinDetails: KeepaAsinDetail[] = [],
+  revenueEstimate: RevenueEstimate | null = null,
 ): Omit<NarrativeCxAudit, "whats_broken"> {
   const dfs = bundle.dataforseo;
   const detailsByAsin = new Map<string, KeepaAsinDetail>();
   for (const d of asinDetails) detailsByAsin.set(d.asin, d);
+  const perAsinRev = new Map<string, RevenueEstimatePerAsin>();
+  for (const r of revenueEstimate?.per_asin ?? []) perAsinRev.set(r.asin, r);
 
   // Score 0-100. When we have real listing fields from Keepa /product,
   // each piece of the listing pulls weight:
@@ -135,8 +139,9 @@ export function computeCxAuditBase(
   //   • reviews      (log-scaled to 20)
   // When the listing fields are null (no /product data), fall back to
   // the prior heuristic so existing reports don't regress.
+  // v2.1 — surface up to 10 ASINs (was 3) and sort by estimated TTM
+  // revenue desc so the highest-opportunity SKUs lead.
   const asin_scores: CxAuditAsinScore[] = (bundle.keepa.asins ?? [])
-    .slice(0, 3)
     .map((a) => {
       const d = detailsByAsin.get(a.asin) ?? null;
       const have = d != null;
@@ -180,6 +185,7 @@ export function computeCxAuditBase(
         if (a.buy_box_price != null) score += 10;
       }
 
+      const rev = perAsinRev.get(a.asin) ?? null;
       return {
         asin: a.asin,
         title: a.title,
@@ -190,8 +196,14 @@ export function computeCxAuditBase(
         has_video: hasVideo,
         reviews,
         rating,
+        ttm_revenue: rev?.ttm_revenue ?? null,
+        ttm_units:
+          rev?.monthly_units != null ? rev.monthly_units * 12 : null,
+        buy_box_price: rev?.buy_box_price ?? a.buy_box_price ?? null,
       };
-    });
+    })
+    .sort((a, b) => (b.ttm_revenue ?? -1) - (a.ttm_revenue ?? -1))
+    .slice(0, 10);
 
   const top_keywords = (dfs?.top_keywords ?? []).slice(0, 12).map((k) => ({
     keyword: k.keyword,
@@ -357,48 +369,18 @@ export function computeMath(ctx: MathContext): NarrativeMath {
     editable: true,
   });
 
-  lines.push({
-    key: "rcg_retainer",
-    label: "RCG retainer / fee (annual)",
-    value: a.rcg_retainer,
-    format: "money",
-    source: a.rcg_retainer == null ? "Placeholder — replaced by deal terms" : "Deal terms",
-    editable: true,
-  });
-
-  const newProfitDelta = sumOrNull([
-    marginCaptured,
-    opsSavings,
-    mcfUplift,
-    a.rcg_retainer != null ? -a.rcg_retainer : 0,
-  ]);
+  // v2.1 — slimmer math table. RCG retainer / current profit / new
+  // annual profit rows are removed: the report sells the recoverable
+  // result, not RCG's invoice. Δ profit per year is the headline number;
+  // exit-value lift is its 7× EBITDA tail. Both are kept editable so a
+  // sales operator can override at the desk.
+  const newProfitDelta = sumOrNull([marginCaptured, opsSavings, mcfUplift]);
   lines.push({
     key: "delta_profit",
-    label: "Δ profit per year (new minus current)",
+    label: "Δ profit per year",
     value: newProfitDelta,
     format: "money",
-    source: "calc: margin captured + ops savings + MCF uplift − RCG fee",
-    is_total: true,
-  });
-
-  lines.push({
-    key: "current_profit",
-    label: "Current profit (per import)",
-    value: ctx.current_profit,
-    format: "money",
-    source: "Imported brand row",
-  });
-
-  const newProfit =
-    ctx.current_profit != null && newProfitDelta != null
-      ? ctx.current_profit + newProfitDelta
-      : null;
-  lines.push({
-    key: "new_profit",
-    label: "New annual profit",
-    value: newProfit,
-    format: "money",
-    source: "calc: current profit + Δ",
+    source: "calc: margin captured + ops savings + MCF uplift",
     is_total: true,
   });
 

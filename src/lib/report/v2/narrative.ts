@@ -109,41 +109,14 @@ export async function llmCoverHeadline(input: {
   topReseller: string | null;
   topResellerSharePct: number | null;
   annualLeak: number | null;
+  exitLift: number | null;
   brandedSearchVolume: number | null;
 }): Promise<string> {
-  const client = getClient();
-  const friendlyTopReseller = friendlyResellerLabel(input.topReseller);
-  const promptInput = { ...input, topReseller: friendlyTopReseller };
-  const fb = fallbackHeadline(promptInput);
-  if (!client) return fb;
-
-  type Out = { headline: string };
-  const result = await callJsonTool<Out>(client, {
-    model: MODEL,
-    toolName: "emit_cover_headline",
-    toolDescription:
-      "Emit one sentence (≤ 30 words) summarizing the brand's reseller exposure for the cover of the audit.",
-    schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        headline: { type: "string" },
-      },
-      required: ["headline"],
-    },
-    userInstruction:
-      "Write one sentence headline (max 30 words) for the audit cover. " +
-      "If `annualLeak` is a number, lead with the dollar leak — e.g. " +
-      "\"<Brand> is on track to lose $<X> to Amazon resellers over the next 12 months.\" " +
-      "If `annualLeak` is null, do NOT say \"not measured\"; instead lead with " +
-      "the buy-box exposure — e.g. \"<Brand> has measurable reseller exposure on Amazon, with the top reseller <Y> holding a <Z>% share.\" " +
-      "Always cite the top reseller and their % share when both are present. " +
-      "No 'approximately', no exclamation points, no hedging.",
-    userPayload: promptInput,
-    maxTokens: 140,
-  });
-  const out = result?.headline?.trim();
-  return out || fb;
+  // Cover headline is purely deterministic now — the brief specifies the
+  // exact template ("you can recapture $X in annual profit and $Y in
+  // business value — without adding a single new customer"). LLM
+  // free-text drift on this line was the failure mode of v2.0.
+  return fallbackHeadline(input);
 }
 
 function fallbackHeadline(input: {
@@ -151,29 +124,25 @@ function fallbackHeadline(input: {
   topReseller: string | null;
   topResellerSharePct: number | null;
   annualLeak: number | null;
+  exitLift: number | null;
 }): string {
-  const sharePct =
-    input.topResellerSharePct != null ? Math.round(input.topResellerSharePct * 100) : null;
-  const reseller = input.topReseller;
+  const profit =
+    input.annualLeak != null
+      ? `$${Math.round(input.annualLeak).toLocaleString("en-US")}`
+      : null;
+  const value =
+    input.exitLift != null
+      ? `$${Math.round(input.exitLift).toLocaleString("en-US")}`
+      : null;
 
-  if (input.annualLeak != null) {
-    const leak = `$${Math.round(input.annualLeak).toLocaleString("en-US")}`;
-    const tail =
-      reseller && sharePct != null
-        ? ` ${reseller} alone holds ${sharePct}% of buy-box share.`
-        : "";
-    return `${input.brandName} is on track to lose ${leak} in profit to Amazon resellers over the next 12 months.${tail}`.trim();
+  if (profit && value) {
+    return `${input.brandName}, you can recapture ${profit} in annual profit and ${value} in business value — without adding a single new customer.`;
   }
-
-  // No revenue / margin inputs — soften the headline rather than print
-  // "— not measured" on the cover.
-  if (reseller && sharePct != null) {
-    return `${input.brandName} has measurable reseller exposure on Amazon, with the top reseller ${reseller} holding a ${sharePct}% share.`;
+  if (profit) {
+    return `${input.brandName}, you can recapture ${profit} in annual profit — without adding a single new customer.`;
   }
-  if (sharePct != null) {
-    return `${input.brandName} has measurable reseller exposure on Amazon, with the top reseller holding a ${sharePct}% share.`;
-  }
-  return `${input.brandName} has measurable reseller exposure on Amazon — buy-box ownership is split across multiple third-party sellers.`;
+  // Soft fallback when the math wasn't computable (no revenue at all).
+  return `${input.brandName}, you can recapture significant profit and business value from your Amazon channel — without adding a single new customer.`;
 }
 
 // =====================================================================
@@ -248,7 +217,7 @@ export async function llmDossierRisk(
       required: ["risk_profile"],
     },
     userInstruction:
-      "Write a 150–200 word risk profile of this reseller. Classify them as one of: classic 3PL diverter, unauthorized importer, authorized but undercutting, or arbitrage seller — pick whichever fits the data. Explain the risk to the brand in plain English. End with the practical move (terminate, MAP-enforce, or buy them out). Do not invent facts about who owns the seller — work only from the data provided. Plain markdown, no headings.",
+      "Write a 150–200 word risk profile of this reseller. Classify them as one of: classic 3PL diverter, unauthorized importer, authorized but undercutting, or arbitrage seller — pick whichever fits the data. Explain the risk to the brand in plain English. End with the practical move (terminate, MAP-enforce, or buy them out). Do not invent facts about who owns the seller — work only from the data provided. If `country` is null, OMIT geographic language entirely (do not write 'from — not measured' or anything similar). Plain markdown, no headings.",
     userPayload: { dossier, brand_name: brand.name, brand_country_match: dossier.country },
     maxTokens: 500,
   });
@@ -263,9 +232,12 @@ function fallbackDossierRisk(
     dossier.share_pct != null
       ? `${Math.round(dossier.share_pct * 100)}%`
       : "— not measured";
-  const country = dossier.country ?? "— not measured";
+  const country = dossier.country;
   const mix = dossier.fulfilment_mix;
-  return `${dossier.seller_name} is the dominant seller on ${brand.name}'s catalog, holding ${share} of buy-box wins (Keepa). They operate from ${country} on a ${mix} model. Without a written authorization, they are running your channel without a contract — every margin point they keep is one you wrote off. The pattern fits a classic 3PL diverter: low overhead, no investment in the brand, undercutting MSRP to win the buy box. The practical move is one of three: (1) terminate and enforce MAP plus distribution-agreement controls, (2) bring them on as an authorized partner under written terms, or (3) buy them out on a one-time basis. We will run that decision tree with you in the first two weeks.`;
+  const opLine = country
+    ? `They operate from ${country} on a ${mix} model.`
+    : `They operate on a ${mix} model.`;
+  return `${dossier.seller_name} is the dominant seller on ${brand.name}'s catalog, holding ${share} of buy-box wins (Keepa). ${opLine} Without a written authorization, they are running your channel without a contract — every margin point they keep is one you wrote off. The pattern fits a classic 3PL diverter: low overhead, no investment in the brand, undercutting MSRP to win the buy box. The practical move is one of three: (1) terminate and enforce MAP plus distribution-agreement controls, (2) bring them on as an authorized partner under written terms, or (3) buy them out on a one-time basis. We will run that decision tree with you in the first two weeks.`;
 }
 
 // =====================================================================
@@ -558,6 +530,150 @@ export async function llmPlan(p: PlanInput): Promise<{
       label: c.label,
       bullets: (c.bullets ?? []).map((b) => String(b)).slice(0, 5),
     })),
+  };
+}
+
+// =====================================================================
+// Five-Step Framework (6-12 month "capture" plan)
+// =====================================================================
+
+export interface FiveStepInput {
+  brandName: string;
+  topReseller: string | null;
+  topResellerSharePct: number | null;
+  uniqueSellerCount: number | null;
+  brandControlledPct: number | null;
+  annualLeak: number | null;
+  exitLift: number | null;
+  revenue: number | null;
+}
+
+interface FiveStepOut {
+  steps: { number: number; title: string; body: string }[];
+  closing: string;
+}
+
+const FIVE_STEP_TITLES: { number: number; title: string }[] = [
+  { number: 1, title: "Identify the Opportunity through an Account Audit" },
+  { number: 2, title: "Set Up Your Amazon Account" },
+  { number: 3, title: "Protect Your Brand" },
+  { number: 4, title: "Transition from Resellers Strategically" },
+  { number: 5, title: "Build and Train an In-House Team" },
+];
+
+const PLAN_CLOSING =
+  "Year 1 is about capture — recovering the demand that already exists. Once that foundation is in place, we have a separate playbook for growth. But growth is not what we're selling today. We're selling the result of capture.";
+
+export async function llmFiveStepPlan(p: FiveStepInput): Promise<FiveStepOut> {
+  const client = getClient();
+  const fb = fallbackFiveStep(p);
+  if (!client) return fb;
+
+  const result = await callJsonTool<FiveStepOut>(client, {
+    model: MODEL,
+    toolName: "emit_five_step_plan",
+    toolDescription:
+      "Emit the five-step capture plan, customized to this brand. Each step has a fixed title and a 2-3 sentence brand-specific body.",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        steps: {
+          type: "array",
+          minItems: 5,
+          maxItems: 5,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              number: { type: "integer", minimum: 1, maximum: 5 },
+              title: { type: "string" },
+              body: { type: "string" },
+            },
+            required: ["number", "title", "body"],
+          },
+        },
+        closing: { type: "string" },
+      },
+      required: ["steps", "closing"],
+    },
+    userInstruction:
+      "Return the Five-Step Framework with these EXACT titles, in order:\n" +
+      FIVE_STEP_TITLES.map((s) => `${s.number}. ${s.title}`).join("\n") +
+      "\n\nFor each step write a 2-3 sentence brand-specific body, max ~50 words. Write in second person ('your brand', 'your listings'). Reference the real numbers passed in (revenue, top reseller name + share %, unique seller count, annualLeak, exitLift) where relevant. Especially Steps 1-4 should cite specific numbers; Step 5 talks about the team model.\n\n" +
+      "HARD RULE: NEVER mention advertising, paid media, DTC, new marketplaces, subscriptions, growth campaigns, international expansion, or any net-new customer acquisition. Year 1 is capture only. The reader is a brand owner who already has demand — we are recovering margin, not generating new sales.\n\n" +
+      "For the `closing` field, return verbatim: " + JSON.stringify(PLAN_CLOSING),
+    userPayload: p,
+    maxTokens: 1200,
+  });
+  if (!result?.steps || result.steps.length !== 5) return fb;
+  // Always force the canonical titles + ordering — LLM is allowed to
+  // freelance on bodies but never on the framework names.
+  const steps = FIVE_STEP_TITLES.map(({ number, title }) => {
+    const match = result.steps.find((s) => s.number === number);
+    return {
+      number,
+      title,
+      body: (match?.body ?? "").trim() || fb.steps.find((s) => s.number === number)!.body,
+    };
+  });
+  return { steps, closing: PLAN_CLOSING };
+}
+
+function fallbackFiveStep(p: FiveStepInput): FiveStepOut {
+  const profit =
+    p.annualLeak != null
+      ? `$${Math.round(p.annualLeak).toLocaleString("en-US")}`
+      : "the recoverable margin";
+  const value =
+    p.exitLift != null
+      ? `$${Math.round(p.exitLift).toLocaleString("en-US")}`
+      : "meaningful business value";
+  const sellerCount =
+    p.uniqueSellerCount != null ? `${p.uniqueSellerCount}` : "multiple";
+  const reseller = p.topReseller ?? "the dominant reseller";
+  const share =
+    p.topResellerSharePct != null
+      ? `${Math.round(p.topResellerSharePct * 100)}%`
+      : null;
+  const brandPct =
+    p.brandControlledPct != null
+      ? `${Math.round(p.brandControlledPct * 100)}%`
+      : "limited";
+  const revenue =
+    p.revenue != null
+      ? `$${Math.round(p.revenue).toLocaleString("en-US")}`
+      : "your trailing-12-month";
+
+  return {
+    steps: [
+      {
+        number: 1,
+        title: "Identify the Opportunity through an Account Audit",
+        body: `Step 1 is already underway — this very report is your audit. We've measured ${revenue} in trailing 12-month Amazon revenue with only ${brandPct} brand-controlled buy box and ${sellerCount} unauthorized resellers led by ${reseller}${share ? ` at ${share} share` : ""}. The recoverable opportunity: ${profit}/year in margin and ${value} in business value.`,
+      },
+      {
+        number: 2,
+        title: "Set Up Your Amazon Account",
+        body: `We stand up brand-controlled Seller Central or Vendor Central operations on ${p.brandName}'s behalf — clean catalog mapping, MAP infrastructure, fulfillment routing — so that when resellers come off the listings the buy box rotates back to you, not into a vacuum. No new SKUs, no new customers — same demand, owned correctly.`,
+      },
+      {
+        number: 3,
+        title: "Protect Your Brand",
+        body: `Brand Registry, Transparency, and our 3rd-party monitoring stack go live for ${p.brandName} on Day 1. We watch every offer, every price move, every new listing — and enforce. The ${sellerCount} sellers competing on your catalog today don't survive a serious enforcement program.`,
+      },
+      {
+        number: 4,
+        title: "Transition from Resellers Strategically",
+        body: `Resellers come off the listings sequentially, not all at once — written terms, MAP enforcement, distribution-agreement controls. ${reseller}${share ? ` (${share} of buy box)` : ""} is first; the long tail follows. ${profit} in annual margin moves from their P&L to yours, without you adding a single new customer.`,
+      },
+      {
+        number: 5,
+        title: "Build and Train an In-House Team",
+        body: `Your team will typically be 1-2 US-based members supported by offshore for logistics, ops, customer service, and listing management — same model that runs Diversified Hospitality today. By month 12, ${p.brandName} owns the channel: the playbook, the team, the buy box.`,
+      },
+    ],
+    closing: PLAN_CLOSING,
   };
 }
 

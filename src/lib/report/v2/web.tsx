@@ -1,21 +1,25 @@
 /**
- * Phase 8 — Public web renderer for v2 audit reports.
+ * Phase 8 / v2.1 — Public web renderer for v2 audit reports.
  *
- * Consumes a `NarrativeV2` (loaded from reports.narrative_json when
- * version === 2) plus the live brand row + enrichment bundle and
- * renders the 9-section layout. CSS-in-JSX with the RCG dark/cream
- * palette, mobile-responsive, print-friendly.
+ * v2.1 reframe: opportunity-first, not feature-rich. Cover leads with
+ * the recapture-without-growth thesis. CX section is now Top Products
+ * & Listing Health (top 10 ASINs with revenue/units estimates).
+ * Competitor benchmark is hidden from the rendered output (data stays
+ * in the DB). The 90-day plan becomes the 5-step Capture framework
+ * (6-12 months, no advertising/DTC/growth language). RCG credibility
+ * is sprinkled across the report as small inline callouts instead of
+ * stacked in a standalone "Why RCG" section.
  *
- * v1 reports continue to render via the existing PublicReportView.
+ * v1 reports still render via the old PublicReportView.
  */
 /* eslint-disable @next/next/no-img-element */
 import Link from "next/link";
 import type { BrandEnrichmentBundle } from "@/lib/enrichment";
 import type {
-  CompetitorRow,
   CxAuditAsinScore,
   MathLine,
   NarrativeV2,
+  PlanStep,
   ResellerRow,
 } from "./types";
 
@@ -33,7 +37,23 @@ export interface PublicReportV2Props {
   pdfUrl: string | null;
 }
 
+const STRATEGY_CALL_MAILTO_SUBJECT = "Amazon%20opportunity%20call";
+const STEVE_EMAIL = "steve@rollemanagementgroup.com";
+
+function strategyCallHref(narrative: NarrativeV2, brandName: string): string {
+  const calendly = narrative.cta?.primary_cta_url;
+  if (calendly) return calendly;
+  const subj = `${STRATEGY_CALL_MAILTO_SUBJECT}%20-%20${encodeURIComponent(brandName)}`;
+  return `mailto:${STEVE_EMAIL}?subject=${subj}`;
+}
+
 export function PublicReportV2({ narrative, brand, bundle, pdfUrl }: PublicReportV2Props) {
+  // Render-time slimming: ensure the math table doesn't include rows
+  // we've removed in v2.1, even on legacy narrative_json that hasn't
+  // been backfilled yet. Same for assumption-margin display.
+  const slimMath = slimMathLines(narrative.math.lines);
+  const callHref = strategyCallHref(narrative, brand.name);
+
   return (
     <div className="rv2">
       <V2Styles />
@@ -41,15 +61,13 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl }: PublicRepor
       <SideNav />
 
       <main className="rv2-main">
-        <SectionCover narrative={narrative} brand={brand} />
+        <SectionCover narrative={narrative} brand={brand} callHref={callHref} />
         <SectionResellerReality narrative={narrative} bundle={bundle} />
         <SectionResellerDossier narrative={narrative} />
-        <SectionCxAudit narrative={narrative} />
-        <SectionCompetitorBenchmark narrative={narrative} />
-        <SectionMath narrative={narrative} />
+        <SectionTopProducts narrative={narrative} />
+        <SectionMath narrative={narrative} lines={slimMath} />
         <SectionPlan narrative={narrative} />
-        <SectionWhyRcg narrative={narrative} />
-        <SectionCta narrative={narrative} pdfUrl={pdfUrl} />
+        <SectionFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
       </main>
 
       <footer className="rv2-footer">
@@ -77,6 +95,7 @@ function Header({
       <div className="rv2-hdr-row">
         <Link href="/" className="rv2-hdr-brand">
           <img src="/rmg-logo-white.png" alt="Rolle Consulting Group" className="rv2-hdr-logo" />
+          <span className="rv2-hdr-wordmark">Rolle Consulting Group</span>
         </Link>
         <div className="rv2-hdr-mid">
           <div className="rv2-hdr-title">{brand.name}</div>
@@ -102,15 +121,13 @@ function Header({
 
 function SideNav() {
   const items: [string, string][] = [
-    ["s-cover", "Headline"],
+    ["s-cover", "The opportunity"],
     ["s-reseller-reality", "Reseller reality"],
     ["s-dossier", "Reseller dossier"],
-    ["s-cx", "CX audit"],
-    ["s-bench", "Benchmark"],
+    ["s-products", "Top products"],
     ["s-math", "The math"],
-    ["s-plan", "90-day plan"],
-    ["s-why", "Why RCG"],
-    ["s-cta", "Next step"],
+    ["s-plan", "Capture plan"],
+    ["s-cta", "Book a call"],
   ];
   return (
     <nav className="rv2-sidenav" aria-label="Sections">
@@ -126,11 +143,21 @@ function SideNav() {
 }
 
 // ====================================================================
-// Section 1 — Cover & Headline
+// Section 1 — Cover (opportunity-first headline + 2 big stats)
 // ====================================================================
 
-function SectionCover({ narrative, brand }: { narrative: NarrativeV2; brand: PublicReportV2Brand }) {
+function SectionCover({
+  narrative,
+  brand,
+  callHref,
+}: {
+  narrative: NarrativeV2;
+  brand: PublicReportV2Brand;
+  callHref: string;
+}) {
   const c = narrative.cover;
+  const profit = c.delta_profit ?? null;
+  const value = c.exit_lift ?? null;
   const initials = brand.name
     .split(/\s+/)
     .map((p) => p[0])
@@ -138,6 +165,11 @@ function SectionCover({ narrative, brand }: { narrative: NarrativeV2; brand: Pub
     .slice(0, 2)
     .join("")
     .toUpperCase();
+
+  // Always render the new opportunity-first headline at render time, even
+  // for legacy narrative_json rows whose `cover.headline` was generated
+  // under the old "you're losing $X" template.
+  const headline = renderOpportunityHeadline(brand.name, profit, value);
 
   return (
     <section id="s-cover" className="rv2-section rv2-section-cover">
@@ -157,24 +189,60 @@ function SectionCover({ narrative, brand }: { narrative: NarrativeV2; brand: Pub
           </div>
         </div>
       </div>
-      <h1 className="rv2-h1">{repairCoverHeadline(c.headline, brand.name)}</h1>
+      <h1 className="rv2-h1">{headline}</h1>
 
-      {c.kpis.length > 0 && (
-        <div className="rv2-kpi-grid">
-          {c.kpis.map((k, i) => (
-            <div key={i} className="rv2-kpi">
-              <div className="rv2-kpi-num">{k.value}</div>
-              <div className="rv2-kpi-lbl">{k.label}</div>
-              {k.sub && (
-                <div className="rv2-kpi-sub">
-                  {k.sub.replace(/\bA[A-Z0-9]{12,13}\b/g, (id) => `Unknown 3P seller (ID: ${id})`)}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="rv2-kpi-grid rv2-kpi-grid-2">
+        <BigStat
+          label="Annual profit recovered"
+          value={profit != null ? money(profit) : "— not measured"}
+          sub="Recoverable margin + ops + fulfillment, transparent math below"
+        />
+        <BigStat
+          label="Business value created"
+          value={value != null ? money(value) : "— not measured"}
+          sub="7× EBITDA on the new annual profit"
+        />
+      </div>
+
+      <RcgCallout
+        kicker="Track record"
+        body={
+          <>
+            Steve, RCG's founder, took <strong>Diversified Hospitality Solutions</strong> from a reseller-fragmented brand to <strong>$8.34M (2022) → $9.02M (2023)</strong> in Amazon revenue and <strong>~2× business valuation</strong> — by capturing existing demand and removing resellers, with no new customer acquisition.
+          </>
+        }
+      />
+
+      <div className="rv2-cover-actions">
+        <a className="rv2-btn rv2-btn-primary" href={callHref}>
+          Book a strategy call
+        </a>
+      </div>
     </section>
+  );
+}
+
+function renderOpportunityHeadline(
+  brandName: string,
+  profit: number | null,
+  value: number | null,
+): string {
+  if (profit != null && value != null) {
+    return `${brandName}, you can recapture ${money(profit)} in annual profit and ${money(value)} in business value — without adding a single new customer.`;
+  }
+  if (profit != null) {
+    return `${brandName}, you can recapture ${money(profit)} in annual profit — without adding a single new customer.`;
+  }
+  return `${brandName}, you can recapture significant profit and business value from your Amazon channel — without adding a single new customer.`;
+}
+
+function BigStat({ label, value, sub }: { label: string; value: string; sub: string }) {
+  return (
+    <div className="rv2-bigstat">
+      <div className="rv2-bigstat-num">{value}</div>
+      <div className="rv2-bigstat-lbl">{label}</div>
+      <div className="rv2-bigstat-sub">{sub}</div>
+    </div>
   );
 }
 
@@ -281,6 +349,11 @@ function BuyBoxPanel({ pct }: { pct: number }) {
 function SectionResellerDossier({ narrative }: { narrative: NarrativeV2 }) {
   const d = narrative.reseller_dossier;
   const friendly = d ? friendlySellerName(d.seller_name) : null;
+  const sellerCount =
+    narrative.reseller_reality.top_sellers.length || null;
+  const inverseBrandPct =
+    d?.share_pct != null ? Math.round(d.share_pct * 100) : null;
+
   return (
     <section id="s-dossier" className="rv2-section">
       <SectionHead
@@ -293,7 +366,7 @@ function SectionResellerDossier({ narrative }: { narrative: NarrativeV2 }) {
           <div className="rv2-dossier-grid">
             <Fact label="Seller name" value={friendly ?? d.seller_name} />
             <Fact label="Marketplace ID" value={d.seller_id ?? "— not measured"} />
-            <Fact label="Country" value={d.country ?? "— not measured"} />
+            <Fact label="Country" value={prettyCountry(d.country) ?? "— not measured"} />
             <Fact
               label="Buy-box share"
               value={d.share_pct != null ? `${Math.round(d.share_pct * 100)}%` : "— not measured"}
@@ -325,6 +398,19 @@ function SectionResellerDossier({ narrative }: { narrative: NarrativeV2 }) {
           )}
 
           <div className="rv2-prose rv2-prose-callout">{paragraphs(d.risk_profile)}</div>
+
+          <RcgCallout
+            kicker="What we do here"
+            body={
+              <>
+                {sellerCount ?? "Multiple"} unauthorized resellers controlling{" "}
+                <strong>
+                  {inverseBrandPct != null ? `${inverseBrandPct}%+` : "most"}
+                </strong>{" "}
+                of your buy box. We've removed resellers for Diversified Hospitality and dozens of other brands without disrupting wholesale relationships — written terms, MAP enforcement, sequenced cutovers.
+              </>
+            }
+          />
         </>
       ) : (
         <p className="rv2-muted">
@@ -337,70 +423,57 @@ function SectionResellerDossier({ narrative }: { narrative: NarrativeV2 }) {
 }
 
 // ====================================================================
-// Section 4 — CX Audit
+// Section 4 — Top Products & Listing Health (per-ASIN economics)
 // ====================================================================
 
-function SectionCxAudit({ narrative }: { narrative: NarrativeV2 }) {
+function SectionTopProducts({ narrative }: { narrative: NarrativeV2 }) {
   const cx = narrative.cx_audit;
-  const trend = cx.branded_trend_pct;
+  // Cards are sorted by revenue desc and capped at 10. Older
+  // narrative_json may have only 3 — we keep what's there.
+  const sorted = cx.asin_scores
+    .slice()
+    .sort((a, b) => (b.ttm_revenue ?? -1) - (a.ttm_revenue ?? -1))
+    .slice(0, 10);
+
   return (
-    <section id="s-cx" className="rv2-section rv2-section-alt">
+    <section id="s-products" className="rv2-section rv2-section-alt">
       <SectionHead
-        eyebrow="Customer Experience Audit"
-        title="What customers see — and where it breaks"
-        source="DataForSEO + Keepa listing signals"
+        eyebrow="Top Products & Listing Health"
+        title="Where the demand sits — and what each listing looks like"
+        source="Keepa /product · BSR + price · 365-day avg"
       />
 
-      <div className="rv2-stats-row">
-        <Stat
-          label="Branded searches/mo"
-          value={cx.branded_search_volume != null ? formatVolume(cx.branded_search_volume) : "— not measured"}
-        />
-        <Stat
-          label="YoY trend"
-          value={trend != null ? `${trend > 0 ? "+" : ""}${trend.toFixed(1)}%` : "— not measured"}
-        />
-        <Stat label="Top ASINs scored" value={String(cx.asin_scores.length)} />
-      </div>
+      {sorted.length > 0 ? (
+        <div className="rv2-asin-scores rv2-asin-scores-wide">
+          {sorted.map((a) => (
+            <AsinScoreCard key={a.asin} score={a} />
+          ))}
+        </div>
+      ) : (
+        <p className="rv2-muted">
+          Top product economics — not measured this run.
+        </p>
+      )}
 
-      {cx.top_keywords.length > 0 && (
-        <div className="rv2-block">
-          <div className="rv2-block-title">Top non-branded keywords</div>
-          <ul className="rv2-kwlist">
-            {cx.top_keywords.map((k, i) => (
-              <li key={`${k.keyword}-${i}`}>
-                <span className="rv2-kw">{k.keyword}</span>
-                <span className="rv2-kw-vol">
-                  {k.search_volume != null ? `${formatVolume(k.search_volume)}/mo` : "—"}
-                </span>
-              </li>
+      {cx.whats_broken.length > 0 && (
+        <div className="rv2-callouts">
+          <div className="rv2-block-title">What's broken right now</div>
+          <ul>
+            {cx.whats_broken.map((c, i) => (
+              <li key={i}>{c}</li>
             ))}
           </ul>
         </div>
       )}
 
-      {cx.asin_scores.length > 0 && (
-        <div className="rv2-asin-scores">
-          {cx.asin_scores.map((a) => (
-            <AsinScoreCard key={a.asin} score={a} />
-          ))}
-        </div>
-      )}
-
-      <div className="rv2-callouts">
-        <div className="rv2-block-title">What's broken right now</div>
-        <ul>
-          {cx.whats_broken.map((c, i) => (
-            <li key={i}>{c}</li>
-          ))}
-        </ul>
-      </div>
+      <p className="rv2-muted-small">
+        Per-ASIN revenue and units are directional estimates from Keepa BSR + buy-box price (365-day avg). Replace with seller's actual TTM during diligence.
+      </p>
     </section>
   );
 }
 
 function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
-  const pct = score.score ?? 0;
   const facts: { label: string; value: string }[] = [];
   if (score.images != null) facts.push({ label: "Images", value: String(score.images) });
   if (score.bullets != null) facts.push({ label: "Bullets", value: String(score.bullets) });
@@ -414,16 +487,45 @@ function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
     <div className="rv2-asincard">
       <div className="rv2-asincard-top">
         <span className="rv2-asin">{score.asin}</span>
-        <span className="rv2-asincard-score">{score.score != null ? `${score.score}/100` : "—"}</span>
+        <span className="rv2-rev-badge rv2-rev-badge-est" title="Directional estimate from Keepa BSR + buy-box price">
+          Estimate
+        </span>
       </div>
       {score.title && <div className="rv2-asincard-title">{score.title}</div>}
-      <div className="rv2-asincard-bar">
-        <div
-          className="rv2-asincard-bar-fill"
-          style={{ width: `${pct}%` }}
-          aria-hidden
-        />
+      <div className="rv2-asincard-econ">
+        <div className="rv2-asincard-econ-row">
+          <span className="rv2-asincard-econ-lbl">TTM revenue</span>
+          <span className="rv2-asincard-econ-val">
+            {score.ttm_revenue != null ? money(score.ttm_revenue) : "— not measured"}
+          </span>
+        </div>
+        <div className="rv2-asincard-econ-row">
+          <span className="rv2-asincard-econ-lbl">TTM units</span>
+          <span className="rv2-asincard-econ-val">
+            {score.ttm_units != null ? Math.round(score.ttm_units).toLocaleString("en-US") : "— not measured"}
+          </span>
+        </div>
+        {score.buy_box_price != null && (
+          <div className="rv2-asincard-econ-row">
+            <span className="rv2-asincard-econ-lbl">Buy-box price</span>
+            <span className="rv2-asincard-econ-val">${score.buy_box_price.toFixed(2)}</span>
+          </div>
+        )}
       </div>
+      {score.score != null && (
+        <div className="rv2-asincard-health">
+          <div className="rv2-asincard-health-lbl">
+            Listing health <span className="rv2-asincard-health-val">{score.score}/100</span>
+          </div>
+          <div className="rv2-asincard-bar">
+            <div
+              className="rv2-asincard-bar-fill"
+              style={{ width: `${score.score}%` }}
+              aria-hidden
+            />
+          </div>
+        </div>
+      )}
       {facts.length > 0 && (
         <div className="rv2-asincard-facts">
           {facts.map((f) => (
@@ -434,76 +536,46 @@ function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
           ))}
         </div>
       )}
-      <div className="rv2-asincard-note">
-        Listing-health from Keepa /product (rating, reviews, images, bullets, A+, video).
-      </div>
     </div>
   );
 }
 
 // ====================================================================
-// Section 5 — Competitor Benchmark
+// Section 5 — The Math (slim)
 // ====================================================================
 
-function SectionCompetitorBenchmark({ narrative }: { narrative: NarrativeV2 }) {
-  const b = narrative.competitor_benchmark;
-  return (
-    <section id="s-bench" className="rv2-section">
-      <SectionHead eyebrow="Competitive Benchmark" title="How you stack up on the same SERP" source="DataForSEO + Keepa" />
+const KEEP_MATH_KEYS = new Set([
+  "revenue",
+  "brand_pct",
+  "reseller_revenue",
+  "reseller_margin",
+  "ops_savings",
+  "mcf_uplift",
+  "delta_profit",
+  "exit_lift",
+]);
 
-      <div className="rv2-table-wrap">
-        <table className="rv2-table">
-          <thead>
-            <tr>
-              <th>Brand</th>
-              <th># Sellers</th>
-              <th>Brand-controlled</th>
-              <th>Branded vol/mo</th>
-              <th>SERP rank</th>
-              <th>Listing health</th>
-            </tr>
-          </thead>
-          <tbody>
-            {b.rows.map((r, i) => (
-              <CompetitorTableRow key={`${r.brand}-${i}`} row={r} />
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {b.one_liner && <p className="rv2-prose">{b.one_liner}</p>}
-    </section>
-  );
+function slimMathLines(lines: MathLine[]): MathLine[] {
+  // Hide rows we've removed in v2.1 (RCG retainer, current profit, new
+  // annual profit). Re-relabel reseller_margin so the assumption % is
+  // visible inline. Re-relabel delta_profit so the prospect sees this is
+  // the headline number, not a footnote.
+  const out: MathLine[] = [];
+  for (const l of lines) {
+    if (!KEEP_MATH_KEYS.has(l.key)) continue;
+    if (l.key === "delta_profit") {
+      out.push({ ...l, label: "Δ profit per year" });
+    } else {
+      out.push(l);
+    }
+  }
+  return out;
 }
 
-function CompetitorTableRow({ row }: { row: CompetitorRow }) {
-  return (
-    <tr className={row.is_audited_brand ? "rv2-table-hi" : ""}>
-      <td>
-        <strong>{row.brand}</strong>
-        {row.is_audited_brand && <span className="rv2-tag">You</span>}
-      </td>
-      <td>{row.unique_seller_count != null ? row.unique_seller_count : "—"}</td>
-      <td>
-        {row.brand_controlled_pct != null
-          ? `${Math.round(row.brand_controlled_pct * 100)}%`
-          : "—"}
-      </td>
-      <td>{row.branded_search_volume != null ? formatVolume(row.branded_search_volume) : "—"}</td>
-      <td>{row.organic_serp_rank != null ? `#${row.organic_serp_rank}` : "—"}</td>
-      <td>{row.listing_health != null ? `${row.listing_health}/100` : "—"}</td>
-    </tr>
-  );
-}
-
-// ====================================================================
-// Section 6 — The Math (transparent)
-// ====================================================================
-
-function SectionMath({ narrative }: { narrative: NarrativeV2 }) {
+function SectionMath({ narrative, lines }: { narrative: NarrativeV2; lines: MathLine[] }) {
   const m = narrative.math;
   return (
-    <section id="s-math" className="rv2-section rv2-section-alt">
+    <section id="s-math" className="rv2-section">
       <SectionHead
         eyebrow="The Math"
         title="Every number, every assumption"
@@ -520,7 +592,7 @@ function SectionMath({ narrative }: { narrative: NarrativeV2 }) {
             </tr>
           </thead>
           <tbody>
-            {m.lines.map((l) => (
+            {lines.map((l) => (
               <MathRow key={l.key} line={l} />
             ))}
           </tbody>
@@ -570,90 +642,151 @@ function formatMath(line: MathLine): string {
 }
 
 // ====================================================================
-// Section 7 — 90-day plan
+// Section 6 — 6-12 Month Capture Plan (Five-Step Framework)
 // ====================================================================
 
 function SectionPlan({ narrative }: { narrative: NarrativeV2 }) {
   const p = narrative.plan;
+  const steps = p.steps && p.steps.length === 5 ? p.steps : null;
+
   return (
-    <section id="s-plan" className="rv2-section">
-      <SectionHead eyebrow="90-Day Takeover Plan" title="How we run it" />
+    <section id="s-plan" className="rv2-section rv2-section-alt">
+      <SectionHead
+        eyebrow="6–12 Month Capture Plan"
+        title="The Five-Step Framework"
+      />
       {p.intro && <p className="rv2-prose">{p.intro}</p>}
-      <div className="rv2-plan-grid">
-        {p.columns.map((col, i) => (
-          <div key={i} className="rv2-plan-col">
-            <div className="rv2-plan-label">{col.label}</div>
-            <ul>
-              {col.bullets.map((b, j) => (
-                <li key={j}>{b}</li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </div>
+
+      {steps ? (
+        <div className="rv2-fivestep">
+          {steps.map((s, i) => (
+            <PlanStepCard
+              key={s.number}
+              step={s}
+              callout={i === 3 ? "step4" : i === 4 ? "step5" : null}
+            />
+          ))}
+        </div>
+      ) : (
+        // Legacy 90-day shape — keeps older reports rendering during the
+        // backfill window.
+        <div className="rv2-plan-grid">
+          {p.columns.map((col, i) => (
+            <div key={i} className="rv2-plan-col">
+              <div className="rv2-plan-label">{col.label}</div>
+              <ul>
+                {col.bullets.map((b, j) => (
+                  <li key={j}>{b}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {p.closing && (
+        <p className="rv2-prose rv2-plan-closing">{p.closing}</p>
+      )}
     </section>
   );
 }
 
-// ====================================================================
-// Section 8 — Why RCG
-// ====================================================================
-
-function SectionWhyRcg({ narrative }: { narrative: NarrativeV2 }) {
-  const w = narrative.why_rcg;
+function PlanStepCard({
+  step,
+  callout,
+}: {
+  step: PlanStep;
+  callout: "step4" | "step5" | null;
+}) {
   return (
-    <section id="s-why" className="rv2-section rv2-section-alt">
-      <SectionHead eyebrow="Why RCG" title="Operators, not consultants" />
-      <div className="rv2-prose">{paragraphs(w.bio)}</div>
-      <div className="rv2-cases">
-        {w.case_studies.map((c, i) => (
-          <div key={i} className="rv2-case">
-            <div className="rv2-case-name">{c.name}</div>
-            <div className="rv2-case-summary">{c.summary}</div>
-            <div className="rv2-case-metric">{c.metric}</div>
-          </div>
-        ))}
+    <div className="rv2-step">
+      <div className="rv2-step-head">
+        <div className="rv2-step-num">Step {step.number}</div>
+        <div className="rv2-step-title">{step.title}</div>
       </div>
-      <div className="rv2-risk">
-        <div className="rv2-risk-eyebrow">Risk reversal</div>
-        <p>{w.risk_reversal}</p>
-      </div>
-    </section>
+      <p className="rv2-step-body">{step.body}</p>
+      {callout === "step4" && (
+        <RcgCallout
+          kicker="Case study"
+          body={
+            <>
+              When we did this for Diversified Hospitality, customer experience metrics improved immediately and Amazon sales went from <strong>$8.34M (2022)</strong> to <strong>$9.02M (2023)</strong> — without adding a single new customer. They also paid down $5M in AP from the recovered margin.
+            </>
+          }
+        />
+      )}
+      {callout === "step5" && (
+        <RcgCallout
+          kicker="Team model"
+          body={
+            <>
+              Your team will typically be <strong>1-2 US-based members</strong> supported by offshore for logistics, ops, customer service, and listing management — the same model that runs Diversified Hospitality today.
+            </>
+          }
+        />
+      )}
+    </div>
   );
 }
 
 // ====================================================================
-// Section 9 — CTA
+// Section 7 — Footer CTA + Steve bio block
 // ====================================================================
 
-function SectionCta({ narrative, pdfUrl }: { narrative: NarrativeV2; pdfUrl: string | null }) {
+function SectionFooterCta({
+  narrative,
+  brand,
+  pdfUrl,
+  callHref,
+}: {
+  narrative: NarrativeV2;
+  brand: PublicReportV2Brand;
+  pdfUrl: string | null;
+  callHref: string;
+}) {
   const c = narrative.cta;
   return (
     <section id="s-cta" className="rv2-section rv2-section-cta">
-      <h2 className="rv2-h2">{c.headline}</h2>
-      <p className="rv2-prose">
-        Reply to the email this came in on, or grab a slot directly.
+      <h2 className="rv2-h2">
+        Book a strategy call to walk through these numbers and your 6–12 month plan.
+      </h2>
+      <p className="rv2-prose rv2-cta-prose">
+        No high-pressure sales — we'll walk the math line-by-line, talk through
+        the reseller list, and answer questions. The report sells the result; this
+        call just opens the door.
       </p>
-      <p className="rv2-cta-contact">
-        <a href={`mailto:${c.secondary_email}`}>{c.secondary_email}</a>
-        {c.secondary_phone && (
-          <>
-            <br />
-            {c.secondary_phone}
-          </>
-        )}
-      </p>
+
       <div className="rv2-cta-actions">
-        {c.primary_cta_url && (
-          <a className="rv2-btn rv2-btn-primary" href={c.primary_cta_url} target="_blank" rel="noreferrer">
-            {c.primary_cta_label}
-          </a>
-        )}
+        <a className="rv2-btn rv2-btn-primary" href={callHref}>
+          Book a strategy call
+        </a>
         {pdfUrl && (
           <a className="rv2-btn" href={pdfUrl} target="_blank" rel="noreferrer">
             Download the PDF
           </a>
         )}
+      </div>
+
+      <div className="rv2-bio">
+        <div className="rv2-bio-name">Steve Rolle · Founder, Rolle Consulting Group</div>
+        <p className="rv2-bio-body">
+          Brand owner who doubled the value of Diversified Hospitality Solutions on
+          Amazon by reclaiming control from resellers — taking it from a
+          reseller-fragmented catalog to <strong>$9.02M (2023)</strong> in revenue and
+          paying down $5M in AP from the recovered margin. RCG is the consulting
+          group that productized that playbook. We work performance-based on the
+          additional first-year profit we generate; if we don't add profit, we
+          don't get paid.
+        </p>
+        <p className="rv2-cta-contact">
+          <a href={`mailto:${c.secondary_email}`}>{c.secondary_email}</a>
+          {c.secondary_phone && (
+            <>
+              {" · "}
+              {c.secondary_phone}
+            </>
+          )}
+        </p>
       </div>
     </section>
   );
@@ -673,15 +806,6 @@ function SectionHead({ eyebrow, title, source }: { eyebrow: string; title: strin
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rv2-stat">
-      <div className="rv2-stat-num">{value}</div>
-      <div className="rv2-stat-lbl">{label}</div>
-    </div>
-  );
-}
-
 function Fact({ label, value }: { label: string; value: string }) {
   return (
     <div className="rv2-fact">
@@ -691,60 +815,74 @@ function Fact({ label, value }: { label: string; value: string }) {
   );
 }
 
+function RcgCallout({
+  kicker,
+  body,
+}: {
+  kicker: string;
+  body: React.ReactNode;
+}) {
+  return (
+    <aside className="rv2-rcg-callout">
+      <div className="rv2-rcg-callout-kicker">{kicker}</div>
+      <div className="rv2-rcg-callout-body">{body}</div>
+    </aside>
+  );
+}
+
 // ====================================================================
 // Helpers
 // ====================================================================
 
-// Amazon merchant IDs are 13-14 chars, all caps, start with "A".
-// When Keepa doesn't return a friendly storefront name we'd otherwise
-// show this raw ID to the prospect, which reads like a bug.
 const AMAZON_SELLER_ID_RE = /^A[A-Z0-9]{12,13}$/;
 
 function isAmazonSellerId(s: string | null | undefined): boolean {
   return !!s && AMAZON_SELLER_ID_RE.test(s.trim());
 }
 
-function friendlySellerName(name: string | null | undefined, fallbackId?: string | null): string {
+function friendlySellerName(name: string | null | undefined): string {
   const n = (name ?? "").trim();
   if (!n) return "Unknown 3P seller";
   if (isAmazonSellerId(n)) return `Unknown 3P seller (ID: ${n})`;
-  // Sometimes Keepa hands back a name plus the ID concatenated — keep the name.
   return n;
 }
 
-// Repair a previously-generated cover headline that contains the
-// "annual reseller leak of — not measured" pattern. Existing rows in
-// Supabase have already-baked headlines we can't re-run; this scrubs
-// at render time without changing the stored narrative.
-function repairCoverHeadline(raw: string, brandName: string): string {
-  let s = raw;
-  // 1. Replace seller-id tokens with friendly form.
-  s = s.replace(/\bA[A-Z0-9]{12,13}\b/g, (id) => `Unknown 3P seller (ID: ${id})`);
-  // 2. Soft-rewrite the broken-leak sentence shape.
-  //    "<X> has an annual reseller leak of — not measured, with top reseller <Y> holding a <Z>% share."
-  //    →  "<X> has measurable reseller exposure on Amazon, with the top reseller <Y> holding a <Z>% share."
-  const leakRe =
-    /([\w\s'&.\-]+?)\s+has\s+an\s+annual\s+reseller\s+leak\s+of\s+(?:—|--|-)\s*not\s+measured,?\s*with\s+top\s+reseller\s+(.+?)\s+holding\s+a?\s*([\d.]+)%\s+share\.?/i;
-  s = s.replace(leakRe, (_m, brand, seller, pct) => {
-    return `${(brand ?? brandName).trim()} has measurable reseller exposure on Amazon, with the top reseller ${seller} holding a ${pct}% share.`;
-  });
-  // 3. Generic null-leak phrase cleanup if the regex above didn't match.
-  //    Strips the leading article ("an "/"a "/"the ") that preceded the
-  //    broken noun phrase, and tightens "with top reseller" → ", with the top reseller".
-  s = s.replace(
-    /\b(an?|the)\s+annual\s+reseller\s+leak\s+of\s+(?:—|--|-)\s*not\s+measured,?/i,
-    "measurable reseller exposure on Amazon,",
-  );
-  s = s.replace(/\s+with\s+top\s+reseller\b/i, " with the top reseller");
-  // Collapse any accidental ", ," from the rewrites above.
-  s = s.replace(/,\s*,/g, ",");
-  return s.trim();
+const COUNTRY_NAMES: Record<string, string> = {
+  US: "United States",
+  GB: "United Kingdom",
+  UK: "United Kingdom",
+  CA: "Canada",
+  DE: "Germany",
+  FR: "France",
+  IT: "Italy",
+  ES: "Spain",
+  JP: "Japan",
+  AU: "Australia",
+  MX: "Mexico",
+  CN: "China",
+  IN: "India",
+  BR: "Brazil",
+  NL: "Netherlands",
+  PL: "Poland",
+  SE: "Sweden",
+  TR: "Turkey",
+  AE: "United Arab Emirates",
+  SG: "Singapore",
+  HK: "Hong Kong",
+  TW: "Taiwan",
+  KR: "South Korea",
+};
+
+function prettyCountry(c: string | null | undefined): string | null {
+  if (!c) return null;
+  const k = c.trim().toUpperCase();
+  if (!k) return null;
+  return COUNTRY_NAMES[k] ?? k;
 }
 
-function formatVolume(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
+function money(n: number | null | undefined): string {
+  if (n == null) return "— not measured";
+  return `$${Math.round(Number(n)).toLocaleString("en-US")}`;
 }
 
 function formatShortDate(iso: string | null): string {
@@ -808,7 +946,6 @@ function V2Styles() {
         max-width: 100vw;
       }
 
-      /* Layout: side nav on desktop, header + scroll on mobile */
       .rv2-main {
         max-width: 980px;
         margin: 0 auto;
@@ -821,9 +958,6 @@ function V2Styles() {
         position: relative;
       }
       .rv2-section:first-of-type { border-top: none; }
-      /* Full-bleed alt background without the old -9999px margin hack
-         (which created a 20k+ px element on mobile). Use a pseudo-element
-         pinned to the viewport behind content. */
       .rv2-section-alt { background: var(--bg-alt); }
       .rv2-section-cover { padding-top: clamp(48px, 10vw, 96px); }
       .rv2-section-cta { padding: clamp(48px, 10vw, 96px) 0; text-align: center; }
@@ -870,8 +1004,15 @@ function V2Styles() {
         flex-wrap: wrap;
       }
       .rv2-hdr-mid { min-width: 0; word-break: break-word; }
-      .rv2-hdr-brand { display: inline-flex; align-items: center; }
+      .rv2-hdr-brand {
+        display: inline-flex; align-items: center; gap: 8px;
+        text-decoration: none;
+      }
       .rv2-hdr-logo { height: 28px; width: auto; }
+      .rv2-hdr-wordmark {
+        color: var(--text); font-size: 13px; font-weight: 600;
+        letter-spacing: 0.02em; white-space: nowrap;
+      }
       .rv2-hdr-mid { flex: 1; min-width: 0; }
       .rv2-hdr-title { font-weight: 600; color: var(--text); font-size: 14px; line-height: 1.2; }
       .rv2-hdr-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
@@ -890,9 +1031,7 @@ function V2Styles() {
       .rv2-btn-primary:hover { background: var(--gold-soft); border-color: var(--gold-soft); }
 
       /* Side nav */
-      .rv2-sidenav {
-        display: none;
-      }
+      .rv2-sidenav { display: none; }
       @media (min-width: 1180px) {
         .rv2-sidenav {
           display: block;
@@ -924,21 +1063,49 @@ function V2Styles() {
       .rv2-cover-logo-img { max-width: 100%; max-height: 100%; }
       .rv2-cover-initials { color: var(--gold); font-weight: 700; font-size: 22px; letter-spacing: 0.04em; }
       .rv2-cover-meta-line { font-size: 14px; }
+      .rv2-cover-actions { margin-top: 28px; }
 
       .rv2-kpi-grid {
         display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
         gap: 14px; margin-top: 36px;
       }
-      .rv2-kpi {
-        padding: 18px; border: 1px solid var(--border);
-        background: rgba(255,255,255,0.02); border-radius: 12px;
+      .rv2-kpi-grid-2 {
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       }
-      .rv2-kpi-num {
-        font-size: 30px; font-weight: 700; letter-spacing: -0.01em;
-        color: var(--gold); font-variant-numeric: tabular-nums;
+
+      /* Big stats on the cover */
+      .rv2-bigstat {
+        padding: 24px; border: 1px solid var(--border);
+        background: rgba(255,255,255,0.02); border-radius: 14px;
       }
-      .rv2-kpi-lbl { font-size: 13px; color: var(--text); margin-top: 4px; }
-      .rv2-kpi-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+      .rv2-bigstat-num {
+        font-size: clamp(34px, 6vw, 48px); font-weight: 700; letter-spacing: -0.02em;
+        color: var(--gold); font-variant-numeric: tabular-nums; line-height: 1.1;
+      }
+      .rv2-bigstat-lbl {
+        font-size: 14px; color: var(--text); margin-top: 6px; font-weight: 600;
+      }
+      .rv2-bigstat-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+      /* RCG credibility callouts (sprinkled throughout) */
+      .rv2-rcg-callout {
+        margin: 24px 0;
+        padding: 14px 18px;
+        border-left: 3px solid var(--gold);
+        border-top: 1px solid rgba(201,169,106,0.18);
+        border-right: 1px solid rgba(201,169,106,0.18);
+        border-bottom: 1px solid rgba(201,169,106,0.18);
+        background: linear-gradient(180deg, rgba(201,169,106,0.10), rgba(201,169,106,0.04));
+        border-radius: 0 8px 8px 0;
+        font-size: 13px; line-height: 1.55;
+      }
+      .rv2-rcg-callout-kicker {
+        font-size: 10px; color: var(--gold);
+        text-transform: uppercase; letter-spacing: 0.12em; font-weight: 700;
+        margin-bottom: 4px;
+      }
+      .rv2-rcg-callout-body { color: var(--text); }
+      .rv2-rcg-callout-body strong { color: var(--gold-soft); font-weight: 600; }
 
       /* Reseller bars */
       .rv2-bars {
@@ -1035,47 +1202,44 @@ function V2Styles() {
       .rv2-asin-title { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
       .rv2-asin-price { text-align: right; color: var(--gold-soft); font-variant-numeric: tabular-nums; }
 
-      /* CX audit */
-      .rv2-stats-row {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        gap: 12px; margin-bottom: 24px;
-      }
-      .rv2-stat {
-        padding: 14px; border: 1px solid var(--border-soft);
-        border-radius: 10px; background: rgba(255,255,255,0.015);
-      }
-      .rv2-stat-num { font-size: 22px; font-weight: 700; color: var(--gold); }
-      .rv2-stat-lbl { font-size: 12px; color: var(--text); margin-top: 4px; }
-
-      .rv2-block { margin: 16px 0; }
-      .rv2-block-title {
-        font-size: 12px; color: var(--text-muted);
-        text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px;
-      }
-      .rv2-kwlist { list-style: none; padding: 0; margin: 0; }
-      .rv2-kwlist li {
-        display: flex; justify-content: space-between; gap: 12px;
-        padding: 8px 0; border-bottom: 1px solid var(--border-soft); font-size: 14px;
-      }
-      .rv2-kw { color: var(--text); }
-      .rv2-kw-vol { color: var(--gold-soft); font-variant-numeric: tabular-nums; }
-
+      /* Top products / ASIN cards */
       .rv2-asin-scores {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 12px; margin-top: 16px;
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 14px; margin-top: 16px;
+      }
+      .rv2-asin-scores-wide {
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       }
       .rv2-asincard {
-        padding: 14px; border: 1px solid var(--border-soft);
+        padding: 16px; border: 1px solid var(--border-soft);
         border-radius: 10px; background: rgba(255,255,255,0.015);
+        display: flex; flex-direction: column; gap: 10px;
       }
-      .rv2-asincard-top { display: flex; justify-content: space-between; align-items: baseline; }
-      .rv2-asincard-score { color: var(--gold); font-weight: 700; font-variant-numeric: tabular-nums; }
-      .rv2-asincard-title { font-size: 13px; color: var(--text); margin: 6px 0 8px; min-height: 32px; }
+      .rv2-asincard-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+      .rv2-asincard-title { font-size: 13px; color: var(--text); line-height: 1.45; min-height: 32px; }
+      .rv2-asincard-econ {
+        display: grid; gap: 4px;
+        padding: 10px 12px; border-radius: 8px;
+        background: rgba(201,169,106,0.06);
+        border: 1px solid rgba(201,169,106,0.18);
+      }
+      .rv2-asincard-econ-row {
+        display: flex; justify-content: space-between; align-items: baseline;
+        gap: 8px; font-size: 13px;
+      }
+      .rv2-asincard-econ-lbl { color: var(--text-muted); }
+      .rv2-asincard-econ-val { color: var(--gold-soft); font-weight: 600; font-variant-numeric: tabular-nums; }
+      .rv2-asincard-health { display: grid; gap: 4px; }
+      .rv2-asincard-health-lbl {
+        font-size: 11px; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.06em;
+        display: flex; justify-content: space-between;
+      }
+      .rv2-asincard-health-val { color: var(--gold); font-weight: 700; letter-spacing: 0; text-transform: none; }
       .rv2-asincard-bar { height: 6px; background: rgba(255,255,255,0.04); border-radius: 3px; overflow: hidden; }
       .rv2-asincard-bar-fill { height: 100%; background: var(--gold); }
-      .rv2-asincard-note { font-size: 11px; color: var(--text-muted); margin-top: 8px; }
       .rv2-asincard-facts {
-        display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;
+        display: flex; flex-wrap: wrap; gap: 6px;
       }
       .rv2-asincard-fact {
         display: inline-flex; align-items: baseline; gap: 4px;
@@ -1098,8 +1262,12 @@ function V2Styles() {
         background: rgba(201,169,106,0.06); color: var(--text); font-size: 14px;
         border-radius: 0 6px 6px 0;
       }
+      .rv2-block-title {
+        font-size: 12px; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px;
+      }
 
-      /* Tables (benchmark + math) */
+      /* Tables */
       .rv2-table-wrap {
         width: 100%;
         max-width: 100%;
@@ -1107,9 +1275,7 @@ function V2Styles() {
         -webkit-overflow-scrolling: touch;
         box-sizing: border-box;
       }
-      .rv2-table-wrap > .rv2-table {
-        min-width: 480px;
-      }
+      .rv2-table-wrap > .rv2-table { min-width: 480px; }
       .rv2-table {
         width: 100%; border-collapse: collapse; font-size: 14px;
         margin: 8px 0;
@@ -1123,7 +1289,6 @@ function V2Styles() {
         font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
         color: var(--text-muted); font-weight: 600;
       }
-      .rv2-table-hi { background: rgba(201,169,106,0.08); }
       .rv2-tag {
         display: inline-block; padding: 1px 6px; margin-left: 6px;
         border-radius: 4px; background: var(--gold); color: #1a1408;
@@ -1154,7 +1319,36 @@ function V2Styles() {
         border: 1px solid rgba(224,170,76,0.4);
       }
 
-      /* Plan */
+      /* Five-step plan */
+      .rv2-fivestep {
+        display: grid; gap: 14px; margin-top: 16px;
+      }
+      .rv2-step {
+        padding: 20px; border: 1px solid var(--border-soft);
+        border-radius: 12px; background: rgba(255,255,255,0.015);
+      }
+      .rv2-step-head {
+        display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px;
+        flex-wrap: wrap;
+      }
+      .rv2-step-num {
+        font-size: 11px; color: var(--gold);
+        text-transform: uppercase; letter-spacing: 0.12em; font-weight: 700;
+      }
+      .rv2-step-title {
+        font-size: 17px; color: var(--text); font-weight: 600;
+        font-family: 'Fraunces', 'Inter', serif;
+      }
+      .rv2-step-body { font-size: 14.5px; color: var(--text); margin: 0; line-height: 1.6; }
+      .rv2-plan-closing {
+        margin-top: 20px; padding: 16px 20px;
+        border-left: 3px solid var(--gold);
+        background: rgba(201,169,106,0.06);
+        border-radius: 0 8px 8px 0;
+        font-style: italic;
+      }
+
+      /* Legacy 90-day plan */
       .rv2-plan-grid {
         display: grid; grid-template-columns: repeat(3, 1fr);
         gap: 14px; margin-top: 16px;
@@ -1177,36 +1371,24 @@ function V2Styles() {
         width: 6px; height: 6px; border-radius: 50%; background: var(--gold);
       }
 
-      /* Cases */
-      .rv2-cases {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-        gap: 12px; margin: 16px 0;
-      }
-      .rv2-case {
-        padding: 18px; border: 1px solid var(--border-soft);
-        border-radius: 10px; background: rgba(255,255,255,0.015);
-      }
-      .rv2-case-name { font-weight: 600; color: var(--text); }
-      .rv2-case-summary { font-size: 14px; color: var(--text-muted); margin: 8px 0; line-height: 1.5; }
-      .rv2-case-metric { color: var(--gold); font-size: 13px; font-weight: 600; }
-
-      .rv2-risk {
-        margin-top: 16px; padding: 18px;
-        border: 1px solid rgba(201,169,106,0.4); border-radius: 10px;
-        background: rgba(201,169,106,0.06);
-      }
-      .rv2-risk-eyebrow {
-        font-size: 11px; color: var(--gold);
-        text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
-        margin-bottom: 6px;
-      }
-
-      /* CTA */
-      .rv2-cta-contact { font-size: 16px; color: var(--text); margin: 16px auto 24px; line-height: 1.7; }
-      .rv2-cta-contact a { color: var(--gold); text-decoration: none; }
+      /* Bio + CTA */
+      .rv2-cta-prose { max-width: 620px; margin: 16px auto 24px; color: var(--text-muted); }
       .rv2-cta-actions {
         display: inline-flex; gap: 12px; flex-wrap: wrap; justify-content: center;
       }
+      .rv2-bio {
+        max-width: 640px; margin: 40px auto 0;
+        padding: 22px; border: 1px solid var(--border-soft);
+        border-radius: 12px; background: rgba(255,255,255,0.015);
+        text-align: left;
+      }
+      .rv2-bio-name {
+        font-weight: 600; color: var(--text); font-size: 15px; margin-bottom: 8px;
+      }
+      .rv2-bio-body { font-size: 14px; color: var(--text); line-height: 1.65; margin: 0 0 12px; }
+      .rv2-bio-body strong { color: var(--gold-soft); font-weight: 600; }
+      .rv2-cta-contact { font-size: 14px; color: var(--text); margin: 0; }
+      .rv2-cta-contact a { color: var(--gold); text-decoration: none; }
 
       /* Footer */
       .rv2-footer {
@@ -1236,19 +1418,18 @@ function V2Styles() {
           min-height: 32px;
           padding: 6px 8px;
         }
-        .rv2-cases { grid-template-columns: 1fr; }
-        .rv2-stats-row { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
         .rv2-dossier-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
-        .rv2-asin-scores { grid-template-columns: 1fr; }
-        .rv2-kpi-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+        .rv2-asin-scores, .rv2-asin-scores-wide { grid-template-columns: 1fr; }
+        .rv2-kpi-grid, .rv2-kpi-grid-2 { grid-template-columns: 1fr; }
         .rv2-cover-logo { width: 56px; height: 56px; }
         .rv2-hdr-actions .rv2-btn { padding: 7px 12px; font-size: 12px; }
+        .rv2-hdr-wordmark { display: none; }
         .rv2-section-head { margin-bottom: 20px; }
         .rv2-prose { font-size: 15px; }
       }
       @media (max-width: 480px) {
         .rv2-bar-row { grid-template-columns: 20px minmax(0, 1fr) 56px; }
-        .rv2-kpi-grid, .rv2-stats-row, .rv2-dossier-grid { grid-template-columns: 1fr; }
+        .rv2-dossier-grid { grid-template-columns: 1fr; }
         .rv2-hdr-row { padding: 12px 16px; }
         .rv2-hdr-mid { flex-basis: 100%; }
       }
@@ -1261,22 +1442,23 @@ function V2Styles() {
         .rv2-hdr, .rv2-sidenav, .rv2-cta-actions { display: none !important; }
         .rv2-section { page-break-inside: avoid; padding: 24px 0; border-top: 1px solid #ddd; }
         .rv2-section-alt { background: #fafafa !important; }
-        .rv2-h1, .rv2-h2, .rv2-prose, .rv2-stat-lbl, .rv2-fact-val, .rv2-asin-title,
+        .rv2-h1, .rv2-h2, .rv2-prose, .rv2-fact-val, .rv2-asin-title,
         .rv2-bar-name, .rv2-table td, .rv2-table th, .rv2-callouts li, .rv2-plan-col li,
-        .rv2-case-name, .rv2-case-summary, .rv2-cover-meta-line, .rv2-bbpanel-brand, .rv2-bbpanel-reseller {
+        .rv2-step-title, .rv2-step-body, .rv2-bio-name, .rv2-bio-body, .rv2-bigstat-lbl,
+        .rv2-cover-meta-line, .rv2-bbpanel-brand, .rv2-bbpanel-reseller, .rv2-rcg-callout-body {
           color: #111 !important;
         }
-        .rv2-eyebrow, .rv2-source, .rv2-stat-num, .rv2-kpi-num, .rv2-asin, .rv2-bar-val,
-        .rv2-asincard-score, .rv2-tag, .rv2-plan-label, .rv2-case-metric, .rv2-risk-eyebrow,
-        .rv2-num, .rv2-asincard-bar-fill, .rv2-bar-fill, .rv2-bar-rank {
+        .rv2-eyebrow, .rv2-source, .rv2-bigstat-num, .rv2-asin, .rv2-bar-val,
+        .rv2-asincard-health-val, .rv2-tag, .rv2-plan-label, .rv2-step-num, .rv2-rcg-callout-kicker,
+        .rv2-num, .rv2-asincard-bar-fill, .rv2-bar-fill, .rv2-bar-rank, .rv2-asincard-econ-val {
           color: #8a6d2e !important;
         }
         .rv2-muted, .rv2-fact-lbl, .rv2-asincard-note, .rv2-checklist-note, .rv2-bbpanel-note,
-        .rv2-block-title, .rv2-dossier-subtitle, .rv2-muted-small {
+        .rv2-block-title, .rv2-dossier-subtitle, .rv2-muted-small, .rv2-bigstat-sub {
           color: #555 !important;
         }
-        .rv2-kpi, .rv2-stat, .rv2-fact, .rv2-asincard, .rv2-plan-col, .rv2-case, .rv2-bars,
-        .rv2-checklist, .rv2-bbpanel, .rv2-callouts, .rv2-prose-callout, .rv2-risk {
+        .rv2-bigstat, .rv2-fact, .rv2-asincard, .rv2-plan-col, .rv2-step, .rv2-bars,
+        .rv2-checklist, .rv2-bbpanel, .rv2-callouts, .rv2-prose-callout, .rv2-rcg-callout, .rv2-bio {
           background: #fafafa !important; border-color: #ddd !important;
         }
         .rv2-bar-fill { background: #c9a96a !important; }

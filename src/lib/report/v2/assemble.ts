@@ -24,6 +24,7 @@ import {
   llmCoverHeadline,
   llmCxBroken,
   llmDossierRisk,
+  llmFiveStepPlan,
   llmMathNotes,
   llmPlan,
   llmResellerRealityLine,
@@ -74,7 +75,7 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
   // 1. Pure compute (no I/O).
   const reality = computeResellerReality(bundle);
   const dossierBase = computeDossierBase(bundle);
-  const cxBase = computeCxAuditBase(bundle, asinDetails);
+  const cxBase = computeCxAuditBase(bundle, asinDetails, revenueEstimate);
   const benchmarkBase = computeCompetitorBenchmark(brand, bundle, competitors, cxBase);
 
   // 2. Math — uses assumptions + brand row + Keepa freshness.
@@ -141,9 +142,11 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     revenueBadge,
   });
 
-  // Annual leak for the cover headline = the "delta_profit" line.
+  // Headline economics for the cover — Δ profit and 7× exit lift.
   const deltaLine = math.lines.find((l) => l.key === "delta_profit");
+  const exitLine = math.lines.find((l) => l.key === "exit_lift");
   const annualLeak = deltaLine?.value ?? null;
+  const exitLift = exitLine?.value ?? null;
 
   // 3. LLM section calls — fanned out in parallel where possible.
   const [
@@ -154,12 +157,14 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     competitorLine,
     mathNotes,
     plan,
+    fiveStep,
   ] = await Promise.all([
     llmCoverHeadline({
       brandName: brand.name,
       topReseller: bundle.keepa.top_seller ?? null,
       topResellerSharePct: bundle.keepa.top_seller_share_pct ?? null,
       annualLeak,
+      exitLift,
       brandedSearchVolume: bundle.dataforseo?.branded_search_volume ?? null,
     }),
     llmResellerRealityLine(reality, bundle),
@@ -174,6 +179,16 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
       topReseller: bundle.keepa.top_seller ?? null,
       uniqueSellerCount: bundle.keepa.unique_seller_count,
       brandedSearchVolume: bundle.dataforseo?.branded_search_volume ?? null,
+    }),
+    llmFiveStepPlan({
+      brandName: brand.name,
+      topReseller: bundle.keepa.top_seller ?? null,
+      topResellerSharePct: bundle.keepa.top_seller_share_pct ?? null,
+      uniqueSellerCount: bundle.keepa.unique_seller_count,
+      brandControlledPct: bundle.keepa.brand_controlled_pct,
+      annualLeak,
+      exitLift,
+      revenue: trailing12,
     }),
   ]);
 
@@ -213,7 +228,9 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     cover: {
       headline: coverHeadline,
       brand_logo_url: brandLogoUrl,
-      kpis: buildCoverKpis(brand, bundle, annualLeak),
+      kpis: buildCoverKpis(annualLeak, exitLift),
+      delta_profit: annualLeak,
+      exit_lift: exitLift,
     },
 
     reseller_reality: finalReality,
@@ -224,15 +241,17 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
 
     plan: {
       intro: plan.intro,
-      columns: plan.columns.slice(0, 3) as NarrativeV2["plan"]["columns"],
+      columns: plan.columns.slice(0, 3),
+      steps: fiveStep.steps,
+      closing: fiveStep.closing,
     },
 
     why_rcg: buildWhyRcg(),
 
     cta: {
-      headline: `Talk this through for ${brand.name}.`,
+      headline: `Book a strategy call for ${brand.name}.`,
       primary_cta_url: calendlyUrl,
-      primary_cta_label: "Schedule a 30-min call",
+      primary_cta_label: "Book a strategy call",
       secondary_email: contactEmail,
       secondary_phone: null,
     },
@@ -275,32 +294,25 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
 }
 
 function buildCoverKpis(
-  brand: BrandForReport,
-  bundle: BrandEnrichmentBundle,
   annualLeak: number | null,
+  exitLift: number | null,
 ): { label: string; value: string; sub: string | null }[] {
+  // v2.1 — opportunity-first cover. Two big stats, both economic, both
+  // computed from the math table. Keeps the cover tight and on-message
+  // (capture, not growth). The 7× footnote is rendered alongside.
   const kpis: { label: string; value: string; sub: string | null }[] = [];
-
-  if (brand.est_monthly_revenue != null) {
-    kpis.push({
-      label: "Monthly Amazon revenue",
-      value: money(brand.est_monthly_revenue),
-      sub: "Keepa-aligned import",
-    });
-  }
-  const topShare = bundle.keepa.top_seller_share_pct;
-  if (topShare != null && bundle.keepa.top_seller) {
-    kpis.push({
-      label: "Top reseller share",
-      value: `${Math.round(topShare * 100)}%`,
-      sub: `${bundle.keepa.top_seller} (Keepa)`,
-    });
-  }
   if (annualLeak != null) {
     kpis.push({
-      label: "Annualized profit leak",
+      label: "Annual profit recovered",
       value: money(annualLeak),
-      sub: "transparent math, see Section 6",
+      sub: "Keepa + math model · see Section 5",
+    });
+  }
+  if (exitLift != null) {
+    kpis.push({
+      label: "Business value created",
+      value: money(exitLift),
+      sub: "7× EBITDA on the new annual profit",
     });
   }
   return kpis;

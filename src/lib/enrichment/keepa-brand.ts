@@ -14,7 +14,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   searchProductsByBrand,
   getProductDetails,
-  resolveSellerNames,
+  resolveSellerInfo,
   isAmazonSellerId,
   expandVariationAsins,
   type KeepaProductDetails,
@@ -223,27 +223,37 @@ export async function enrichBrandWithKeepa(
         idsToResolve.add(s.seller_id);
       }
     }
-    let resolvedNames: Record<string, string | null> = {};
+    // Resolve every seller (not just unresolved-name IDs) so we pick up
+    // a country for sellers whose names already came back from /product.
+    const allSellerIds = new Set<string>();
+    for (const s of Array.from(sellerMap.values())) {
+      if (s.seller_id && isAmazonSellerId(s.seller_id)) {
+        allSellerIds.add(s.seller_id);
+      }
+    }
+    let resolvedInfo: Record<string, { name: string | null; country: string | null }> = {};
     try {
-      resolvedNames = await resolveSellerNames(idsToResolve, makeSellerCache(supabase));
+      resolvedInfo = await resolveSellerInfo(allSellerIds, makeSellerCache(supabase));
     } catch {
       // soft fail — fall back to IDs
     }
 
     const totalWon = Array.from(sellerMap.values()).reduce((a, s) => a + s.asins_won, 0);
     const sellerRows = Array.from(sellerMap.values()).map((s) => {
-      const resolved = s.seller_id ? resolvedNames[s.seller_id] : null;
+      const resolved = s.seller_id ? resolvedInfo[s.seller_id] : null;
+      const resolvedName = resolved?.name?.trim() || null;
       const finalName =
-        resolved && resolved.trim()
-          ? resolved
+        resolvedName
+          ? resolvedName
           : s.seller_name && !isAmazonSellerId(s.seller_name)
           ? s.seller_name
           : s.seller_id ?? s.seller_name;
+      const country = resolved?.country ?? s.seller_country ?? null;
       return {
         brand_id,
         seller_name: finalName,
         seller_id: s.seller_id ?? null,
-        seller_country: s.seller_country ?? null,
+        seller_country: country,
         share_pct: totalWon > 0 ? s.asins_won / totalWon : null,
         asins_won: s.asins_won,
         is_fba: s.is_fba ?? null,

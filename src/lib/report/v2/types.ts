@@ -36,6 +36,11 @@ export interface NarrativeCover {
   headline: string; // ≤ 30 words
   brand_logo_url: string | null;
   kpis: { label: string; value: string; sub: string | null }[];
+  /** Headline economic numbers — populated for v2.1+ "opportunity story"
+   * cover. Older reports may have these as null (cover_kpis carries the
+   * legacy values). */
+  delta_profit?: number | null;
+  exit_lift?: number | null;
 }
 
 export interface ResellerRow {
@@ -82,6 +87,11 @@ export interface CxAuditAsinScore {
   has_video: boolean | null;
   reviews: number | null;
   rating: number | null;
+  /** Per-ASIN trailing-12-month estimates (Keepa BSR + price). Surface
+   * as an amber "Estimate" badge with diligence-replacement footnote. */
+  ttm_revenue?: number | null;
+  ttm_units?: number | null;
+  buy_box_price?: number | null;
 }
 
 export interface NarrativeCxAudit {
@@ -128,13 +138,27 @@ export interface NarrativeMath {
 }
 
 export interface PlanColumn {
-  label: string; // "Days 1-30"
-  bullets: string[]; // 4-5 bullets
+  label: string; // legacy: "Days 1-30" — v2.1+ uses step-N labels via `steps`
+  bullets: string[];
+}
+
+export interface PlanStep {
+  /** 1-5 — drives ordering & the badge number on the rendered card. */
+  number: number;
+  /** Webinar's exact step name, e.g. "Identify the Opportunity through an Account Audit". */
+  title: string;
+  /** Brand-specific 2-3 sentence paragraph (≤ ~50 words) referencing real numbers. */
+  body: string;
 }
 
 export interface NarrativePlan {
-  columns: [PlanColumn, PlanColumn, PlanColumn];
+  /** Legacy 90-day three-column shape — kept on older rows. */
+  columns: PlanColumn[];
   intro: string; // ≤ 60 words
+  /** v2.1+ Five-Step Framework. Older rows render `columns` instead. */
+  steps?: PlanStep[];
+  /** Closing line under the 5 steps. */
+  closing?: string | null;
 }
 
 export interface NarrativeWhyRcg {
@@ -161,7 +185,10 @@ export interface ReportAssumptions {
 }
 
 export const DEFAULT_ASSUMPTIONS: ReportAssumptions = {
-  reseller_margin_pct: 0.20,
+  // v2.1: dropped from 0.20 → 0.10 to land closer to seller-confirmed
+  // post-fee blended margin (Amazon takes 15% referral + ~3-5% other,
+  // and most brands run 20-25% gross — the recoverable wedge is ~10%).
+  reseller_margin_pct: 0.10,
   ops_savings_pct: 0.08,
   mcf_uplift_pct: 0.04,
   rcg_retainer: null,
