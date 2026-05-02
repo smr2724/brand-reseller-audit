@@ -91,15 +91,15 @@ type Bucket = { rank_lt: number; units: number };
  * $205k estimate is the headline calibration data point.
  */
 const TABLE_HIGH: Bucket[] = [
-  { rank_lt: 100,        units: 6000 },
-  { rank_lt: 500,        units: 3500 },
-  { rank_lt: 1_000,      units: 2000 },
-  { rank_lt: 5_000,      units: 800 },
-  { rank_lt: 10_000,     units: 400 },
-  { rank_lt: 50_000,     units: 100 },
-  { rank_lt: 100_000,    units: 35 },
-  { rank_lt: 500_000,    units: 8 },
-  { rank_lt: 1_000_000,  units: 2 },
+  { rank_lt: 100,        units: 8000 },
+  { rank_lt: 500,        units: 5000 },
+  { rank_lt: 1_000,      units: 3000 },
+  { rank_lt: 5_000,      units: 1500 },
+  { rank_lt: 10_000,     units: 800 },
+  { rank_lt: 50_000,     units: 200 },
+  { rank_lt: 100_000,    units: 60 },
+  { rank_lt: 500_000,    units: 15 },
+  { rank_lt: 1_000_000,  units: 4 },
   { rank_lt: 5_000_000,  units: 1 },
 ];
 
