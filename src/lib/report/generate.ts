@@ -82,7 +82,6 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       brand: brandTyped,
       bundle: enrichResult.bundle,
       competitors: enrichResult.competitorSnapshots,
-      brandLogoUrl: enrichResult.brandLogoUrl,
       contactEmail,
       calendlyUrl,
       generatedAt,

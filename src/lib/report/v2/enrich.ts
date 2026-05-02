@@ -91,7 +91,6 @@ export interface KeepaAsinDetail {
 export interface EnrichResult {
   bundle: BrandEnrichmentBundle;
   competitorSnapshots: CompetitorSnapshot[];
-  brandLogoUrl: string | null;
   /** Keepa /product details mapped per ASIN (CX scorecard inputs). */
   asinDetails: KeepaAsinDetail[];
   /** Keepa salesRank+price-derived TTM revenue estimate. */
@@ -283,17 +282,9 @@ export async function runV2Enrichment(
     productCategoryHints,
   );
 
-  // 6. Brand logo (best effort, no network during render).
-  // We don't have a website column on `brands`, so we only attempt a
-  // Clearbit lookup using the brand name normalized into a guessed
-  // domain. Most prospects don't resolve cleanly, so we treat this as a
-  // soft try and fall back to initials in the renderer.
-  const brandLogoUrl = guessClearbitLogo(brand.name);
-
   return {
     bundle,
     competitorSnapshots,
-    brandLogoUrl,
     asinDetails,
     revenueEstimate,
     spApiTrailing,
@@ -720,17 +711,3 @@ function scoreProductListing(p: {
   return Math.min(100, score);
 }
 
-// ----------------------------------------------------------------------
-// Logo
-// ----------------------------------------------------------------------
-
-function guessClearbitLogo(brandName: string): string | null {
-  // Best-effort domain guess. The renderer falls back to initials if
-  // Clearbit returns 404, so a wrong guess is harmless.
-  const slug = brandName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-    .slice(0, 32);
-  if (!slug) return null;
-  return `https://logo.clearbit.com/${slug}.com`;
-}

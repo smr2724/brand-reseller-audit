@@ -3,9 +3,7 @@
  *
  * Mirrors the 9 sections from web.tsx in a print-ready PDF using
  * @react-pdf/renderer. Single column, same RCG palette but on a cream
- * paper background for print. No embedded images other than the
- * optional brand logo (network fetch happens at render time, soft-fails
- * to initials). Math + benchmark are full-width tables.
+ * paper background for print. Math + benchmark are full-width tables.
  */
 /* eslint-disable jsx-a11y/alt-text */
 import React from "react";

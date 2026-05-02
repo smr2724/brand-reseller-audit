@@ -34,7 +34,6 @@ export interface NarrativeV2 {
 
 export interface NarrativeCover {
   headline: string; // ≤ 30 words
-  brand_logo_url: string | null;
   kpis: { label: string; value: string; sub: string | null }[];
   /** Headline economic numbers — populated for v2.1+ "opportunity story"
    * cover. Older reports may have these as null (cover_kpis carries the

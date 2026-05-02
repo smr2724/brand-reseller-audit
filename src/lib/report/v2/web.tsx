@@ -158,13 +158,6 @@ function SectionCover({
   const c = narrative.cover;
   const profit = c.delta_profit ?? null;
   const value = c.exit_lift ?? null;
-  const initials = brand.name
-    .split(/\s+/)
-    .map((p) => p[0])
-    .filter(Boolean)
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
 
   // Always render the new opportunity-first headline at render time, even
   // for legacy narrative_json rows whose `cover.headline` was generated
@@ -174,19 +167,10 @@ function SectionCover({
   return (
     <section id="s-cover" className="rv2-section rv2-section-cover">
       <div className="rv2-eyebrow">Channel Ownership Audit</div>
-      <div className="rv2-cover-row">
-        <div className="rv2-cover-logo">
-          {c.brand_logo_url ? (
-            <img src={c.brand_logo_url} alt={`${brand.name} logo`} className="rv2-cover-logo-img" />
-          ) : (
-            <div className="rv2-cover-initials">{initials || "—"}</div>
-          )}
-        </div>
-        <div className="rv2-cover-meta">
-          <div className="rv2-cover-meta-line">Prepared for {brand.name}</div>
-          <div className="rv2-cover-meta-line rv2-muted">
-            {formatLongDate(narrative.generated_at)} · By Rolle Consulting Group
-          </div>
+      <div className="rv2-cover-meta">
+        <div className="rv2-cover-meta-line">Prepared for {brand.name}</div>
+        <div className="rv2-cover-meta-line rv2-muted">
+          {formatLongDate(narrative.generated_at)} · By Rolle Consulting Group
         </div>
       </div>
       <h1 className="rv2-h1">{headline}</h1>
@@ -1048,20 +1032,7 @@ function V2Styles() {
       }
 
       /* Cover */
-      .rv2-cover-row {
-        display: flex; align-items: center; gap: 16px; margin-top: 12px;
-        flex-wrap: wrap;
-      }
-      .rv2-cover-meta { min-width: 0; flex: 1; word-break: break-word; }
-      .rv2-cover-logo {
-        width: 64px; height: 64px; border-radius: 12px;
-        background: rgba(255,255,255,0.05);
-        border: 1px solid var(--border);
-        display: flex; align-items: center; justify-content: center;
-        overflow: hidden;
-      }
-      .rv2-cover-logo-img { max-width: 100%; max-height: 100%; }
-      .rv2-cover-initials { color: var(--gold); font-weight: 700; font-size: 22px; letter-spacing: 0.04em; }
+      .rv2-cover-meta { margin-top: 12px; min-width: 0; word-break: break-word; }
       .rv2-cover-meta-line { font-size: 14px; }
       .rv2-cover-actions { margin-top: 28px; }
 
@@ -1421,7 +1392,6 @@ function V2Styles() {
         .rv2-dossier-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
         .rv2-asin-scores, .rv2-asin-scores-wide { grid-template-columns: 1fr; }
         .rv2-kpi-grid, .rv2-kpi-grid-2 { grid-template-columns: 1fr; }
-        .rv2-cover-logo { width: 56px; height: 56px; }
         .rv2-hdr-actions .rv2-btn { padding: 7px 12px; font-size: 12px; }
         .rv2-hdr-wordmark { display: none; }
         .rv2-section-head { margin-bottom: 20px; }

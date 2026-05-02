@@ -131,7 +131,6 @@ async function main() {
     brand: brandTyped,
     bundle: enrich.bundle,
     competitors: enrich.competitorSnapshots,
-    brandLogoUrl: enrich.brandLogoUrl,
     contactEmail,
     calendlyUrl,
     generatedAt,

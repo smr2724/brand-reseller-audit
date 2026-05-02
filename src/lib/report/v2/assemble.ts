@@ -44,7 +44,6 @@ export interface AssembleInput {
   brand: BrandForReport;
   bundle: BrandEnrichmentBundle;
   competitors: CompetitorSnapshot[];
-  brandLogoUrl: string | null;
   contactEmail: string;
   calendlyUrl: string | null;
   generatedAt: Date;
@@ -66,7 +65,7 @@ export interface AssembleOutput {
 }
 
 export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> {
-  const { brand, bundle, competitors, brandLogoUrl, contactEmail, calendlyUrl, generatedAt } = input;
+  const { brand, bundle, competitors, contactEmail, calendlyUrl, generatedAt } = input;
   const assumptions: ReportAssumptions = { ...DEFAULT_ASSUMPTIONS, ...(input.assumptions ?? {}) };
   const asinDetails = input.asinDetails ?? [];
   const revenueEstimate = input.revenueEstimate ?? null;
@@ -227,7 +226,6 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
 
     cover: {
       headline: coverHeadline,
-      brand_logo_url: brandLogoUrl,
       kpis: buildCoverKpis(annualLeak, exitLift),
       delta_profit: annualLeak,
       exit_lift: exitLift,
