@@ -94,7 +94,7 @@ export default async function ReportPage({ params }: PageProps) {
   const { data: report } = await admin
     .from("reports")
     .select(
-      "id, token, status, error_message, brand_id, supplier_id, opportunity_id, pdf_storage_path, narrative_json, generated_at, created_at, views"
+      "id, token, status, error_message, brand_id, supplier_id, opportunity_id, pdf_storage_path, narrative_json, report_assumptions, generated_at, created_at, views"
     )
     .eq("token", params.token)
     .maybeSingle();
@@ -127,6 +127,11 @@ export default async function ReportPage({ params }: PageProps) {
 
   // ---- brand-audit (Phase 5+) ----
   if (report.brand_id) {
+    // Math framework v4: RCG fee / new_profit / additional_profit /
+    // seven_x_multiple_value are no longer rendered on the v2 page —
+    // the math is recomputed live via `LegionMathSection` from
+    // `report.report_assumptions`. We still pull the legacy fields for
+    // the v1 fallback below (legacy reports keep their old layout).
     const { data: brand } = await admin
       .from("brands")
       .select(
@@ -160,12 +165,19 @@ export default async function ReportPage({ params }: PageProps) {
       | NarrativeV2
       | null;
     if (rawNarrative && (rawNarrative as NarrativeV2).version === 2) {
+      const assumptions =
+        (report.report_assumptions as
+          | import("@/lib/report/v2/types").ReportAssumptions
+          | null
+          | undefined) ?? null;
       return (
         <PublicReportV2
           narrative={rawNarrative as NarrativeV2}
           brand={brand as { id: string; name: string; category: string | null; est_monthly_revenue: number | null }}
           bundle={bundle}
           pdfUrl={pdfUrl}
+          reportToken={report.token!}
+          assumptions={assumptions}
         />
       );
     }

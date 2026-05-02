@@ -20,8 +20,11 @@ import type {
   MathLine,
   NarrativeV2,
   PlanStep,
+  ReportAssumptions,
   ResellerRow,
 } from "./types";
+import { DEFAULT_ASSUMPTIONS } from "./types";
+import { LegionMathSection } from "./LegionMathSection";
 
 export interface PublicReportV2Brand {
   id: string;
@@ -35,6 +38,12 @@ export interface PublicReportV2Props {
   brand: PublicReportV2Brand;
   bundle: BrandEnrichmentBundle | null;
   pdfUrl: string | null;
+  /** URL token used to namespace localStorage state for the editable
+   * math input panel. */
+  reportToken: string;
+  /** Persisted ReportAssumptions for this report; falls back to
+   * `DEFAULT_ASSUMPTIONS` when missing/legacy. */
+  assumptions: ReportAssumptions | null;
 }
 
 const STRATEGY_CALL_MAILTO_SUBJECT = "Amazon%20opportunity%20call";
@@ -47,12 +56,27 @@ function strategyCallHref(narrative: NarrativeV2, brandName: string): string {
   return `mailto:${STEVE_EMAIL}?subject=${subj}`;
 }
 
-export function PublicReportV2({ narrative, brand, bundle, pdfUrl }: PublicReportV2Props) {
-  // Render-time slimming: ensure the math table doesn't include rows
-  // we've removed in v2.1, even on legacy narrative_json that hasn't
-  // been backfilled yet. Same for assumption-margin display.
-  const slimMath = slimMathLines(narrative.math.lines);
+export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, assumptions }: PublicReportV2Props) {
   const callHref = strategyCallHref(narrative, brand.name);
+
+  // Pull the seed values for the editable math input panel out of
+  // narrative_json + the persisted ReportAssumptions row. Anything
+  // missing falls back to DEFAULT_ASSUMPTIONS.
+  const revenueLine = narrative.math.lines.find((l) => l.key === "revenue");
+  const initialRevenue: number | null =
+    typeof revenueLine?.value === "number" ? revenueLine.value : null;
+  const revenueSource = revenueLine?.source ?? "Keepa";
+  const revenueBadge = revenueLine?.badge ?? null;
+  const a: ReportAssumptions = { ...DEFAULT_ASSUMPTIONS, ...(assumptions ?? {}) };
+  const initialAssumptions = {
+    reseller_markup_pct: a.reseller_markup_pct,
+    outbound_shipping_pct: a.outbound_shipping_pct,
+    outbound_shipping_payer: a.outbound_shipping_payer,
+    reseller_net_margin_pct: a.reseller_net_margin_pct,
+    current_profit_margin_pct: a.current_profit_margin_pct,
+    ebitda_multiple: a.ebitda_multiple,
+    labor_cost_override: a.labor_cost_override ?? null,
+  };
 
   return (
     <div className="rv2">
@@ -65,7 +89,15 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl }: PublicRepor
         <SectionResellerReality narrative={narrative} bundle={bundle} />
         <SectionResellerDossier narrative={narrative} />
         <SectionTopProducts narrative={narrative} />
-        <SectionMath narrative={narrative} lines={slimMath} />
+        <LegionMathSection
+          reportToken={reportToken}
+          initialRevenue={initialRevenue}
+          initialAssumptions={initialAssumptions}
+          revenueSource={revenueSource}
+          revenueBadge={revenueBadge ?? null}
+          revenueFootnote={extractRevenueFootnote(narrative.math.notes ?? "")}
+          notes={cleanMathNotes(narrative.math.notes ?? "") || null}
+        />
         <SectionPlan narrative={narrative} />
         <SectionFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
       </main>
@@ -75,6 +107,17 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl }: PublicRepor
       </footer>
     </div>
   );
+}
+
+/** assemble.ts appends `\n\nRevenue note: …` when the figure is from the
+ * estimator. Pull that out so the LegionMathSection can render it
+ * separately under Tier 2. */
+function extractRevenueFootnote(notes: string): string | null {
+  const m = notes.match(/Revenue note:\s*([\s\S]*)$/);
+  return m ? m[1].trim() : null;
+}
+function cleanMathNotes(notes: string): string {
+  return notes.replace(/\n*Revenue note:[\s\S]*$/, "").trim();
 }
 
 // ====================================================================
@@ -524,106 +567,9 @@ function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
   );
 }
 
-// ====================================================================
-// Section 5 — The Math (slim)
-// ====================================================================
-
-const KEEP_MATH_KEYS = new Set([
-  "revenue",
-  "brand_pct",
-  "reseller_revenue",
-  "reseller_margin",
-  "ops_savings",
-  "mcf_uplift",
-  "delta_profit",
-  "exit_lift",
-]);
-
-function slimMathLines(lines: MathLine[]): MathLine[] {
-  // Hide rows we've removed in v2.1 (RCG retainer, current profit, new
-  // annual profit). Re-relabel reseller_margin so the assumption % is
-  // visible inline. Re-relabel delta_profit so the prospect sees this is
-  // the headline number, not a footnote.
-  const out: MathLine[] = [];
-  for (const l of lines) {
-    if (!KEEP_MATH_KEYS.has(l.key)) continue;
-    if (l.key === "delta_profit") {
-      out.push({ ...l, label: "Δ profit per year" });
-    } else {
-      out.push(l);
-    }
-  }
-  return out;
-}
-
-function SectionMath({ narrative, lines }: { narrative: NarrativeV2; lines: MathLine[] }) {
-  const m = narrative.math;
-  return (
-    <section id="s-math" className="rv2-section">
-      <SectionHead
-        eyebrow="The Math"
-        title="Every number, every assumption"
-        source="Editable per deal"
-      />
-
-      <div className="rv2-table-wrap">
-        <table className="rv2-table rv2-math-table">
-          <thead>
-            <tr>
-              <th>Line</th>
-              <th>Value</th>
-              <th>Source / Assumption</th>
-            </tr>
-          </thead>
-          <tbody>
-            {lines.map((l) => (
-              <MathRow key={l.key} line={l} />
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {m.notes && <p className="rv2-prose rv2-prose-callout">{m.notes}</p>}
-    </section>
-  );
-}
-
-function MathRow({ line }: { line: MathLine }) {
-  return (
-    <tr className={line.is_total ? "rv2-math-total" : ""}>
-      <td>
-        {line.label}
-        {line.badge === "actual" && (
-          <span className="rv2-rev-badge rv2-rev-badge-actual" title="Real seller-reported revenue">
-            Actual
-          </span>
-        )}
-        {line.badge === "estimate" && (
-          <span className="rv2-rev-badge rv2-rev-badge-est" title="Directional estimate from Keepa BSR + buy-box price">
-            Estimate
-          </span>
-        )}
-      </td>
-      <td className="rv2-num">{formatMath(line)}</td>
-      <td>
-        <span className={line.editable ? "rv2-tag rv2-tag-edit" : "rv2-muted-small"}>
-          {line.source}
-        </span>
-      </td>
-    </tr>
-  );
-}
-
-function formatMath(line: MathLine): string {
-  if (line.value == null) return "— not measured";
-  if (line.format === "money") {
-    return `$${Math.round(Number(line.value)).toLocaleString("en-US")}`;
-  }
-  if (line.format === "percent") {
-    return `${(Number(line.value) * 100).toFixed(1)}%`;
-  }
-  return String(line.value);
-}
+// Section 5 — The Math — rendered by `LegionMathSection` (client). See
+// `./LegionMathSection.tsx` for the two-tier disclosure + editable
+// input panel.
 
 // ====================================================================
 // Section 6 — 6-12 Month Capture Plan (Five-Step Framework)

@@ -265,11 +265,16 @@ function avg(xs: number[]): number | null {
 }
 
 // ----------------------------------------------------------------------
-// The Math (Section 6) — fully transparent
+// The Math (Section 6) — World Amenities case-study methodology (v4)
 // ----------------------------------------------------------------------
+
+import { computeLegionEconomics, type LegionInputs } from "@/lib/math/legion-economics";
 
 export interface MathContext {
   trailing_12mo_revenue: number | null;
+  /** Reserved for future use; the v4 framework no longer takes the
+   * brand-controlled share into the math, but we keep the field on the
+   * context so callers don't need to change shape. */
   brand_controlled_pct: number | null;
   current_profit: number | null;
   keepaDate: string | null;
@@ -285,121 +290,143 @@ export interface MathContext {
   revenueBadge?: "actual" | "estimate" | null;
 }
 
+const PCT_FMT = (n: number, digits = 1) => `${(n * 100).toFixed(digits)}%`;
+
 export function computeMath(ctx: MathContext): NarrativeMath {
-  const lines: MathLine[] = [];
   const a = ctx.assumptions;
   const revenue = ctx.trailing_12mo_revenue;
-  // Bug fix: brand_controlled_pct null vs 0 used to coerce to null down
-  // the chain, zeroing reseller_revenue. Treat null = unknown (skip the
-  // calc) and 0 = the brand controls 0% of buy boxes (full revenue is
-  // reseller-controlled).
-  const brandPct =
-    a.brand_controlled_pct_override != null
-      ? a.brand_controlled_pct_override
-      : ctx.brand_controlled_pct;
-
   const keepaSrc = ctx.keepaDate ? `Keepa, ${ctx.keepaDate.slice(0, 10)}` : "Keepa";
   const revenueSrc = ctx.revenueSource ?? keepaSrc;
 
-  lines.push({
-    key: "revenue",
-    label: "Trailing 12mo Amazon revenue",
-    value: revenue,
-    format: "money",
-    source: revenueSrc,
-    // Always editable so a sales-team user can override on the page if
-    // they have a real number from the seller. Persistence path TBD —
-    // for now the override flows back through brand.trailing_12_months.
-    editable: true,
-    badge: ctx.revenueBadge ?? null,
-  });
+  // When revenue is missing we still emit the row set so the page can
+  // render the structure, with values coerced to null.
+  const haveRevenue = revenue != null && Number.isFinite(revenue);
+  const inputs: LegionInputs = {
+    revenue: haveRevenue ? (revenue as number) : 0,
+    reseller_markup_pct: a.reseller_markup_pct,
+    outbound_shipping_pct: a.outbound_shipping_pct,
+    outbound_shipping_payer: a.outbound_shipping_payer,
+    reseller_net_margin_pct: a.reseller_net_margin_pct,
+    current_profit_margin_pct: a.current_profit_margin_pct,
+    ebitda_multiple: a.ebitda_multiple,
+    labor_cost_override: a.labor_cost_override ?? null,
+  };
+  const out = computeLegionEconomics(inputs);
+  const v = (n: number) => (haveRevenue ? n : null);
 
-  lines.push({
-    key: "brand_pct",
-    label: "Brand-controlled share of buy box",
-    value: brandPct != null ? brandPct : null,
-    format: "percent",
-    source:
-      a.brand_controlled_pct_override != null
-        ? `Override: ${(a.brand_controlled_pct_override * 100).toFixed(0)}%`
-        : keepaSrc,
-    editable: true,
-  });
+  const payerSource =
+    a.outbound_shipping_payer === "reseller"
+      ? "Brand pays: NO (reseller absorbs shipping; not recoupable)"
+      : a.outbound_shipping_payer === "unknown"
+        ? "Brand pays: unknown — assumed YES (toggle if reseller absorbs)"
+        : "Brand pays: YES (recoupable under direct model)";
 
-  const resellerRevenue =
-    revenue != null && brandPct != null ? revenue * (1 - brandPct) : null;
-  lines.push({
-    key: "reseller_revenue",
-    label: "Reseller-controlled revenue",
-    value: resellerRevenue,
-    format: "money",
-    source: "calc: revenue × (1 − brand-controlled %)",
-  });
-
-  const marginCaptured =
-    resellerRevenue != null ? resellerRevenue * a.reseller_margin_pct : null;
-  lines.push({
-    key: "reseller_margin",
-    label: "Reseller margin captured (recoverable)",
-    value: marginCaptured,
-    format: "money",
-    source: `Assumption: ${(a.reseller_margin_pct * 100).toFixed(0)}% blended margin × reseller revenue`,
-    editable: true,
-  });
-
-  const opsSavings =
-    resellerRevenue != null ? resellerRevenue * a.ops_savings_pct : null;
-  lines.push({
-    key: "ops_savings",
-    label: "Operational savings (3PL consolidation)",
-    value: opsSavings,
-    format: "money",
-    source: `Assumption: ${(a.ops_savings_pct * 100).toFixed(0)}% of reseller-controlled revenue`,
-    editable: true,
-  });
-
-  const mcfUplift =
-    resellerRevenue != null ? resellerRevenue * a.mcf_uplift_pct : null;
-  lines.push({
-    key: "mcf_uplift",
-    label: "MCF / fulfillment uplift",
-    value: mcfUplift,
-    format: "money",
-    source: `Assumption: ${(a.mcf_uplift_pct * 100).toFixed(0)}% of reseller-controlled revenue`,
-    editable: true,
-  });
-
-  // v2.1 — slimmer math table. RCG retainer / current profit / new
-  // annual profit rows are removed: the report sells the recoverable
-  // result, not RCG's invoice. Δ profit per year is the headline number;
-  // exit-value lift is its 7× EBITDA tail. Both are kept editable so a
-  // sales operator can override at the desk.
-  const newProfitDelta = sumOrNull([marginCaptured, opsSavings, mcfUplift]);
-  lines.push({
-    key: "delta_profit",
-    label: "Δ profit per year",
-    value: newProfitDelta,
-    format: "money",
-    source: "calc: margin captured + ops savings + MCF uplift",
-    is_total: true,
-  });
-
-  const exitLift =
-    newProfitDelta != null ? newProfitDelta * a.ebitda_multiple : null;
-  lines.push({
-    key: "exit_lift",
-    label: `${a.ebitda_multiple}× EBITDA exit-value lift`,
-    value: exitLift,
-    format: "money",
-    source: `Assumption: ${a.ebitda_multiple}× multiple on incremental EBITDA`,
-    is_total: true,
-    editable: true,
-  });
+  const lines: MathLine[] = [
+    {
+      key: "revenue",
+      label: "Trailing 12mo Amazon revenue",
+      value: revenue,
+      format: "money",
+      source: revenueSrc,
+      editable: true,
+      badge: ctx.revenueBadge ?? null,
+    },
+    {
+      key: "wholesale_invoice",
+      label: "Wholesale invoice (manuf → reseller)",
+      value: v(out.wholesale_invoice),
+      format: "money",
+      source: `calc: revenue ÷ (1 + ${PCT_FMT(a.reseller_markup_pct, 0)} markup)`,
+    },
+    {
+      key: "wholesale_outbound_shipping",
+      label: "Wholesale outbound shipping",
+      value: v(out.wholesale_outbound_shipping),
+      format: "money",
+      source: `Assumption: ${PCT_FMT(a.outbound_shipping_pct, 1)} of wholesale invoice`,
+      editable: true,
+    },
+    {
+      key: "effective_markup_pct",
+      label: "Effective markup % (incl. shipping)",
+      value: v(out.effective_markup_pct),
+      format: "percent",
+      source: "calc: revenue ÷ (wholesale − shipping) − 1",
+    },
+    {
+      key: "effective_wholesale",
+      label: "Effective wholesale price (COGS)",
+      value: v(out.effective_wholesale),
+      format: "money",
+      source: "calc: wholesale invoice − outbound shipping",
+    },
+    {
+      key: "current_profit",
+      label: "Current manufacturer profit",
+      value: v(out.current_profit),
+      format: "money",
+      source: `Assumption: ${PCT_FMT(a.current_profit_margin_pct, 0)} margin × effective wholesale`,
+      editable: true,
+    },
+    {
+      key: "reseller_margin",
+      label: "Reseller net margin captured (recoverable)",
+      value: v(out.reseller_margin_captured),
+      format: "money",
+      source: `Assumption: ${PCT_FMT(a.reseller_net_margin_pct, 1)} of revenue (post-Amazon-fees / FBA / ads / returns)`,
+      editable: true,
+    },
+    {
+      key: "recouped_shipping",
+      label: "Recouped outbound shipping",
+      value: v(out.recouped_shipping),
+      format: "money",
+      source: payerSource,
+      editable: true,
+    },
+    {
+      key: "labor_cost",
+      label: "Labor cost (in-house Amazon team)",
+      value: v(-Math.abs(out.labor_cost)),
+      format: "money",
+      source: laborSource(out.labor_tier, a.labor_cost_override),
+      editable: true,
+    },
+    {
+      key: "new_profit",
+      label: "New profit (under brand-direct model)",
+      value: v(out.new_profit),
+      format: "money",
+      source: "calc: current profit + reseller margin + recouped shipping − labor",
+    },
+    {
+      key: "delta_profit",
+      label: "Δ Additional profit per year",
+      value: v(out.delta_profit),
+      format: "money",
+      source: "calc: new profit − current profit",
+      is_total: true,
+    },
+    {
+      key: "exit_lift",
+      label: `${a.ebitda_multiple}× EBITDA exit-value lift`,
+      value: v(out.exit_lift),
+      format: "money",
+      source: `Assumption: ${a.ebitda_multiple}× multiple on incremental EBITDA`,
+      is_total: true,
+      editable: true,
+    },
+  ];
 
   return { lines, notes: "" };
 }
 
-function sumOrNull(xs: (number | null)[]): number | null {
-  if (xs.some((x) => x == null)) return null;
-  return xs.reduce<number>((a, b) => (a ?? 0) + (b ?? 0), 0);
+function laborSource(
+  tier: "under_2m" | "2m_to_10m" | "over_10m",
+  override: number | null,
+): string {
+  if (override != null) return "Override: in-house team cost (annual)";
+  if (tier === "under_2m") return "Tier: revenue < $2M → $30,000/yr";
+  if (tier === "2m_to_10m") return "Tier: $2M ≤ revenue < $10M → $130,000/yr";
+  return "Tier: revenue ≥ $10M → $250,000/yr";
 }

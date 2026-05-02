@@ -174,23 +174,31 @@ export interface NarrativeCta {
   secondary_phone: string | null;
 }
 
+/**
+ * Math framework v4 — World Amenities case-study methodology.
+ * Defaults match `LEGION_DEFAULTS` in `src/lib/math/legion-economics.ts`.
+ *
+ * The legacy split (reseller_margin_pct / ops_savings_pct /
+ * mcf_uplift_pct) is gone — `reseller_net_margin_pct` (10.5%) is the
+ * single consolidated figure. RCG fees / retainers are no longer
+ * computed, persisted, or rendered.
+ */
 export interface ReportAssumptions {
-  reseller_margin_pct: number;        // default 0.20
-  ops_savings_pct: number;            // 0.08
-  mcf_uplift_pct: number;             // 0.04
-  rcg_retainer: number | null;        // dollars/yr — null = placeholder
-  ebitda_multiple: number;            // 7
-  brand_controlled_pct_override: number | null;
+  reseller_markup_pct: number;        // default 1.03
+  outbound_shipping_pct: number;      // default 0.05
+  outbound_shipping_payer: "brand" | "reseller" | "unknown"; // default "brand"
+  reseller_net_margin_pct: number;    // default 0.105
+  current_profit_margin_pct: number;  // default 0.20
+  ebitda_multiple: number;            // default 7
+  labor_cost_override: number | null; // null → tier rule from revenue
 }
 
 export const DEFAULT_ASSUMPTIONS: ReportAssumptions = {
-  // v2.1: dropped from 0.20 → 0.10 to land closer to seller-confirmed
-  // post-fee blended margin (Amazon takes 15% referral + ~3-5% other,
-  // and most brands run 20-25% gross — the recoverable wedge is ~10%).
-  reseller_margin_pct: 0.10,
-  ops_savings_pct: 0.08,
-  mcf_uplift_pct: 0.04,
-  rcg_retainer: null,
+  reseller_markup_pct: 1.03,
+  outbound_shipping_pct: 0.05,
+  outbound_shipping_payer: "brand",
+  reseller_net_margin_pct: 0.105,
+  current_profit_margin_pct: 0.20,
   ebitda_multiple: 7,
-  brand_controlled_pct_override: null,
+  labor_cost_override: null,
 };
