@@ -22,9 +22,10 @@ import {
 } from "@/lib/dataforseo";
 
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const MAX_KEYWORDS = 15;       // top-N retained on the brand summary
+const MAX_KEYWORDS = 12;       // top-N retained on the brand summary
 const SERP_DEPTH = 30;         // SERP positions inspected for competitor share
 const MAX_SERP_QUERIES = 2;    // budget cap — SERP tasks are the expensive part
+const RELEVANCE_OVERLAP_MIN = 0.5; // ≥50% of non-stopword tokens must overlap vocab/seed
 
 export interface DataForSeoSnapshot {
   branded_search_volume: number | null;
@@ -397,6 +398,29 @@ type RankedKeyword = {
 };
 
 /**
+ * Lightweight stemmer — strips a single trailing inflection so
+ * "remover"↔"remove", "wipes"↔"wipe", "cleansing"↔"cleans" line up
+ * during set-membership checks. We try `ing/ed/er` first; if none fit
+ * and the word still ends in `s`, we strip just the final `s` (so
+ * "wipes" → "wipe", not "wip"). The result isn't always linguistically
+ * correct — we apply the same transform to both sides of the
+ * comparison, so it only needs to be deterministic.
+ */
+export function simpleStem(s: string): string {
+  const w = s.toLowerCase();
+  if (w.length <= 3) return w;
+  for (const suf of ["ing", "ed", "er"]) {
+    if (w.length - suf.length >= 3 && w.endsWith(suf)) {
+      return w.slice(0, -suf.length);
+    }
+  }
+  if (w.endsWith("s") && w.length - 1 >= 3) {
+    return w.slice(0, -1);
+  }
+  return w;
+}
+
+/**
  * Filter merged related-keyword output down to keywords that look like
  * they belong to the brand's actual catalog. Without this filter, DFS
  * related_keywords on a category seed can drift hard (e.g. seeding
@@ -404,17 +428,23 @@ type RankedKeyword = {
  * pulled in "butcher paper", "kraft paper roll", etc).
  *
  * Rules, in order:
- *   1. Always keep the brand name (we sort it to the front later).
+ *   1. Always keep the brand name itself (pinned at top by the sort).
  *   2. Always keep keywords containing the brand name string.
- *   3. Otherwise, every non-stopword token of the keyword must be in
- *      `titleVocab` OR appear in one of the seed phrases. Trailing
- *      modifier nouns from one-off SKUs ("bags", "roll", "sheets")
- *      get dropped this way.
+ *   3. Seed-substring pre-pass: if any seed phrase appears as a
+ *      substring of the candidate, keep it regardless of token
+ *      overlap. ("body lotion" → keep "travel size body lotion".)
+ *   4. Otherwise ≥50% of non-stopword tokens must overlap with
+ *      `titleVocab ∪ seedTokens` after a tiny stemmer is applied to
+ *      both sides. The strict 100% rule was clipping clearly-relevant
+ *      multi-word terms ("makeup remover wipes", "facial cleansing
+ *      wipes") whenever a single descriptor was missing literal vocab.
  *
- * If `titleVocab` is empty (older callers), we fall through to the
- * looser legacy behaviour of dropping only obvious off-topic phrases.
+ * Safety floor: if the relaxed pass yields <4 keywords AND the
+ * substring pre-pass alone yielded <2, fall back to top-8 by
+ * search_volume from the unfiltered merged list with a warning. Better
+ * to print a slightly off-topic keyword than ship a 2-row list.
  */
-function filterRelevant(
+export function filterRelevant(
   merged: RankedKeyword[],
   brandName: string,
   seeds: string[],
@@ -428,17 +458,21 @@ function filterRelevant(
   ]);
   const vocab = new Set(titleVocab.map((w) => w.toLowerCase()));
   const seedTokens = new Set<string>();
+  const seedPhrases: string[] = [];
   for (const s of seeds) {
-    for (const t of s.toLowerCase().split(/\s+/)) {
+    const sl = s.toLowerCase().trim();
+    if (sl) seedPhrases.push(sl);
+    for (const t of sl.split(/\s+/)) {
       if (t && !STOP.has(t)) seedTokens.add(t);
     }
   }
-  const allow = new Set<string>();
-  vocab.forEach((v) => allow.add(v));
-  seedTokens.forEach((v) => allow.add(v));
+  // Stem the allow-set once so per-candidate checks are O(1).
+  const allowStems = new Set<string>();
+  vocab.forEach((v) => allowStems.add(simpleStem(v)));
+  seedTokens.forEach((v) => allowStems.add(simpleStem(v)));
 
-  // Always keep the brand keyword itself, even if vocab is empty.
   const out: RankedKeyword[] = [];
+  let substringHits = 0;
   for (const k of merged) {
     const kw = k.keyword.toLowerCase().trim();
     if (!kw) continue;
@@ -446,7 +480,13 @@ function filterRelevant(
       out.push(k);
       continue;
     }
-    if (allow.size === 0) {
+    // Seed-substring pre-pass.
+    if (seedPhrases.some((p) => p && kw.includes(p))) {
+      out.push(k);
+      substringHits += 1;
+      continue;
+    }
+    if (allowStems.size === 0) {
       // No vocab/seed signal — fall through to legacy permissive behaviour
       // so we don't regress small-catalog brands.
       out.push(k);
@@ -454,16 +494,31 @@ function filterRelevant(
     }
     const tokens = kw.split(/[^a-z0-9]+/).filter((t) => t.length >= 3 && !STOP.has(t));
     if (tokens.length === 0) continue;
-    // Every non-stopword token of the keyword must be in title vocab
-    // or in a seed phrase. The strict rule is intentional: a permissive
-    // "any token matches" filter lets "butcher paper" through (because
-    // "paper" is in vocab from a kraft-paper SKU). The downside is we
-    // also drop adjacent terms like "body wash" when "wash" only
-    // appears in one title — that's the right trade-off; the report
-    // would rather print 5 on-topic keywords than 12 with one false
-    // positive that visibly mislabels the brand's category.
-    const ok = tokens.every((t) => allow.has(t));
-    if (ok) out.push(k);
+    let matched = 0;
+    for (const t of tokens) {
+      if (allowStems.has(simpleStem(t))) matched += 1;
+    }
+    if (matched / tokens.length >= RELEVANCE_OVERLAP_MIN) out.push(k);
+  }
+
+  // Safety floor.
+  if (out.length < 4 && substringHits < 2) {
+    console.warn(
+      `[dfs] filterRelevant safety-floor engaged for brand="${brandName}": ` +
+        `relaxed=${out.length}, substring=${substringHits} — falling back to top-8 by volume`,
+    );
+    const fallback = merged
+      .slice()
+      .sort((a, b) => (b.search_volume ?? 0) - (a.search_volume ?? 0))
+      .slice(0, 8);
+    // Pin brand-matching rows to the top of the fallback too.
+    fallback.sort((a, b) => {
+      const aBrand = a.keyword.toLowerCase().includes(brandLower) ? 1 : 0;
+      const bBrand = b.keyword.toLowerCase().includes(brandLower) ? 1 : 0;
+      if (aBrand !== bBrand) return bBrand - aBrand;
+      return (b.search_volume ?? 0) - (a.search_volume ?? 0);
+    });
+    return fallback;
   }
 
   // Sort: brand keywords first, then by descending search volume.
