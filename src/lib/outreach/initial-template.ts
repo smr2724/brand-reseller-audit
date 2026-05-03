@@ -11,6 +11,10 @@
  */
 
 import type { BrandEnrichmentBundle } from "@/lib/enrichment";
+import {
+  computeLegionEconomics,
+  defaultLegionInputs,
+} from "@/lib/math/legion-economics";
 
 export interface InitialTemplateBrand {
   name: string;
@@ -28,17 +32,6 @@ export interface RenderedEmail {
   html: string;
   text: string;
 }
-
-/**
- * Annual-margin assumption used to translate revenue + reseller-share into
- * an "estimated annual profit recapture" headline number.
- *
- * 0.20 (20%) is Steve's working operator-margin assumption — captures
- * gross-to-EBITDA after Amazon fees, COGS, and overhead for the typical
- * brand we audit. Documented per Phase 6.5 spec; do not change without
- * Steve's approval, since this number ends up in the subject line.
- */
-const MARGIN_ASSUMPTION = 0.20;
 
 function firstName(contact: InitialTemplateContact): string {
   if (contact.first_name && contact.first_name.trim()) return contact.first_name.trim();
@@ -106,12 +99,18 @@ export function renderInitialEmail(input: RenderInitialEmailInput): RenderedEmai
   const brandControlled = input.brand.keepa_brand_controlled_pct ?? input.bundle?.keepa.brand_controlled_pct ?? null;
   const annualRevenue = annualRevenueDollars(input.revenue);
 
-  // Profit recapture = revenue * (1 - brand_controlled_pct) * margin_assumption.
-  // Margin assumption is documented at the top of this file. See spec §Placeholder mapping.
+  // Profit recapture is the v4 model's Δ profit — single source of truth via
+  // computeLegionEconomics(). Scales the model output by the reseller share
+  // so we don't overstate recapture when the brand already controls part of
+  // the channel.
   let recaptureDollars: number | null = null;
-  if (annualRevenue != null && brandControlled != null && Number.isFinite(brandControlled)) {
-    const resellerShare = Math.max(0, Math.min(1, 1 - brandControlled));
-    const dollars = annualRevenue * resellerShare * MARGIN_ASSUMPTION;
+  if (annualRevenue != null && Number.isFinite(annualRevenue)) {
+    const out = computeLegionEconomics(defaultLegionInputs(annualRevenue));
+    const resellerShare =
+      brandControlled != null && Number.isFinite(brandControlled)
+        ? Math.max(0, Math.min(1, 1 - brandControlled))
+        : 1;
+    const dollars = out.delta_profit * resellerShare;
     if (dollars > 0 && Number.isFinite(dollars)) recaptureDollars = dollars;
   }
 
