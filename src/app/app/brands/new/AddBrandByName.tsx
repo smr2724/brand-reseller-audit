@@ -61,6 +61,18 @@ export default function AddBrandByName() {
   const [confirmedTtmInput, setConfirmedTtmInput] = useState("");
   const [confirmedTtmSource, setConfirmedTtmSource] = useState("");
 
+  // Phase 29 — H2O Therapy bug. When Confirm+Enrich fails (Vercel function
+  // timeout, Keepa transient error, etc.) the user previously saw a
+  // generic "Load failed" and could re-click the same candidate, queueing
+  // up another enrichment run while the first was still being recovered
+  // by the cron. Lock the picker after a failed attempt until the user
+  // explicitly clicks "Try again" — at which point we reset and let them
+  // choose again.
+  const [createFailed, setCreateFailed] = useState(false);
+  const [createFailedBrandId, setCreateFailedBrandId] = useState<string | null>(
+    null,
+  );
+
   function resetResults() {
     setKeepaCandidates(null);
     setFuzzyCandidates(null);
@@ -133,6 +145,7 @@ export default function AddBrandByName() {
   async function createBrand(brand: string) {
     setError(null);
     setCreating(true);
+    setCreateFailed(false);
     try {
       const body: Record<string, unknown> = { brand };
       // Phase 28 — only attach the confirmed TTM payload if the user
@@ -153,15 +166,41 @@ export default function AddBrandByName() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
-      if (!res.ok || !data?.brand_id) {
-        throw new Error(data?.error || "create failed");
+      const data = await res
+        .json()
+        .catch(() => ({}) as Record<string, unknown>);
+      if (!res.ok) {
+        // Phase 29 — surface the structured error from the route. Even
+        // on 502 the brand row was inserted, so capture the brand_id so
+        // the user has a way to reach the detail page if they want.
+        const brandId =
+          typeof data?.brand_id === "string" ? data.brand_id : null;
+        if (brandId) setCreateFailedBrandId(brandId);
+        const msg =
+          (typeof data?.error === "string" && data.error) ||
+          (typeof data?.keepa_error === "string" && data.keepa_error) ||
+          "create failed";
+        throw new Error(msg);
+      }
+      if (!data?.brand_id) {
+        throw new Error((data?.error as string) || "create failed");
       }
       router.push(`/app/brands/${data.brand_id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "create failed");
       setCreating(false);
+      setCreateFailed(true);
     }
+  }
+
+  // Phase 29 — explicit user-driven reset after a failed create. Clears
+  // the lock and any stale failure state so the user can try a different
+  // candidate (or the same candidate after the cron has had a chance to
+  // recover the brand).
+  function resetAfterFailure() {
+    setCreateFailed(false);
+    setCreateFailedBrandId(null);
+    setError(null);
   }
 
   async function resolveAsin() {
@@ -247,8 +286,30 @@ export default function AddBrandByName() {
       </form>
 
       {error && (
-        <div className="card p-3 border border-red-700/50 bg-red-950/30 text-sm text-red-300">
-          {error}
+        <div className="card p-3 border border-red-700/50 bg-red-950/30 text-sm text-red-300 space-y-2">
+          <div>{error}</div>
+          {createFailed && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <button
+                type="button"
+                className="btn btn-ghost text-xs"
+                onClick={resetAfterFailure}
+              >
+                Try again
+              </button>
+              {createFailedBrandId && (
+                <a
+                  href={`/app/brands/${createFailedBrandId}`}
+                  className="underline text-[var(--accent)]"
+                >
+                  Open brand anyway →
+                </a>
+              )}
+              <span className="text-[var(--text-muted)]">
+                The recovery sweep retries stuck brands every 5 minutes.
+              </span>
+            </div>
+          )}
         </div>
       )}
 
@@ -279,9 +340,13 @@ export default function AddBrandByName() {
                 <button
                   className="btn btn-primary text-xs whitespace-nowrap"
                   onClick={() => confirmKeepa(c)}
-                  disabled={creating}
+                  disabled={creating || createFailed}
                 >
-                  {creating ? "Creating…" : "Confirm + Enrich"}
+                  {creating
+                    ? "Creating…"
+                    : createFailed
+                      ? "Click Try again first"
+                      : "Confirm + Enrich"}
                 </button>
               </div>
             </div>
@@ -296,6 +361,7 @@ export default function AddBrandByName() {
           searchingMore={searchingMore}
           exhausted={exhausted}
           creating={creating}
+          createFailed={createFailed}
           onSelect={confirmFuzzy}
           onSearchMore={() => runFuzzy(query, "loose")}
           showAsin={showAsin}
@@ -322,6 +388,7 @@ interface FuzzyPickerProps {
   searchingMore: boolean;
   exhausted: boolean;
   creating: boolean;
+  createFailed: boolean;
   onSelect: (c: FuzzyCandidate) => void;
   onSearchMore: () => void;
   showAsin: boolean;
@@ -339,6 +406,7 @@ function FuzzyPicker(props: FuzzyPickerProps) {
     searchingMore,
     exhausted,
     creating,
+    createFailed,
     onSelect,
     onSearchMore,
     showAsin,
@@ -381,7 +449,7 @@ function FuzzyPicker(props: FuzzyPickerProps) {
                 key={`${c.name}-${i}`}
                 type="button"
                 onClick={() => onSelect(c)}
-                disabled={creating || isFallback}
+                disabled={creating || createFailed || isFallback}
                 className={`card p-4 w-full text-left transition-colors ${
                   isFallback
                     ? "opacity-70 cursor-default"
