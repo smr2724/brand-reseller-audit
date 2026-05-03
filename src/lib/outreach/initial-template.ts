@@ -100,18 +100,22 @@ export function renderInitialEmail(input: RenderInitialEmailInput): RenderedEmai
   const annualRevenue = annualRevenueDollars(input.revenue);
 
   // Profit recapture is the v4 model's Δ profit — single source of truth via
-  // computeLegionEconomics(). Scales the model output by the reseller share
-  // so we don't overstate recapture when the brand already controls part of
-  // the channel.
+  // computeLegionEconomics(). Phase 27 — recoverable-slice gating now lives
+  // inside computeLegionEconomics (margin/wholesale/etc applied to
+  // revenue × (1 − bc)), so we just pass brand_controlled_pct through and
+  // read delta_profit straight off the output instead of post-hoc scaling.
   let recaptureDollars: number | null = null;
   if (annualRevenue != null && Number.isFinite(annualRevenue)) {
-    const out = computeLegionEconomics(defaultLegionInputs(annualRevenue));
-    const resellerShare =
-      brandControlled != null && Number.isFinite(brandControlled)
-        ? Math.max(0, Math.min(1, 1 - brandControlled))
-        : 1;
-    const dollars = out.delta_profit * resellerShare;
-    if (dollars > 0 && Number.isFinite(dollars)) recaptureDollars = dollars;
+    const out = computeLegionEconomics({
+      ...defaultLegionInputs(annualRevenue),
+      brand_controlled_pct:
+        brandControlled != null && Number.isFinite(brandControlled)
+          ? Math.max(0, Math.min(1, brandControlled))
+          : null,
+    });
+    if (out.delta_profit > 0 && Number.isFinite(out.delta_profit)) {
+      recaptureDollars = out.delta_profit;
+    }
   }
 
   // ---------- subject ----------

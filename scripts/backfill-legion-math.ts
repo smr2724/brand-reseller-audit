@@ -36,6 +36,7 @@ function rebuildMathLines(
   revenueSource: string,
   revenueBadge: "actual" | "estimate" | null,
   a: ReportAssumptions,
+  brandControlledPct: number | null,
 ) {
   const haveRev = revenueValue != null && Number.isFinite(revenueValue);
   const inputs: LegionInputs = {
@@ -47,9 +48,15 @@ function rebuildMathLines(
     current_profit_margin_pct: a.current_profit_margin_pct,
     ebitda_multiple: a.ebitda_multiple,
     labor_cost_override: a.labor_cost_override ?? null,
+    brand_controlled_pct: brandControlledPct,
   };
   const out = computeLegionEconomics(inputs);
   const v = (n: number) => (haveRev ? n : null);
+  const hasBcGate = brandControlledPct != null && brandControlledPct > 0;
+  const baseLabel = hasBcGate ? "recoverable revenue" : "revenue";
+  const marginSource = hasBcGate
+    ? `Assumption: ${pctSrc(a.reseller_net_margin_pct, 1)} of recoverable revenue (revenue × ${pctSrc(1 - (brandControlledPct as number), 1)} reseller share, post-Amazon-fees / FBA / ads / returns)`
+    : `Assumption: ${pctSrc(a.reseller_net_margin_pct, 1)} of revenue (post-Amazon-fees / FBA / ads / returns)`;
 
   const payerSource =
     a.outbound_shipping_payer === "reseller"
@@ -71,12 +78,12 @@ function rebuildMathLines(
     out,
     lines: [
       { key: "revenue", label: "Trailing 12mo Amazon revenue", value: revenueValue, format: "money" as const, source: revenueSource, editable: true, badge: revenueBadge },
-      { key: "wholesale_invoice", label: "Wholesale invoice (manuf → reseller)", value: v(out.wholesale_invoice), format: "money" as const, source: `calc: revenue ÷ (1 + ${pctSrc(a.reseller_markup_pct, 0)} markup)` },
+      { key: "wholesale_invoice", label: "Wholesale invoice (manuf → reseller)", value: v(out.wholesale_invoice), format: "money" as const, source: `calc: ${baseLabel} ÷ (1 + ${pctSrc(a.reseller_markup_pct, 0)} markup)` },
       { key: "wholesale_outbound_shipping", label: "Wholesale outbound shipping", value: v(out.wholesale_outbound_shipping), format: "money" as const, source: `Assumption: ${pctSrc(a.outbound_shipping_pct, 1)} of wholesale invoice`, editable: true },
-      { key: "effective_markup_pct", label: "Effective markup % (incl. shipping)", value: v(out.effective_markup_pct), format: "percent" as const, source: "calc: revenue ÷ (wholesale − shipping) − 1" },
+      { key: "effective_markup_pct", label: "Effective markup % (incl. shipping)", value: v(out.effective_markup_pct), format: "percent" as const, source: `calc: ${baseLabel} ÷ (wholesale − shipping) − 1` },
       { key: "effective_wholesale", label: "Effective wholesale price (COGS)", value: v(out.effective_wholesale), format: "money" as const, source: "calc: wholesale invoice − outbound shipping" },
       { key: "current_profit", label: "Current manufacturer profit", value: v(out.current_profit), format: "money" as const, source: `Assumption: ${pctSrc(a.current_profit_margin_pct, 0)} margin × effective wholesale`, editable: true },
-      { key: "reseller_margin", label: "Reseller net margin captured (recoverable)", value: v(out.reseller_margin_captured), format: "money" as const, source: `Assumption: ${pctSrc(a.reseller_net_margin_pct, 1)} of revenue (post-Amazon-fees / FBA / ads / returns)`, editable: true },
+      { key: "reseller_margin", label: "Reseller net margin captured (recoverable)", value: v(out.reseller_margin_captured), format: "money" as const, source: marginSource, editable: true },
       { key: "recouped_shipping", label: "Recouped outbound shipping", value: v(out.recouped_shipping), format: "money" as const, source: payerSource, editable: true },
       { key: "labor_cost", label: "Labor cost (in-house Amazon team)", value: haveRev ? -Math.abs(out.labor_cost) : null, format: "money" as const, source: laborSource, editable: true },
       { key: "new_profit", label: "New profit (under brand-direct model)", value: v(out.new_profit), format: "money" as const, source: "calc: current profit + reseller margin + recouped shipping − labor" },
@@ -167,7 +174,21 @@ async function backfillOne(admin: any, reportId: string, label: string) {
     labor_cost_override: oldA.labor_cost_override ?? null,
   };
 
-  const { lines, out } = rebuildMathLines(revenueValue, revenueSource, revenueBadge, a);
+  // Phase 27 — pass brand_controlled_pct through so the backfilled
+  // numbers match the recoverable-slice gating in production.
+  const bcRaw = (narrative as any).brand_controlled_pct;
+  const brandControlledPct =
+    bcRaw == null || !Number.isFinite(Number(bcRaw))
+      ? null
+      : Math.max(0, Math.min(1, Number(bcRaw)));
+
+  const { lines, out } = rebuildMathLines(
+    revenueValue,
+    revenueSource,
+    revenueBadge,
+    a,
+    brandControlledPct,
+  );
 
   // Brand name (for headline rewrite).
   let brandName = narrative.brand_name;

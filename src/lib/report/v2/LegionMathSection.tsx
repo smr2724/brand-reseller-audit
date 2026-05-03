@@ -37,6 +37,12 @@ export interface LegionMathSectionProps {
   revenueFootnote: string | null;
   /** LLM-generated math notes from assemble.ts. */
   notes: string | null;
+  /** Phase 27 — brand-controlled share (0-1). When the brand already
+   *  wins most of its own buy boxes the wholesale-leg math runs on the
+   *  recoverable slice (revenue × (1 − bc)) so we don't claim margin
+   *  from sales the brand already keeps. Null/0 ⇒ treat all revenue as
+   *  recoverable (legacy behavior). */
+  brandControlledPct?: number | null;
 }
 
 /** Subset of `ReportAssumptions` actually used by the math (everything
@@ -108,6 +114,7 @@ export function LegionMathSection(props: LegionMathSectionProps) {
     };
   }, [revenue, assumptions, hydrated, storageKey]);
 
+  const brandControlledPct = props.brandControlledPct ?? null;
   const out: LegionOutputs = useMemo(() => {
     const inputs: LegionInputs = {
       revenue: revenue ?? 0,
@@ -118,9 +125,10 @@ export function LegionMathSection(props: LegionMathSectionProps) {
       current_profit_margin_pct: assumptions.current_profit_margin_pct,
       ebitda_multiple: assumptions.ebitda_multiple,
       labor_cost_override: assumptions.labor_cost_override,
+      brand_controlled_pct: brandControlledPct,
     };
     return computeLegionEconomics(inputs);
-  }, [revenue, assumptions]);
+  }, [revenue, assumptions, brandControlledPct]);
 
   const haveRevenue = revenue != null && revenue > 0;
   const v = (n: number): number | null => (haveRevenue ? n : null);
@@ -198,6 +206,7 @@ export function LegionMathSection(props: LegionMathSectionProps) {
                 assumptions={assumptions}
                 revenueSource={props.revenueSource}
                 revenueBadge={props.revenueBadge}
+                brandControlledPct={brandControlledPct}
               />
               {props.notes && <p className="rv2-prose rv2-prose-callout">{props.notes}</p>}
               {props.revenueFootnote && (
@@ -280,12 +289,14 @@ function FullMath({
   assumptions,
   revenueSource,
   revenueBadge,
+  brandControlledPct,
 }: {
   revenue: number | null;
   out: LegionOutputs;
   assumptions: LegionAssumptions;
   revenueSource: string;
   revenueBadge: "actual" | "estimate" | null;
+  brandControlledPct: number | null;
 }) {
   const haveRev = revenue != null && revenue > 0;
   const v = (n: number) => (haveRev ? n : null);
@@ -296,19 +307,37 @@ function FullMath({
       : assumptions.outbound_shipping_payer === "unknown"
         ? "Brand pays: unknown — assumed YES"
         : "Brand pays: YES (recoupable)";
+  const hasBcGate = brandControlledPct != null && brandControlledPct > 0;
+  const recoverableLabel = hasBcGate ? "recoverable revenue" : "revenue";
+  const resellerSharePct =
+    hasBcGate
+      ? Math.max(0, Math.min(1, 1 - (brandControlledPct as number)))
+      : 1;
 
   // 11 rows + the 3 total/headline rows below (still inside Tier 2 per
   // the brief).
   const rows: MathRow[] = [
     { key: "reseller_markup_pct", label: "Reseller markup %", value: assumptions.reseller_markup_pct, source: "editable — see input panel", format: "percent" },
     { key: "implied_retail", label: "Reseller's implied retail price", value: revenue, source: "what the reseller charges on Amazon (= revenue)", format: "money", badge: revenueBadge, estimate: isEst },
-    { key: "wholesale_invoice", label: "Wholesale invoice (your current price)", value: v(out.wholesale_invoice), source: `revenue ÷ (1 + ${pct(assumptions.reseller_markup_pct, 0)} markup)`, format: "money", estimate: isEst },
+    ...(hasBcGate
+      ? ([
+          {
+            key: "recoverable_revenue",
+            label: "Recoverable revenue (reseller-controlled slice)",
+            value: v(out.recoverable_revenue),
+            source: `revenue × ${pct(resellerSharePct, 1)} reseller share (1 − brand-controlled ${pct(brandControlledPct as number, 1)})`,
+            format: "money" as const,
+            estimate: isEst,
+          },
+        ] satisfies MathRow[])
+      : []),
+    { key: "wholesale_invoice", label: "Wholesale invoice (your current price)", value: v(out.wholesale_invoice), source: `${recoverableLabel} ÷ (1 + ${pct(assumptions.reseller_markup_pct, 0)} markup)`, format: "money", estimate: isEst },
     { key: "outbound_shipping_pct", label: "Outbound shipping %", value: assumptions.outbound_shipping_pct, source: "editable — see input panel", format: "percent" },
     { key: "wholesale_outbound_shipping", label: "Outbound shipping $", value: v(out.wholesale_outbound_shipping), source: `${pct(assumptions.outbound_shipping_pct, 1)} × wholesale invoice · ${payerSource}`, format: "money", estimate: isEst },
-    { key: "effective_markup_pct", label: "Effective markup %", value: v(out.effective_markup_pct), source: "revenue ÷ (wholesale − outbound shipping) − 1", format: "percent", estimate: isEst },
+    { key: "effective_markup_pct", label: "Effective markup %", value: v(out.effective_markup_pct), source: `${recoverableLabel} ÷ (wholesale − outbound shipping) − 1`, format: "percent", estimate: isEst },
     { key: "effective_wholesale", label: "Effective wholesale (true COGS)", value: v(out.effective_wholesale), source: "wholesale invoice − outbound shipping", format: "money", estimate: isEst },
     { key: "reseller_net_margin_pct", label: "Reseller net margin %", value: assumptions.reseller_net_margin_pct, source: "editable — incl. inbound shipping (~3%)", format: "percent" },
-    { key: "reseller_margin_captured", label: "Reseller margin captured $", value: v(out.reseller_margin_captured), source: `${pct(assumptions.reseller_net_margin_pct, 1)} × revenue`, format: "money", estimate: isEst },
+    { key: "reseller_margin_captured", label: "Reseller margin captured $", value: v(out.reseller_margin_captured), source: `${pct(assumptions.reseller_net_margin_pct, 1)} × ${recoverableLabel}`, format: "money", estimate: isEst },
     { key: "recouped_shipping", label: "Recouped shipping $", value: v(out.recouped_shipping), source: payerSource, format: "money", estimate: isEst },
     { key: "labor_cost", label: "Labor cost $", value: haveRev ? -Math.abs(out.labor_cost) : null, source: laborSource(out.labor_tier, assumptions.labor_cost_override), format: "money" },
   ];

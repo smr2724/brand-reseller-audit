@@ -38,11 +38,15 @@ export default async function BrandDetail({ params }: { params: { id: string } }
 
   // Phase 26 — auto-populate the FINANCIAL MODEL panel as soon as
   // Keepa enrichment lands. Single source: computeLegionEconomics.
+  // Phase 27 — pass brand-controlled share so the panel reads the same
+  // recoverable-slice numbers the report does (margin only on revenue
+  // currently leaking to resellers).
   const financials = computeBrandDetailFinancials(
     {
       keepa_last_enriched_at: brand.keepa_last_enriched_at,
       trailing_12_months: brand.trailing_12_months,
       est_monthly_revenue: brand.est_monthly_revenue,
+      brand_controlled_pct: brand.keepa_brand_controlled_pct,
     },
     (asins ?? []).map((a) => ({ buy_box_price: a.buy_box_price ?? null })),
   );

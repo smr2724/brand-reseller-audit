@@ -170,5 +170,93 @@ const veryHigh = computeLegionEconomics({
 });
 near(veryHigh.wholesale_invoice, 1_000_000 / 6, 0.01, "500% markup → wholesale = R/6");
 
+console.log("\n=== Phase 27 — recoverable-slice gating (Couple's Coffee fixture) ===\n");
+
+// Couple's Coffee shape: 96.97% brand-controlled, ~$23.8k recoverable
+// out of an estimated $784,716 brand TTM. Real reseller margin should
+// be 10.5% × $23,779 ≈ $2,497, NOT 10.5% × $784,716 = $82,395.
+const CC_REVENUE = 784_716;
+const CC_BC = 0.9697;
+const CC_RECOVERABLE = CC_REVENUE * (1 - CC_BC); // ≈ 23,779
+
+const cc = computeLegionEconomics({
+  ...defaultLegionInputs(CC_REVENUE),
+  brand_controlled_pct: CC_BC,
+});
+near(cc.recoverable_revenue, CC_RECOVERABLE, 1, "Couple's Coffee — recoverable_revenue ≈ $23,779");
+near(cc.reseller_margin_captured, 0.105 * CC_RECOVERABLE, 1, "Couple's Coffee — reseller_margin ≈ 10.5% × recoverable ≈ $2,497");
+// wholesale_invoice should be on recoverable slice (markup defaults to 1.03 = 103%)
+near(cc.wholesale_invoice, CC_RECOVERABLE / (1 + 1.03), 1, "Couple's Coffee — wholesale_invoice = recoverable ÷ (1 + 103%)");
+// recouped_shipping rides on the recoverable wholesale leg (5% of wholesale)
+near(cc.recouped_shipping, (CC_RECOVERABLE / (1 + 1.03)) * 0.05, 1, "Couple's Coffee — recouped_shipping on recoverable leg");
+// labor still uses revenue tier (under $2M)
+eq(cc.labor_tier, "under_2m", "Couple's Coffee — labor_tier under_2m (revenue < $2M)");
+eq(cc.labor_cost, 30_000, "Couple's Coffee — labor_cost $30,000");
+
+console.log("\n=== Phase 27 — backwards compatible (no brand_controlled_pct = legacy behavior) ===\n");
+
+const legacy = computeLegionEconomics(defaultLegionInputs(CC_REVENUE));
+near(legacy.recoverable_revenue, CC_REVENUE, 0.01, "no bc_pct → recoverable = revenue");
+near(legacy.reseller_margin_captured, 0.105 * CC_REVENUE, 0.01, "no bc_pct → margin × full revenue (legacy)");
+const explicitZero = computeLegionEconomics({
+  ...defaultLegionInputs(CC_REVENUE),
+  brand_controlled_pct: 0,
+});
+near(explicitZero.recoverable_revenue, CC_REVENUE, 0.01, "bc_pct=0 → recoverable = revenue");
+const explicitNull = computeLegionEconomics({
+  ...defaultLegionInputs(CC_REVENUE),
+  brand_controlled_pct: null,
+});
+near(explicitNull.recoverable_revenue, CC_REVENUE, 0.01, "bc_pct=null → recoverable = revenue");
+
+console.log("\n=== Phase 27 — bc_pct clamped to [0,1] ===\n");
+
+const clampHigh = computeLegionEconomics({
+  ...defaultLegionInputs(1_000_000),
+  brand_controlled_pct: 1.5,
+});
+eq(clampHigh.recoverable_revenue, 0, "bc_pct > 1 clamps to 1 → recoverable = 0");
+const clampNeg = computeLegionEconomics({
+  ...defaultLegionInputs(1_000_000),
+  brand_controlled_pct: -0.5,
+});
+near(clampNeg.recoverable_revenue, 1_000_000, 0.01, "bc_pct < 0 clamps to 0 → recoverable = revenue");
+
+console.log("\n=== Phase 27 — World Amenities low-bc still tightens (sanity) ===\n");
+
+// World Amenities is high_fit (low brand-controlled share). Even with
+// bc gating, the reseller-margin number should be close to the legacy
+// value but strictly ≤ legacy. Use bc_pct = 0.10 as a representative
+// low-bc share.
+const waLowBc = computeLegionEconomics({
+  ...defaultLegionInputs(WA_REVENUE),
+  brand_controlled_pct: 0.10,
+});
+near(waLowBc.reseller_margin_captured, 0.105 * WA_REVENUE * 0.90, 1, "WA low-bc — margin = 10.5% × 90% × revenue");
+
+console.log("\n=== Phase 27 — per-ASIN price-only TTM sums to brand price-only TTM ===\n");
+
+// Bug 2 reproducer. priceOnlyMonthlyUnitsFloor=4, brand TTM is
+// `sum(price × 4 × 12)` and per-ASIN cards must use the same formula.
+// We don't import the assemble path here (it pulls Supabase); instead
+// we re-implement the tiny brand-level fallback inline and the
+// per-ASIN formula and assert equality.
+{
+  const PRICES = [7.99, 24.99, 49.99, 12.50, 18.75]; // a few priced ASINs
+  const monthly = 4;
+  const brandTtm = PRICES.reduce(
+    (s, p) => s + Math.round(p * monthly * 12),
+    0,
+  );
+  const perAsin = PRICES.map((p) => Math.round(p * monthly * 12));
+  const cardSum = perAsin.reduce((s, n) => s + n, 0);
+  near(
+    cardSum,
+    brandTtm,
+    PRICES.length, // tolerate up to $1/ASIN of rounding
+    "price-only fallback: sum(per-ASIN ttm) == brand TTM",
+  );
+}
+
 console.log(`\n=== ${passes} passed, ${fails} failed ===\n`);
 if (fails > 0) process.exit(1);

@@ -34,6 +34,11 @@ export interface BrandFinancialInputs {
   keepa_last_enriched_at: string | null | undefined;
   trailing_12_months: number | null | undefined;
   est_monthly_revenue: number | null | undefined;
+  /** Phase 27 — brand-controlled share of buy boxes (0-1). Drives the
+   *  recoverable-slice gating in `computeLegionEconomics` so the
+   *  brand-detail Financial Model panel reads the same defensible
+   *  numbers as the report. */
+  brand_controlled_pct?: number | null | undefined;
 }
 
 export interface BrandFinancialAsin {
@@ -117,7 +122,15 @@ export function computeBrandDetailFinancials(
     };
   }
 
-  const outputs = computeLegionEconomics(defaultLegionInputs(revenue));
+  const bcRaw = brand.brand_controlled_pct;
+  const brandControlledPct =
+    bcRaw == null || !Number.isFinite(Number(bcRaw))
+      ? null
+      : Math.max(0, Math.min(1, Number(bcRaw)));
+  const outputs = computeLegionEconomics({
+    ...defaultLegionInputs(revenue),
+    brand_controlled_pct: brandControlledPct,
+  });
   return {
     ready: true,
     revenue,

@@ -163,12 +163,26 @@ export function computeCxAuditBase(
   bundle: BrandEnrichmentBundle,
   asinDetails: KeepaAsinDetail[] = [],
   revenueEstimate: RevenueEstimate | null = null,
+  /**
+   * Phase 27 — when the report falls back to the price-only TTM
+   * estimator (no salesRank), the rank-based revenueEstimate is null
+   * and per-ASIN cards used to render "— not measured". Pass the same
+   * monthly-units floor used at the brand level so each card displays
+   * `buy_box_price × units_per_mo × 12` and the per-ASIN sum trivially
+   * equals the brand-level TTM. Pass null to keep the legacy
+   * "no per-ASIN revenue when estimator returned null" behavior.
+   */
+  priceOnlyMonthlyUnits: number | null = null,
 ): Omit<NarrativeCxAudit, "whats_broken"> {
   const dfs = bundle.dataforseo;
   const detailsByAsin = new Map<string, KeepaAsinDetail>();
   for (const d of asinDetails) detailsByAsin.set(d.asin, d);
   const perAsinRev = new Map<string, RevenueEstimatePerAsin>();
   for (const r of revenueEstimate?.per_asin ?? []) perAsinRev.set(r.asin, r);
+  const usePriceOnly =
+    revenueEstimate?.total_ttm_revenue == null &&
+    priceOnlyMonthlyUnits != null &&
+    priceOnlyMonthlyUnits > 0;
 
   // Score 0-100. When we have real listing fields from Keepa /product,
   // each piece of the listing pulls weight:
@@ -226,6 +240,23 @@ export function computeCxAuditBase(
       }
 
       const rev = perAsinRev.get(a.asin) ?? null;
+      let ttmRevenue: number | null = rev?.ttm_revenue ?? null;
+      let ttmUnits: number | null =
+        rev?.monthly_units != null ? rev.monthly_units * 12 : null;
+      const priceForCard = rev?.buy_box_price ?? a.buy_box_price ?? null;
+      // Phase 27 — Bug 2 fix. When the brand-level revenue is the
+      // price-only fallback, populate per-ASIN cards with the SAME
+      // formula so the sum of card revenues equals the brand TTM.
+      if (
+        usePriceOnly &&
+        ttmRevenue == null &&
+        priceForCard != null &&
+        priceForCard > 0
+      ) {
+        const monthly = priceOnlyMonthlyUnits as number;
+        ttmRevenue = Math.round(priceForCard * monthly * 12);
+        ttmUnits = monthly * 12;
+      }
       return {
         asin: a.asin,
         title: a.title,
@@ -236,10 +267,9 @@ export function computeCxAuditBase(
         has_video: hasVideo,
         reviews,
         rating,
-        ttm_revenue: rev?.ttm_revenue ?? null,
-        ttm_units:
-          rev?.monthly_units != null ? rev.monthly_units * 12 : null,
-        buy_box_price: rev?.buy_box_price ?? a.buy_box_price ?? null,
+        ttm_revenue: ttmRevenue,
+        ttm_units: ttmUnits,
+        buy_box_price: priceForCard,
       };
     })
     .sort((a, b) => (b.ttm_revenue ?? -1) - (a.ttm_revenue ?? -1))
@@ -312,9 +342,9 @@ import { computeLegionEconomics, type LegionInputs } from "@/lib/math/legion-eco
 
 export interface MathContext {
   trailing_12mo_revenue: number | null;
-  /** Reserved for future use; the v4 framework no longer takes the
-   * brand-controlled share into the math, but we keep the field on the
-   * context so callers don't need to change shape. */
+  /** Phase 27 — used to gate the wholesale leg + reseller margin to the
+   * recoverable slice (revenue × (1 − bc)). null/0 ⇒ treat all revenue
+   * as recoverable (legacy behavior). */
   brand_controlled_pct: number | null;
   current_profit: number | null;
   keepaDate: string | null;
@@ -350,6 +380,7 @@ export function computeMath(ctx: MathContext): NarrativeMath {
     current_profit_margin_pct: a.current_profit_margin_pct,
     ebitda_multiple: a.ebitda_multiple,
     labor_cost_override: a.labor_cost_override ?? null,
+    brand_controlled_pct: ctx.brand_controlled_pct,
   };
   const out = computeLegionEconomics(inputs);
   const v = (n: number) => (haveRevenue ? n : null);
@@ -376,7 +407,7 @@ export function computeMath(ctx: MathContext): NarrativeMath {
       label: "Wholesale invoice (manuf → reseller)",
       value: v(out.wholesale_invoice),
       format: "money",
-      source: `calc: revenue ÷ (1 + ${PCT_FMT(a.reseller_markup_pct, 0)} markup)`,
+      source: wholesaleInvoiceSource(a.reseller_markup_pct, ctx.brand_controlled_pct),
     },
     {
       key: "wholesale_outbound_shipping",
@@ -413,7 +444,7 @@ export function computeMath(ctx: MathContext): NarrativeMath {
       label: "Reseller net margin captured (recoverable)",
       value: v(out.reseller_margin_captured),
       format: "money",
-      source: `Assumption: ${PCT_FMT(a.reseller_net_margin_pct, 1)} of revenue (post-Amazon-fees / FBA / ads / returns)`,
+      source: recoverableMarginSource(a.reseller_net_margin_pct, ctx.brand_controlled_pct),
       editable: true,
     },
     {
@@ -469,4 +500,38 @@ function laborSource(
   if (tier === "under_2m") return "Tier: revenue < $2M → $30,000/yr";
   if (tier === "2m_to_10m") return "Tier: $2M ≤ revenue < $10M → $130,000/yr";
   return "Tier: revenue ≥ $10M → $250,000/yr";
+}
+
+/**
+ * Phase 27 — make the recoverable-base explicit in the source string.
+ * When brand_controlled_pct is null/0/missing the math reduces to the
+ * old "X% of revenue" label so legacy reports read unchanged.
+ */
+function recoverableMarginSource(
+  netMarginPct: number,
+  brandControlledPct: number | null,
+): string {
+  const pctLabel = PCT_FMT(netMarginPct, 1);
+  if (brandControlledPct == null || brandControlledPct <= 0) {
+    return `Assumption: ${pctLabel} of revenue (post-Amazon-fees / FBA / ads / returns)`;
+  }
+  const recoverablePct = Math.max(0, Math.min(1, 1 - brandControlledPct));
+  return `Assumption: ${pctLabel} of recoverable revenue (revenue × ${PCT_FMT(recoverablePct, 1)} reseller share, post-Amazon-fees / FBA / ads / returns)`;
+}
+
+/**
+ * Phase 27 — wholesale invoice now operates on the recoverable slice
+ * (revenue × (1 − brand_controlled_pct)). When bc is null/0 we fall
+ * back to the legacy label so older reports / brand-detail panels read
+ * unchanged.
+ */
+function wholesaleInvoiceSource(
+  markupPct: number,
+  brandControlledPct: number | null,
+): string {
+  const markupLabel = PCT_FMT(markupPct, 0);
+  if (brandControlledPct == null || brandControlledPct <= 0) {
+    return `calc: revenue ÷ (1 + ${markupLabel} markup)`;
+  }
+  return `calc: recoverable revenue ÷ (1 + ${markupLabel} markup)`;
 }

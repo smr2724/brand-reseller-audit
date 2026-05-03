@@ -110,6 +110,7 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
               revenueBadge={revenueBadge ?? null}
               revenueFootnote={extractRevenueFootnote(narrative.math.notes ?? "")}
               notes={cleanMathNotes(narrative.math.notes ?? "") || null}
+              brandControlledPct={narrative.brand_controlled_pct ?? null}
             />
             <SectionPlan narrative={narrative} />
           </>

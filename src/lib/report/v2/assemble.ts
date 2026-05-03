@@ -134,7 +134,20 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
   // 1. Pure compute (no I/O).
   const reality = computeResellerReality(bundle);
   const dossierBase = computeDossierBase(bundle);
-  const cxBase = computeCxAuditBase(bundle, asinDetails, revenueEstimate);
+  // Phase 27 — Bug 2. When the rank-based estimator returns null, we
+  // pass the price-only monthly-units floor through so per-ASIN cards
+  // use the same formula the brand-level fallback does. Sum-of-cards
+  // then equals brand TTM by construction.
+  const priceOnlyUnits =
+    revenueEstimate?.total_ttm_revenue == null
+      ? priceOnlyMonthlyUnitsFloor()
+      : null;
+  const cxBase = computeCxAuditBase(
+    bundle,
+    asinDetails,
+    revenueEstimate,
+    priceOnlyUnits,
+  );
   const benchmarkBase = computeCompetitorBenchmark(brand, bundle, competitors, cxBase);
 
   // 2. Math — uses assumptions + brand row + Keepa freshness.

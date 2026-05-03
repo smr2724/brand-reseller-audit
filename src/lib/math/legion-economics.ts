@@ -30,9 +30,24 @@ export interface LegionInputs {
   current_profit_margin_pct: number; // default 0.20
   ebitda_multiple: number;           // default 7
   labor_cost_override?: number | null;
+  /**
+   * Phase 27 — brand-controlled share of the channel (0-1). When the
+   * brand already wins the buy box on most of its own listings, the
+   * "recoverable" revenue is only the slice currently leaking to
+   * resellers. We can't capture margin from sales the brand already
+   * keeps. Defaults to 0 (= 100% recoverable) for backwards compatibility
+   * — callers that don't supply this get the legacy "all revenue is
+   * recoverable" behavior.
+   */
+  brand_controlled_pct?: number | null;
 }
 
 export interface LegionOutputs {
+  /** Phase 27 — the slice of revenue actually leaking to resellers,
+   *  which is what every wholesale-leg line below operates on. Equals
+   *  revenue × (1 − brand_controlled_pct). When `brand_controlled_pct`
+   *  is null/0/missing this equals `revenue`. */
+  recoverable_revenue: number;
   wholesale_invoice: number;
   wholesale_outbound_shipping: number;
   effective_markup_pct: number;
@@ -79,8 +94,22 @@ export function computeLegionEconomics(inputs: LegionInputs): LegionOutputs {
   const payer: OutboundShippingPayer =
     inputs.outbound_shipping_payer === "reseller" ? "reseller" : "brand";
 
-  // 1. Wholesale invoice — what the brand currently invoices the reseller.
-  const wholesaleInvoice = revenue / (1 + markup);
+  // Phase 27 — clamp brand-controlled share to [0, 1]. The recoverable
+  // slice is what the wholesale leg actually represents: revenue
+  // currently leaking through resellers, NOT revenue the brand already
+  // keeps direct. When the caller doesn't supply a share (null/missing)
+  // we fall back to 0 so legacy behavior (= treat all revenue as
+  // recoverable) is preserved.
+  const bcRaw = inputs.brand_controlled_pct;
+  const bcPct =
+    bcRaw == null || !Number.isFinite(Number(bcRaw))
+      ? 0
+      : Math.max(0, Math.min(1, Number(bcRaw)));
+  const recoverableRevenue = Math.max(0, revenue * (1 - bcPct));
+
+  // 1. Wholesale invoice — what the brand currently invoices the
+  //    reseller, on the recoverable slice only.
+  const wholesaleInvoice = recoverableRevenue / (1 + markup);
 
   // 2. Wholesale outbound shipping — manuf → reseller leg.
   const wholesaleOutboundShipping = wholesaleInvoice * shipPct;
@@ -89,23 +118,29 @@ export function computeLegionEconomics(inputs: LegionInputs): LegionOutputs {
   // Per the brief's formula table; collapses (with 4) to
   // effective_wholesale = wholesale_invoice − wholesale_outbound_shipping.
   const denom = wholesaleInvoice - wholesaleOutboundShipping;
-  const effectiveMarkupPct = denom > 0 ? revenue / denom - 1 : 0;
+  const effectiveMarkupPct = denom > 0 ? recoverableRevenue / denom - 1 : 0;
 
   // 4. Effective wholesale (COGS-equivalent).
   const effectiveWholesale =
-    1 + effectiveMarkupPct > 0 ? revenue / (1 + effectiveMarkupPct) : 0;
+    1 + effectiveMarkupPct > 0 ? recoverableRevenue / (1 + effectiveMarkupPct) : 0;
 
-  // 5. Current manufacturer profit on the wholesale leg today.
+  // 5. Current manufacturer profit on the wholesale leg today (the
+  //    recoverable slice — the brand already books direct profit on the
+  //    brand-controlled slice and that isn't "recoverable" by RCG).
   const currentProfit = effectiveWholesale * curMarginPct;
 
   // 6. Reseller net margin captured — the blended margin the brand
   //    recovers by removing the reseller (post-Amazon-fees / FBA / ads
-  //    / returns / inbound-to-Amazon).
-  const resellerMarginCaptured = revenue * netMarginPct;
+  //    / returns / inbound-to-Amazon). Phase 27 — applied to the
+  //    recoverable slice ONLY: brand can't "capture" margin from sales
+  //    it already keeps.
+  const resellerMarginCaptured = recoverableRevenue * netMarginPct;
 
   // 7. Recouped outbound shipping — only when the brand currently pays
   //    it (toggle); "unknown" is treated as "brand" upstream so the
-  //    UI surfaces a caveat.
+  //    UI surfaces a caveat. This too rides on the recoverable slice
+  //    (the wholesale-leg shipping is already scoped to recoverable
+  //    via wholesaleInvoice above).
   const recoupedShipping = payer === "brand" ? wholesaleOutboundShipping : 0;
 
   // 8. Labor cost — tiered unless explicitly overridden.
@@ -133,6 +168,7 @@ export function computeLegionEconomics(inputs: LegionInputs): LegionOutputs {
   const exitLift = deltaProfit * ebitdaMult;
 
   return {
+    recoverable_revenue: recoverableRevenue,
     wholesale_invoice: wholesaleInvoice,
     wholesale_outbound_shipping: wholesaleOutboundShipping,
     effective_markup_pct: effectiveMarkupPct,
