@@ -158,17 +158,26 @@ export async function POST(req: Request) {
   // Snapshot before-state for the response.
   const before = countNotMeasuredAsinFields(narrative);
 
-  // 3. Force a fresh enrichment cycle. We bypass freshness windows by
-  // null-ing the timestamps so runV2Enrichment will re-pull Keepa + DFS
-  // + /product details + competitor snapshots.
-  const enrichResult = await runV2Enrichment(admin, {
+  // 3. Run enrichment using the brand's stored freshness timestamps.
+  // For OXO/Yeti these were enriched < 14 days ago, so Keepa + DFS upstream
+  // calls are skipped (within the 14-day freshness window). What still
+  // runs:
+  //   - getProductDetails for each ASIN (24h in-memory cache, but cold
+  //     here on a fresh server — issues per-ASIN /product calls). This
+  //     supplies has_a_plus / has_video / rating / reviews / images /
+  //     bullets fields, plus the per-ASIN revenue estimator inputs.
+  //   - competitor snapshots (cached cross-user for 14 days, so hot).
+  // This stays under Vercel's 300s ceiling for the brand sizes we
+  // care about.
+  const brandRowMin: BrandRowMin = {
     id: brand.id,
     name: brand.name,
     user_id: brand.user_id,
     category: brand.category,
-    keepa_last_enriched_at: null,
-    dataforseo_last_enriched_at: null,
-  });
+    keepa_last_enriched_at: brand.keepa_last_enriched_at ?? null,
+    dataforseo_last_enriched_at: brand.dataforseo_last_enriched_at ?? null,
+  };
+  const enrichResult = await runV2Enrichment(admin, brandRowMin);
 
   // 4. Recompute sub-narratives.
   const reality = computeResellerReality(enrichResult.bundle);
