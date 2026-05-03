@@ -45,9 +45,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const body = await req.json().catch(() => ({}));
-  const reportId = String(body?.report_id ?? "").trim();
-  if (!reportId) {
-    return NextResponse.json({ error: "report_id required" }, { status: 400 });
+  let reportId = String(body?.report_id ?? "").trim();
+  const tokenInput = String(body?.token ?? "").trim();
+  if (!reportId && !tokenInput) {
+    return NextResponse.json(
+      { error: "report_id or token required" },
+      { status: 400 },
+    );
   }
   const admin = createSupabaseAdminClient();
   if (!admin) {
@@ -55,6 +59,22 @@ export async function POST(req: Request) {
       { error: "server missing SUPABASE_SERVICE_ROLE_KEY" },
       { status: 500 },
     );
+  }
+  // Phase 27 — token-based lookup so we can recover by /r/<token> URL
+  // without needing the database row's UUID.
+  if (!reportId && tokenInput) {
+    const { data: tokenRow, error: tokenErr } = await admin
+      .from("reports")
+      .select("id")
+      .eq("token", tokenInput)
+      .maybeSingle();
+    if (tokenErr || !tokenRow) {
+      return NextResponse.json(
+        { error: "report not found by token" },
+        { status: 404 },
+      );
+    }
+    reportId = tokenRow.id as string;
   }
   // Optional async mode: clients can post `{ async: true }` to start
   // generation and get a 202 immediately while the function continues
@@ -80,8 +100,10 @@ export async function POST(req: Request) {
   return NextResponse.json(result, { status: result.status === "recovered" ? 200 : 500 });
 }
 
-// GET returns the current set of stuck reports without recovering — useful
-// for quick health checks.
+// GET returns the current set of stuck reports, OR a single report's
+// math snapshot when ?token=... is provided (Phase 27 — used to verify
+// the recoverable-slice fix by fetching the persisted math.lines for a
+// report we don't have the UUID of).
 export async function GET(req: Request) {
   if (!authorize(req)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -92,6 +114,54 @@ export async function GET(req: Request) {
       { error: "server missing SUPABASE_SERVICE_ROLE_KEY" },
       { status: 500 },
     );
+  }
+  const url = new URL(req.url);
+  const token = url.searchParams.get("token");
+  const id = url.searchParams.get("report_id");
+  if (token || id) {
+    const q = admin
+      .from("reports")
+      .select("id, token, status, brand_id, narrative_json, generated_at, error_message");
+    const { data, error } = await (token
+      ? q.eq("token", token).maybeSingle()
+      : q.eq("id", id as string).maybeSingle());
+    if (error || !data) {
+      return NextResponse.json(
+        { error: error?.message ?? "not found" },
+        { status: 404 },
+      );
+    }
+    const narr = (data.narrative_json ?? null) as any;
+    const lines = narr?.math?.lines ?? [];
+    const pickLine = (key: string) =>
+      lines.find((l: any) => l?.key === key)?.value ?? null;
+    return NextResponse.json({
+      id: data.id,
+      token: data.token,
+      status: data.status,
+      brand_id: data.brand_id,
+      generated_at: data.generated_at,
+      error_message: data.error_message,
+      report_mode: narr?.report_mode ?? null,
+      brand_controlled_pct: narr?.brand_controlled_pct ?? null,
+      recoverable_revenue_dollars: narr?.recoverable_revenue_dollars ?? null,
+      math_snapshot: {
+        revenue: pickLine("revenue"),
+        wholesale_invoice: pickLine("wholesale_invoice"),
+        current_profit: pickLine("current_profit"),
+        reseller_margin: pickLine("reseller_margin"),
+        recouped_shipping: pickLine("recouped_shipping"),
+        labor_cost: pickLine("labor_cost"),
+        new_profit: pickLine("new_profit"),
+        delta_profit: pickLine("delta_profit"),
+        exit_lift: pickLine("exit_lift"),
+      },
+      cover: {
+        delta_profit: narr?.cover?.delta_profit ?? null,
+        exit_lift: narr?.cover?.exit_lift ?? null,
+        kpis: narr?.cover?.kpis ?? null,
+      },
+    });
   }
   const stuck = await findStuckReports(admin);
   return NextResponse.json({ stuck });
