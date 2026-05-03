@@ -222,7 +222,7 @@ export async function POST(req: Request) {
   //     300s ceiling
   // 20 ASINs in a single /product call costs ~100 tokens and one HTTP
   // round-trip — comfortable margin under the timeout.
-  const ASIN_CAP = 20;
+  const ASIN_CAP = 10;
   const asins = (bundle.keepa.asins ?? [])
     .map((a) => a.asin)
     .filter(Boolean)
@@ -234,7 +234,7 @@ export async function POST(req: Request) {
   // run out of time, we fall back to whatever was already in the
   // existing bundle for the CX scorecard (per-ASIN $$$ stays missing,
   // but at least the response is observable).
-  const KEEPA_DEADLINE_MS = 180_000; // 3 minutes
+  const KEEPA_DEADLINE_MS = 240_000; // 4 minutes
   let keepaTimedOut = false;
   if (asins.length) {
     const products = await Promise.race<
