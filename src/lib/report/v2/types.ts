@@ -49,6 +49,12 @@ export interface ResellerRow {
   asins_won: number | null;
   is_fba: boolean | null;
   country: string | null;
+  /** Phase 23 — null on legacy rows, true when the classifier flagged
+   * this seller as the brand's own selling entity (e.g. "Fantaswick LLC"
+   * for brand "Fantaswick"). */
+  is_brand_controlled?: boolean | null;
+  /** Phase 23 — short human-readable reason persisted on the row. */
+  classification_reason?: string | null;
 }
 
 export interface NarrativeResellerReality {

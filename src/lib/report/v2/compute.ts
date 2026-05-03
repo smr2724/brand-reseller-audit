@@ -44,6 +44,9 @@ export function computeResellerReality(
     asins_won: s.asins_won ?? null,
     is_fba: s.is_fba ?? null,
     country: null,
+    // Phase 23 — surface classification verdict + reason for transparency.
+    is_brand_controlled: s.is_brand_controlled ?? null,
+    classification_reason: s.classification_reason ?? null,
   }));
   return { top_sellers, one_liner: "", note: null };
 }
@@ -58,9 +61,20 @@ export function computeDossierBase(
   dossier: Omit<NarrativeResellerDossier, "risk_profile"> | null;
   reason: "no_top_seller" | "low_share" | null;
 } {
-  const top = bundle.keepa.sellers?.[0];
-  const topShare = bundle.keepa.top_seller_share_pct ?? top?.share_pct ?? null;
-  const topName = bundle.keepa.top_seller ?? top?.seller_name ?? null;
+  // Phase 23 — pick the top *reseller*, not the top seller overall.
+  // Brand-controlled sellers (the brand's own LLC) shouldn't end up as
+  // the dossier subject — RCG can't "remove" Fantaswick LLC from
+  // Fantaswick's listings.
+  const sellers = bundle.keepa.sellers ?? [];
+  const resellers = sellers.filter(
+    (s) => s.is_brand_controlled !== true,
+  );
+  const top = resellers[0] ?? sellers[0];
+  // When `top_seller` (the brand row) and the picked reseller diverge
+  // (because legacy data has no classification yet), prefer the picked
+  // reseller's own share/name so the dossier is internally consistent.
+  const topShare = top?.share_pct ?? bundle.keepa.top_seller_share_pct ?? null;
+  const topName = top?.seller_name ?? bundle.keepa.top_seller ?? null;
 
   if (!top || !topName) {
     return { dossier: null, reason: "no_top_seller" };

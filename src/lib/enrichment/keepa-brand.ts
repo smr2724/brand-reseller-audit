@@ -25,6 +25,14 @@ import {
   computeCombinedValidationScore,
   type DataForSeoSignals,
 } from "./scoring";
+import {
+  classifySellers,
+  aggregateBrandControlledShare,
+  amazon1pThreshold,
+  isAmazon1pBrand,
+  AMAZON_RETAIL_SELLER_ID,
+  type SellerClassification,
+} from "./seller-classification";
 
 export interface EnrichmentSummary {
   run_id: string;
@@ -38,6 +46,10 @@ export interface EnrichmentSummary {
   validation_score: number | null;
   tokens_used: number;
   amazon_1p_share: number;
+  /** Phase 23 — true when Amazon retail (ATVPDKIKX0DER) holds ≥
+   * AMAZON_1P_THRESHOLD_PCT of buy boxes. Triggers the not_a_fit report
+   * shape upstream. */
+  amazon_1p_disqualified: boolean;
   enrichment_error: string | null;
 }
 
@@ -116,6 +128,7 @@ export async function enrichBrandWithKeepa(
         validation_score: null,
         tokens_used: tokensUsed,
         amazon_1p_share: 0,
+        amazon_1p_disqualified: false,
         enrichment_error: "No ASINs found",
       };
 
@@ -153,28 +166,6 @@ export async function enrichBrandWithKeepa(
 
     const products = await getProductDetails(asins, 5);
     tokensUsed += products.length * 5; // rough estimate (cache hits don't count perfectly)
-
-    // Upsert brand_asins rows. We don't have a `parent_asin` column on
-    // brand_asins today (Phase 4 schema), so the parent linkage lives only
-    // on the in-memory product details and is recorded in the run log.
-    const asinRows = products.map((p) => ({
-      brand_id,
-      asin: p.asin,
-      title: p.title ?? null,
-      buy_box_seller: p.buy_box_seller ?? null,
-      buy_box_price: p.buy_box_price ?? null,
-      offers_count: p.total_offers_count ?? 0,
-      fba_offers_count: p.fba_offers_count ?? 0,
-      is_brand_controlled: isBrandControlled(p.buy_box_seller, brand_name),
-      last_checked_at: new Date().toISOString(),
-    }));
-
-    if (asinRows.length) {
-      const { error: upErr } = await supabase
-        .from("brand_asins")
-        .upsert(asinRows, { onConflict: "brand_id,asin" });
-      if (upErr) throw new Error(`brand_asins upsert: ${upErr.message}`);
-    }
 
     // Aggregate brand_sellers: count asins won (buy-box winner) per seller
     const sellerMap = new Map<string, {
@@ -239,7 +230,7 @@ export async function enrichBrandWithKeepa(
     }
 
     const totalWon = Array.from(sellerMap.values()).reduce((a, s) => a + s.asins_won, 0);
-    const sellerRows = Array.from(sellerMap.values()).map((s) => {
+    const preResolved = Array.from(sellerMap.values()).map((s) => {
       const resolved = s.seller_id ? resolvedInfo[s.seller_id] : null;
       const resolvedName = resolved?.name?.trim() || null;
       const finalName =
@@ -250,16 +241,36 @@ export async function enrichBrandWithKeepa(
           : s.seller_id ?? s.seller_name;
       const country = resolved?.country ?? s.seller_country ?? null;
       return {
-        brand_id,
         seller_name: finalName,
         seller_id: s.seller_id ?? null,
         seller_country: country,
         share_pct: totalWon > 0 ? s.asins_won / totalWon : null,
         asins_won: s.asins_won,
         is_fba: s.is_fba ?? null,
-        last_seen_at: new Date().toISOString(),
       };
     });
+
+    // Phase 23 — classify each seller against the brand AFTER name
+    // resolution (the Phase 4 path classified pre-resolution against
+    // raw seller-ids, which is why "Fantaswick LLC" was tagged a
+    // reseller). Cap the LLM tiebreaker at 5 calls per scan so the
+    // ambiguous-band fallback can never blow our budget.
+    const classified = await classifySellers(brand_name, preResolved, {
+      llm_budget: 5,
+    });
+
+    const sellerRows = classified.map((s) => ({
+      brand_id,
+      seller_name: s.seller_name,
+      seller_id: s.seller_id ?? null,
+      seller_country: s.seller_country,
+      share_pct: s.share_pct,
+      asins_won: s.asins_won,
+      is_fba: s.is_fba,
+      is_brand_controlled: s.classification.is_brand_controlled,
+      classification_reason: s.classification.reason.slice(0, 500),
+      last_seen_at: new Date().toISOString(),
+    }));
 
     if (sellerRows.length) {
       const { error: insErr } = await supabase
@@ -268,18 +279,70 @@ export async function enrichBrandWithKeepa(
       if (insErr) throw new Error(`brand_sellers insert: ${insErr.message}`);
     }
 
+    // Build a seller-key → classification map so per-ASIN
+    // is_brand_controlled lines up with the seller-level verdict.
+    const classificationByKey = new Map<string, SellerClassification>();
+    for (const c of classified) {
+      const idKey = c.seller_id ? c.seller_id.toLowerCase() : null;
+      const nameKey = c.seller_name?.toLowerCase() ?? null;
+      if (idKey) classificationByKey.set(idKey, c.classification);
+      if (nameKey) classificationByKey.set(nameKey, c.classification);
+    }
+
+    // Upsert brand_asins. is_brand_controlled is derived from the
+    // already-classified seller list (resolved name + Jaccard / LLM
+    // signals) rather than a raw substring match against
+    // p.buy_box_seller, which can be a Keepa seller-id pre-resolution.
+    const asinRows = products.map((p) => {
+      const idKey = p.buy_box_seller_id?.toLowerCase() ?? null;
+      const nameKey = p.buy_box_seller?.toLowerCase() ?? null;
+      const cls =
+        (idKey ? classificationByKey.get(idKey) : undefined) ??
+        (nameKey ? classificationByKey.get(nameKey) : undefined);
+      const isBrand = cls
+        ? cls.is_brand_controlled
+        : isBrandControlled(p.buy_box_seller, brand_name);
+      return {
+        brand_id,
+        asin: p.asin,
+        title: p.title ?? null,
+        buy_box_seller: p.buy_box_seller ?? null,
+        buy_box_price: p.buy_box_price ?? null,
+        offers_count: p.total_offers_count ?? 0,
+        fba_offers_count: p.fba_offers_count ?? 0,
+        is_brand_controlled: isBrand,
+        last_checked_at: new Date().toISOString(),
+      };
+    });
+
+    if (asinRows.length) {
+      const { error: upErr } = await supabase
+        .from("brand_asins")
+        .upsert(asinRows, { onConflict: "brand_id,asin" });
+      if (upErr) throw new Error(`brand_asins upsert: ${upErr.message}`);
+    }
+
     // Brand-level summary
     const asin_count = products.length;
     const unique_seller_count = sellerMap.size;
     const totalOffers = products.reduce((a, p) => a + (p.total_offers_count ?? 0), 0);
     const avg_offers = asin_count ? totalOffers / asin_count : null;
-    const brandCtrlCount = products.filter((p) => isBrandControlled(p.buy_box_seller, brand_name)).length;
-    const brand_controlled_pct = asin_count ? brandCtrlCount / asin_count : null;
-    const sortedSellers = sellerRows.slice().sort((a, b) => (b.asins_won ?? 0) - (a.asins_won ?? 0));
-    const top = sortedSellers[0];
-    const top_seller = top?.seller_name ?? null;
-    const top_seller_share_pct = top?.share_pct ?? null;
-    const top_seller_country = top?.seller_country ?? null;
+
+    // Brand-controlled share is now derived from the classified seller
+    // list (weighted by share_pct, falling back to asins_won) instead
+    // of a per-ASIN exact-string match against the buy-box winner.
+    const brand_controlled_pct = aggregateBrandControlledShare(classified);
+
+    // Top reseller = the classified-as-reseller seller with the largest
+    // share. The dossier and cover hero want the actionable outsider,
+    // not the brand's own LLC (Fantaswick LLC) sitting at the top.
+    const resellersSorted = classified
+      .filter((s) => !s.classification.is_brand_controlled)
+      .sort((a, b) => (b.asins_won ?? 0) - (a.asins_won ?? 0));
+    const topReseller = resellersSorted[0] ?? null;
+    const top_seller = topReseller?.seller_name ?? null;
+    const top_seller_share_pct = topReseller?.share_pct ?? null;
+    const top_seller_country = topReseller?.seller_country ?? null;
 
     // Combine Keepa channel signals with the latest DataForSEO snapshot
     // (if any) so validation_score reflects both pillars. Falls back to
@@ -304,9 +367,30 @@ export async function enrichBrandWithKeepa(
           top_seller_country,
         });
 
+    // Amazon-1P share — what fraction of buy boxes is Amazon retail
+    // (ATVPDKIKX0DER) winning? Computed from products (winner buyer)
+    // for stability against the seller-aggregation step.
     const amazon1pShare = asin_count ? amazonOnesP / asin_count : 0;
+
     const nextTags = new Set(existingTags);
-    if (amazon1pShare > 0.5) nextTags.add("amazon_1p_vendor");
+    // Phase 23 — if Amazon retail holds >= AMAZON_1P_THRESHOLD_PCT of
+    // buy boxes, the brand has a wholesale (1P) relationship with
+    // Amazon. RCG's reseller-removal play doesn't apply, so the report
+    // should short-circuit to a "not a fit" page. Threshold is
+    // configurable via AMAZON_1P_THRESHOLD_PCT (default 0.10).
+    const amazon1pDisqualified = isAmazon1pBrand(amazon1pShare);
+    if (amazon1pDisqualified) {
+      nextTags.add("amazon_1p");
+      // Keep the legacy ≥50% tag for downstream review consumers.
+      if (amazon1pShare > 0.5) nextTags.add("amazon_1p_vendor");
+    } else if (amazon1pShare > 0.5) {
+      nextTags.add("amazon_1p_vendor");
+    }
+    console.log(
+      `[keepa-brand] "${brand_name}" classification: brand_controlled_pct=${brand_controlled_pct?.toFixed(3) ?? "null"} ` +
+      `amazon_1p_share=${amazon1pShare.toFixed(3)} (threshold=${amazon1pThreshold().toFixed(2)}, disqualified=${amazon1pDisqualified}) ` +
+      `top_reseller="${top_seller ?? "—"}" (${top_seller_share_pct?.toFixed(3) ?? "null"})`,
+    );
 
     await supabase
       .from("brands")
@@ -350,6 +434,7 @@ export async function enrichBrandWithKeepa(
       validation_score,
       tokens_used: tokensUsed,
       amazon_1p_share: amazon1pShare,
+      amazon_1p_disqualified: amazon1pDisqualified,
       enrichment_error: null,
     };
   } catch (err: any) {

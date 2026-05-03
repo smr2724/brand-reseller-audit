@@ -48,6 +48,11 @@ export interface KeepaSellerRow {
   share_pct: number | null;
   asins_won: number | null;
   is_fba: boolean | null;
+  /** Phase 23 — classification verdict from `seller-classification.ts`.
+   * Null on legacy rows enriched before that path shipped. */
+  is_brand_controlled?: boolean | null;
+  /** Phase 23 — human-readable reason persisted alongside the verdict. */
+  classification_reason?: string | null;
 }
 
 export interface DataForSeoSnapshotRow {
@@ -124,7 +129,7 @@ export async function getBrandEnrichmentBundle(
       .limit(50),
     supabase
       .from("brand_sellers")
-      .select("seller_name, seller_id, share_pct, asins_won, is_fba, seller_country")
+      .select("seller_name, seller_id, share_pct, asins_won, is_fba, seller_country, is_brand_controlled, classification_reason")
       .eq("brand_id", brandId)
       .order("share_pct", { ascending: false })
       .limit(20),
@@ -149,6 +154,8 @@ export async function getBrandEnrichmentBundle(
       share_pct: s.share_pct,
       asins_won: s.asins_won,
       is_fba: s.is_fba,
+      is_brand_controlled: s.is_brand_controlled ?? null,
+      classification_reason: s.classification_reason ?? null,
     })),
   };
 

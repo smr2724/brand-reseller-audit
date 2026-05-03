@@ -193,7 +193,11 @@ function fallbackResellerRealityLine(
   reality: NarrativeResellerReality,
   bundle: BrandEnrichmentBundle,
 ): string {
-  const top = reality.top_sellers[0];
+  // Phase 23 — describe the *reseller* landscape, not the brand's own
+  // LLC sitting at the top.
+  const top =
+    reality.top_sellers.find((s) => s.is_brand_controlled !== true) ??
+    reality.top_sellers[0];
   const sellers = bundle.keepa.unique_seller_count ?? reality.top_sellers.length;
   if (!top) return `Keepa captured ${sellers} sellers on your listings.`;
   const share =
