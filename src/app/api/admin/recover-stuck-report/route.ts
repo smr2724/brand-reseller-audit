@@ -10,6 +10,7 @@
 import { NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import { recoverReport, findStuckReports } from "@/lib/report/recover";
+import { waitUntil } from "@vercel/functions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,6 +52,26 @@ export async function POST(req: Request) {
       { status: 500 },
     );
   }
+  // Optional async mode: clients can post `{ async: true }` to start
+  // generation and get a 202 immediately while the function continues
+  // running via Vercel's waitUntil. Useful when the underlying generation
+  // is bumping up against the 300s function ceiling.
+  const url = new URL(req.url);
+  const asyncMode =
+    url.searchParams.get("async") === "1" || body?.async === true;
+
+  if (asyncMode) {
+    const promise = recoverReport(admin, reportId);
+    try {
+      waitUntil(promise);
+    } catch (e) {
+      console.warn("[admin/recover-stuck-report] waitUntil unavailable:", e);
+    }
+    // Don't await — return immediately so the caller doesn't block on the
+    // 300s function ceiling. The function continues in the background.
+    return NextResponse.json({ report_id: reportId, status: "started" }, { status: 202 });
+  }
+
   const result = await recoverReport(admin, reportId);
   return NextResponse.json(result, { status: result.status === "recovered" ? 200 : 500 });
 }
