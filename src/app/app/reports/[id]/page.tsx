@@ -4,6 +4,7 @@ import Link from "next/link";
 import { freshSignedUrl } from "@/lib/report/storage";
 import { formatDateTime } from "@/lib/utils";
 import ReportDetailClient from "./ReportDetailClient";
+import AuditProgress from "@/components/marketing/AuditProgress";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +17,7 @@ export default async function ReportDetail({ params }: { params: { id: string } 
   const { data: report } = await supabase
     .from("reports")
     .select(
-      "id, brand_id, title, kind, status, generated_at, created_at, error_message, pdf_storage_path, brands:brand_id(name)"
+      "id, brand_id, title, kind, status, generated_at, created_at, error_message, pdf_storage_path, token, brands:brand_id(name)"
     )
     .eq("id", params.id)
     .eq("user_id", user!.id)
@@ -66,11 +67,21 @@ export default async function ReportDetail({ params }: { params: { id: string } 
         </div>
       )}
 
-      {report.status === "generating" && (
+      {report.status === "generating" && report.token && (
+        <div className="mb-4">
+          <AuditProgress
+            token={report.token}
+            contactEmail={user?.email ?? null}
+            readyHref={`/app/reports/${report.id}`}
+            variant="dashboard"
+          />
+        </div>
+      )}
+      {report.status === "generating" && !report.token && (
         <div className="card p-4 mb-4">
           <div className="text-sm">Generating report…</div>
           <div className="text-xs text-[var(--text-muted)] mt-1">
-            This usually takes 10–30 seconds. Refresh to check progress.
+            This usually takes 2–3 minutes. The page will update automatically.
           </div>
         </div>
       )}
