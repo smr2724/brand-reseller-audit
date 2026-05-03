@@ -28,7 +28,11 @@ function decide(args: {
   const tightChannel =
     brandControlledPct != null && brandControlledPct >= 0.5;
   const lowRecoverable = recoverable != null && recoverable < t;
-  const mode: Mode = tightChannel && lowRecoverable ? "diy_fit" : "high_fit";
+  // Phase 25 — when bc_pct is high but revenue can't be sized at all,
+  // fall through to diy_fit (same logic as assemble.ts decideReportMode).
+  const unsizedTightChannel = tightChannel && recoverable == null;
+  const mode: Mode =
+    tightChannel && (lowRecoverable || unsizedTightChannel) ? "diy_fit" : "high_fit";
   return { mode, recoverable };
 }
 
@@ -77,10 +81,22 @@ const cases: Case[] = [
     expectMode: "high_fit",
   },
   {
-    name: "Unknown revenue — high_fit",
+    name: "Phase 25 — unsized tight-channel brand (null revenue, high bc_pct) → diy_fit",
     trailing12: null,
     brandControlledPct: 0.8,
-    expectMode: "high_fit",
+    expectMode: "diy_fit", // unsized + tight-channel → DIY (small brand)
+  },
+  {
+    name: "Phase 25 — unsized loose-channel brand (null revenue, low bc_pct) → high_fit",
+    trailing12: null,
+    brandControlledPct: 0.3,
+    expectMode: "high_fit", // tightChannel=false → never DIY regardless of unsizing
+  },
+  {
+    name: "Phase 25 — Fantaswick exact case (bc_pct=70.27%, revenue null) → diy_fit",
+    trailing12: null,
+    brandControlledPct: 0.7027,
+    expectMode: "diy_fit",
   },
   {
     name: "Boundary: recoverable exactly = $500k → high_fit (strict <)",

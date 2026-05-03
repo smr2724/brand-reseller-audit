@@ -34,6 +34,7 @@ import {
   type KeepaProductDetails,
 } from "@/lib/keepa";
 import { isBrandControlled } from "@/lib/enrichment/keepa-brand";
+import { classifySellerSync } from "@/lib/enrichment/seller-classification";
 import { withTiming } from "@/lib/util/timing";
 
 const FRESH_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
@@ -199,6 +200,32 @@ export async function runV2Enrichment(
       "keepa",
       "no Keepa ASINs or sellers were captured for this brand",
     );
+  }
+
+  // Phase 25 — Bug A backfill. Brands enriched before migration 0023
+  // landed (or before the Phase 23 classifier shipped) have brand_sellers
+  // rows with NULL is_brand_controlled / classification_reason. The
+  // 14-day fresh-window check above means re-running the report alone
+  // doesn't trigger enrichBrandWithKeepa to repopulate them. Persist the
+  // synchronous classifier verdict here so the columns get populated on
+  // the next report run after the migration without forcing a Keepa
+  // re-fetch.
+  let backfilled = false;
+  try {
+    backfilled = await backfillSellerClassification(admin, brand.id, brand.name, bundle);
+  } catch (e) {
+    console.warn("[v2/enrich] backfillSellerClassification failed (non-fatal):", e);
+  }
+  if (backfilled) {
+    // Re-load so the in-memory bundle reflects the persisted verdicts.
+    try {
+      const refreshed = await withTiming("enrich/loadBundleAfterBackfill", () =>
+        getBrandEnrichmentBundle(admin, brand.id),
+      );
+      if (refreshed) bundle = refreshed;
+    } catch (e) {
+      console.warn("[v2/enrich] reload after backfill failed (non-fatal):", e);
+    }
   }
 
   // 3. Pull Keepa /product details for the brand's ASINs (cache-friendly:
@@ -746,3 +773,62 @@ function scoreProductListing(p: {
   return Math.min(100, score);
 }
 
+/**
+ * Phase 25 — Backfill is_brand_controlled / classification_reason on
+ * brand_sellers rows that are NULL. Runs the deterministic synchronous
+ * classifier (no LLM) against the brand name + seller name + seller_id
+ * we already have on the row. Cheap (one batched UPDATE per row that
+ * needs it) and idempotent. Soft-fails on missing-column errors so
+ * pre-migration environments don't block report generation.
+ */
+export async function backfillSellerClassification(
+  admin: SupabaseClient<any, any, any>,
+  brandId: string,
+  brandName: string,
+  bundle: BrandEnrichmentBundle,
+): Promise<boolean> {
+  const sellers = bundle.keepa.sellers ?? [];
+  const needsBackfill = sellers.filter(
+    (s) => s.is_brand_controlled == null || s.classification_reason == null,
+  );
+  if (needsBackfill.length === 0) return false;
+
+  let updated = 0;
+  for (const s of needsBackfill) {
+    const verdict = classifySellerSync({
+      brand_name: brandName,
+      seller_name: s.seller_name,
+      seller_id: s.seller_id,
+    });
+    // Match on (brand_id, seller_name) — the same key the inserter uses.
+    // We update only rows where the columns are still null so we don't
+    // clobber a later, more-confident verdict that already landed.
+    const { error } = await admin
+      .from("brand_sellers")
+      .update({
+        is_brand_controlled: verdict.is_brand_controlled,
+        classification_reason: verdict.reason.slice(0, 500),
+      })
+      .eq("brand_id", brandId)
+      .eq("seller_name", s.seller_name)
+      .is("is_brand_controlled", null);
+    if (error) {
+      const msg = error.message ?? "";
+      if (/column .* does not exist|is_brand_controlled|classification_reason/i.test(msg)) {
+        // Migration not applied yet — soft fail across the whole batch.
+        console.warn(
+          `[v2/enrich] backfillSellerClassification: classification columns missing (${msg})`,
+        );
+        return false;
+      }
+      throw new Error(`brand_sellers backfill update: ${msg}`);
+    }
+    updated += 1;
+  }
+  if (updated > 0) {
+    console.log(
+      `[v2/enrich] backfilled is_brand_controlled on ${updated} brand_sellers rows for brand=${brandId}`,
+    );
+  }
+  return updated > 0;
+}

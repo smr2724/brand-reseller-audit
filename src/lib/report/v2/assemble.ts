@@ -72,6 +72,7 @@ function decideReportMode(args: {
   brand_controlled_pct: number | null;
 } {
   const { trailing12, brandControlledPct } = args;
+  const threshold = diyFitMinRecoverableRevenue();
   let recoverable: number | null = null;
   if (trailing12 != null && brandControlledPct != null) {
     const pct = Math.max(0, Math.min(1, brandControlledPct));
@@ -79,9 +80,19 @@ function decideReportMode(args: {
   }
   const tightChannel =
     brandControlledPct != null && brandControlledPct >= 0.5;
+  // Phase 25 — when revenue can't be sized (cold prospect, no SP-API,
+  // no upload, Keepa estimator returns null), `recoverable` is null but
+  // a tight-channel brand is still by definition a DIY candidate: there
+  // is little for RCG to capture (the channel is already tight) and we
+  // shouldn't pitch the high-fit motion. Fall through to diy_fit when
+  // bc_pct >= 0.5 AND we either measured low recoverable OR couldn't
+  // size a recoverable at all.
   const lowRecoverable =
-    recoverable != null && recoverable < diyFitMinRecoverableRevenue();
-  const mode: ReportMode = tightChannel && lowRecoverable ? "diy_fit" : "high_fit";
+    recoverable != null && recoverable < threshold;
+  const unsizedTightChannel =
+    tightChannel && recoverable == null;
+  const mode: ReportMode =
+    tightChannel && (lowRecoverable || unsizedTightChannel) ? "diy_fit" : "high_fit";
   return {
     mode,
     recoverable_revenue_dollars: recoverable,
@@ -143,7 +154,7 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
   // "imported" → green Actual badge, no estimator footnote
   // "estimate" → amber Estimate badge + diligence-replacement footnote
   // "missing" → no badge, "— not measured"
-  type RevenueKind = "spapi" | "imported" | "estimate" | "missing";
+  type RevenueKind = "spapi" | "imported" | "estimate" | "price_only" | "missing";
   let trailing12: number | null = null;
   let revenueKind: RevenueKind = "missing";
   let revenueSource = "Keepa";
@@ -161,17 +172,33 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     revenueKind = "estimate";
     revenueSource = revenueEstimate.source_note ?? "Keepa BSR + price · 365-day avg";
   } else {
-    revenueSource = bundle.keepa.last_enriched_at
-      ? `Keepa, ${bundle.keepa.last_enriched_at.slice(0, 10)}`
-      : "Keepa";
+    // Phase 25 — Bug C fallback. When SP-API isn't wired, no upload
+    // exists, AND the rank-based estimator returns null (every ASIN
+    // missing salesRank, or /product details failed silently), still
+    // size the brand from the buy_box_price data we already cached on
+    // brand_asins. Uses a deliberately conservative units-per-ASIN floor
+    // so small/long-tail brands don't render as "— not measured" math
+    // but also don't get over-claimed economics. Carries an explicit
+    // "low-confidence" footnote on the math notes.
+    const fallback = priceOnlyTtmFallback(bundle);
+    if (fallback != null) {
+      trailing12 = fallback;
+      revenueKind = "price_only";
+      revenueSource = "Keepa price · low-confidence fallback (no salesRank)";
+    } else {
+      revenueSource = bundle.keepa.last_enriched_at
+        ? `Keepa, ${bundle.keepa.last_enriched_at.slice(0, 10)}`
+        : "Keepa";
+    }
   }
 
-  const usingEstimate = revenueKind === "estimate";
+  const usingEstimate = revenueKind === "estimate" || revenueKind === "price_only";
+  const usingPriceOnly = revenueKind === "price_only";
 
   const revenueBadge: "actual" | "estimate" | null =
     revenueKind === "spapi" || revenueKind === "imported"
       ? "actual"
-      : revenueKind === "estimate"
+      : revenueKind === "estimate" || revenueKind === "price_only"
       ? "estimate"
       : null;
 
@@ -183,7 +210,9 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     assumptions,
     revenueSource,
     revenueFootnote:
-      usingEstimate
+      usingPriceOnly
+        ? "Low-confidence revenue estimate: Keepa returned no salesRank for this brand's ASINs, so we sized the channel from buy-box prices and a conservative units-per-ASIN floor. Replace with seller's actual TTM during diligence."
+        : usingEstimate
         ? revenueEstimate?.methodology_footnote ??
           "Directional estimate from Keepa BSR + buy-box price. Replace with seller's actual TTM during diligence."
         : null,
@@ -287,9 +316,12 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
 
   // Append the revenue-estimator footnote when revenue came from the
   // Keepa BSR estimator rather than imported deal terms.
-  const finalNotes = usingEstimate && revenueEstimate?.methodology_footnote
-    ? `${mathNotes}\n\nRevenue note: ${revenueEstimate.methodology_footnote}`.trim()
-    : mathNotes;
+  let finalNotes = mathNotes;
+  if (usingPriceOnly) {
+    finalNotes = `${mathNotes}\n\nRevenue note: Low-confidence — Keepa returned no salesRank for this brand's ASINs. Trailing-12mo revenue is sized from buy-box prices × a conservative units-per-ASIN floor. Replace with seller's actual TTM during diligence.`.trim();
+  } else if (usingEstimate && revenueEstimate?.methodology_footnote) {
+    finalNotes = `${mathNotes}\n\nRevenue note: ${revenueEstimate.methodology_footnote}`.trim();
+  }
   const finalMath: NarrativeMath = { ...math, notes: finalNotes };
 
   // Phase 24 — DIY-mode reframes the cover: the headline becomes a
@@ -507,4 +539,37 @@ function buildDiySteps(brandName: string): DiyStep[] {
 
 function countNonNull(xs: (number | null | undefined)[]): number {
   return xs.filter((x) => x != null).length;
+}
+
+/**
+ * Phase 25 — Bug C price-only fallback. When the rank+price estimator
+ * returns null we still want a sized number for cold tight-channel
+ * brands (DIY-fit candidates) so the math section doesn't render as
+ * all-null. Uses a deliberately conservative units-per-ASIN-per-month
+ * floor (4 units) calibrated against the median small-brand prospect
+ * we've audited. Returns null when no ASINs have a buy_box_price.
+ *
+ * Configurable via env so Steve can tune without a deploy.
+ */
+function priceOnlyMonthlyUnitsFloor(): number {
+  const raw = process.env.RCG_PRICE_ONLY_MONTHLY_UNITS;
+  if (!raw) return 4;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 4;
+}
+
+function priceOnlyTtmFallback(bundle: BrandEnrichmentBundle): number | null {
+  const asins = bundle.keepa.asins ?? [];
+  if (asins.length === 0) return null;
+  const units = priceOnlyMonthlyUnitsFloor();
+  let total = 0;
+  let priced = 0;
+  for (const a of asins) {
+    const price = typeof a.buy_box_price === "number" ? a.buy_box_price : null;
+    if (price == null || price <= 0) continue;
+    total += price * units * 12;
+    priced += 1;
+  }
+  if (priced === 0) return null;
+  return Math.round(total);
 }

@@ -223,7 +223,13 @@ function bucketLabel(rank: number, table: Bucket[]): string {
   return "rank>cap";
 }
 
-const MIN_ASINS_FOR_ESTIMATE = 2;
+// Phase 25 — relaxed from 2 to 1 so a brand with even a single
+// rank+price-bearing ASIN gets a sized estimate (with the standard
+// "directional" footnote) instead of falling back to all-null math.
+// Two-ASIN floor was over-cautious for very small brands where the
+// estimator's per-ASIN noise is dominated by category bias, not sample
+// count.
+const MIN_ASINS_FOR_ESTIMATE = 1;
 
 export function estimateBrandTtmRevenue(
   asins: RevenueEstimateInput[],
