@@ -118,12 +118,18 @@ export default async function ReportPage({ params }: PageProps) {
     /* ignore */
   }
 
-  // ---- generating / failed states (brand-audit reports only) ----
+  // ---- generating / failed / not_a_fit states (brand-audit only) ----
   if (report.brand_id && report.status === "generating") {
     return <GeneratingState token={report.token} />;
   }
   if (report.brand_id && report.status === "failed") {
     return <FailedState message={report.error_message ?? null} />;
+  }
+  if (report.brand_id && report.status === "not_a_fit") {
+    const n = report.narrative_json as
+      | (NotAFitNarrative & { kind?: string })
+      | null;
+    return <NotAFitState narrative={n ?? null} />;
   }
 
   // ---- brand-audit (Phase 5+) ----
@@ -218,6 +224,70 @@ function GeneratingState({ token }: { token: string }) {
     <div style={shellStyle}>
       <div style={panelStyle}>
         <AuditProgress token={token} />
+      </div>
+    </div>
+  );
+}
+
+interface NotAFitNarrative {
+  kind?: string;
+  reason?: string;
+  brand_name?: string;
+  headline?: string;
+  explainer?: string;
+  amazon_1p_share?: number | null;
+  cta?: {
+    headline?: string;
+    primary_cta_url?: string | null;
+    primary_cta_label?: string;
+    secondary_email?: string;
+  };
+}
+
+function NotAFitState({ narrative }: { narrative: NotAFitNarrative | null }) {
+  const headline =
+    narrative?.headline ??
+    "Amazon is your top seller — that's a different conversation.";
+  const explainer =
+    narrative?.explainer ??
+    "When Amazon itself is the channel — not third-party resellers riding on top of it — the playbook changes. " +
+      "RCG's reseller-removal motion captures margin from outside resellers; here, that margin is already inside an Amazon 1P (Vendor Central) relationship. " +
+      "We can still help: the conversation shifts to Vendor vs Seller Central tradeoffs, terms negotiation, and protecting unit economics under 1P.";
+  const ctaLabel = narrative?.cta?.primary_cta_label ?? "Book a strategy call";
+  const ctaUrl =
+    narrative?.cta?.primary_cta_url ||
+    "https://calendly.com/steve-rollemanagementgroup/intro";
+  const email =
+    narrative?.cta?.secondary_email ?? "steve@rollemanagementgroup.com";
+  const sharePct =
+    narrative?.amazon_1p_share != null
+      ? `${Math.round(narrative.amazon_1p_share * 100)}%`
+      : null;
+
+  return (
+    <div style={shellStyle}>
+      <div style={panelStyle}>
+        <div style={pillStyle}>Rolle Consulting Group</div>
+        <h1 style={h1Style}>{headline}</h1>
+        {sharePct && (
+          <p style={metaStyle}>
+            Amazon Retail (ATVPDKIKX0DER) holds {sharePct} of buy boxes on this brand.
+          </p>
+        )}
+        <p style={pStyle}>{explainer}</p>
+        <p style={pStyle}>
+          <a href={ctaUrl} style={ctaButtonStyle}>
+            {ctaLabel} →
+          </a>
+        </p>
+        <p style={contactStyle}>
+          Or reply directly to{" "}
+          <a href={`mailto:${email}`} style={linkStyle}>
+            {email}
+          </a>
+          <br />
+          Steve Rolle, Founder · Rolle Consulting Group
+        </p>
       </div>
     </div>
   );
@@ -323,6 +393,17 @@ const contactStyle: React.CSSProperties = {
   margin: "16px 0 16px",
 };
 const linkStyle: React.CSSProperties = { color: "#c9a96a", textDecoration: "none" };
+const ctaButtonStyle: React.CSSProperties = {
+  display: "inline-block",
+  marginTop: 12,
+  padding: "10px 20px",
+  background: "#c9a96a",
+  color: "#0b0b0d",
+  textDecoration: "none",
+  borderRadius: 8,
+  fontWeight: 600,
+  fontSize: 14,
+};
 
 function firstSentence(md: string | null | undefined): string {
   if (!md) return "";
