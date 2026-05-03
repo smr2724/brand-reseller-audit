@@ -24,10 +24,12 @@ import {
   defaultLegionInputs,
   type LegionOutputs,
 } from "@/lib/math/legion-economics";
+import { resolveBrandRevenue } from "@/lib/math/resolve-brand-revenue";
 
 export type BrandFinancialRevenueKind =
   | "imported"
   | "price_only"
+  | "confirmed"
   | "missing";
 
 export interface BrandFinancialInputs {
@@ -39,6 +41,11 @@ export interface BrandFinancialInputs {
    *  brand-detail Financial Model panel reads the same defensible
    *  numbers as the report. */
   brand_controlled_pct?: number | null | undefined;
+  /** Phase 28 — user-confirmed TTM revenue. When set and > 0, overrides
+   *  whichever revenue we'd otherwise have used (imported / price-only).
+   *  The estimator value flows through as a sanity-check sub-note. */
+  confirmed_ttm_revenue_dollars?: number | null | undefined;
+  confirmed_ttm_source?: string | null | undefined;
 }
 
 export interface BrandFinancialAsin {
@@ -51,6 +58,13 @@ export interface BrandFinancialModel {
   revenueKind: BrandFinancialRevenueKind;
   lowConfidence: boolean;
   outputs: LegionOutputs | null;
+  /** Phase 28 — when revenueKind === 'confirmed', the free-text source
+   *  the user typed (e.g. "Orion data"). */
+  confirmedSource?: string | null;
+  /** Phase 28 — when revenueKind === 'confirmed', the estimator number
+   *  we'd otherwise have rendered. Surfaces as a small sanity-check
+   *  sub-note next to the confirmed value. */
+  estimatorSuggestion?: number | null;
 }
 
 export interface BrandFinancialNotReady {
@@ -98,19 +112,35 @@ export function computeBrandDetailFinancials(
       ? Number(brand.est_monthly_revenue) * 12
       : null);
 
-  let revenue: number | null = null;
-  let revenueKind: BrandFinancialRevenueKind = "missing";
+  let enrichmentRevenue: number | null = null;
+  let enrichmentKind: BrandFinancialRevenueKind = "missing";
 
   if (importedTrailing12 != null && Number.isFinite(importedTrailing12)) {
-    revenue = importedTrailing12;
-    revenueKind = "imported";
+    enrichmentRevenue = importedTrailing12;
+    enrichmentKind = "imported";
   } else {
     const fallback = priceOnlyTtmFallback(asins);
     if (fallback != null) {
-      revenue = fallback;
-      revenueKind = "price_only";
+      enrichmentRevenue = fallback;
+      enrichmentKind = "price_only";
     }
   }
+
+  // Phase 28 — user-confirmed TTM overrides the estimator. The estimator
+  // value flows through as a small inline sanity-check note.
+  const resolved = resolveBrandRevenue(
+    {
+      confirmed_ttm_revenue_dollars: brand.confirmed_ttm_revenue_dollars ?? null,
+      confirmed_ttm_source: brand.confirmed_ttm_source ?? null,
+    },
+    enrichmentRevenue,
+  );
+  const isConfirmed = resolved.source === "confirmed";
+
+  const revenue = resolved.value;
+  const revenueKind: BrandFinancialRevenueKind = isConfirmed
+    ? "confirmed"
+    : enrichmentKind;
 
   if (revenue == null) {
     return {
@@ -135,7 +165,11 @@ export function computeBrandDetailFinancials(
     ready: true,
     revenue,
     revenueKind,
+    // A confirmed value is, by definition, not low-confidence — it's
+    // user-attested. Only the price-only fallback lights up the badge.
     lowConfidence: revenueKind === "price_only",
     outputs,
+    confirmedSource: isConfirmed ? resolved.confirmed_source_label : null,
+    estimatorSuggestion: isConfirmed ? resolved.estimator_suggestion : null,
   };
 }

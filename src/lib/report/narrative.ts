@@ -29,6 +29,10 @@ export interface BrandForReport {
   rcg_fees: number | null;
   new_profit: number | null;
   seven_x_multiple_value: number | null;
+  /** Phase 28 — user-confirmed TTM revenue overrides the estimator. */
+  confirmed_ttm_revenue_dollars?: number | null;
+  confirmed_ttm_source?: string | null;
+  confirmed_ttm_set_at?: string | null;
 }
 
 export interface NarrativeOutput {

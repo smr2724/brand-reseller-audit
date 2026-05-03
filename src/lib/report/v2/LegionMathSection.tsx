@@ -32,7 +32,13 @@ export interface LegionMathSectionProps {
   /** Source string for the revenue line (e.g. "Keepa, 2026-04-15"). */
   revenueSource: string;
   /** Optional badge on the revenue value. */
-  revenueBadge: "actual" | "estimate" | null;
+  revenueBadge: "actual" | "estimate" | "confirmed" | null;
+  /** Phase 28 — when revenue source = "confirmed", the free-text label
+   *  the user typed (e.g. "Orion data"). Surfaces under the badge. */
+  revenueConfirmedSource?: string | null;
+  /** Phase 28 — when revenue source = "confirmed", the estimator number
+   *  we'd otherwise have shown. Renders as a small inline sub-note. */
+  revenueEstimatorSuggestion?: number | null;
   /** Footnote when revenue came from the estimator. */
   revenueFootnote: string | null;
   /** LLM-generated math notes from assemble.ts. */
@@ -154,10 +160,20 @@ export function LegionMathSection(props: LegionMathSectionProps) {
       {/* Tier 1 — exactly 5 hero rows. */}
       <div className="rv4-tier1">
         <HeroStat
-          label="Annual Amazon revenue (estimated)"
+          label={
+            props.revenueBadge === "confirmed"
+              ? "Annual Amazon revenue (confirmed)"
+              : "Annual Amazon revenue (estimated)"
+          }
           value={revenue}
           badge={props.revenueBadge}
           source={props.revenueSource}
+          subNote={
+            props.revenueBadge === "confirmed" &&
+            typeof props.revenueEstimatorSuggestion === "number"
+              ? `Estimator suggested ${money(props.revenueEstimatorSuggestion)} — using your confirmed value.`
+              : null
+          }
         />
         <HeroStat
           label={`Current profit (at ${pct(assumptions.current_profit_margin_pct, 0)} margin)`}
@@ -212,6 +228,16 @@ export function LegionMathSection(props: LegionMathSectionProps) {
               {props.revenueFootnote && (
                 <p className="rv2-muted-small rv4-footnote">{props.revenueFootnote}</p>
               )}
+              {props.revenueBadge === "confirmed" &&
+                typeof props.revenueEstimatorSuggestion === "number" && (
+                  <p className="rv2-muted-small rv4-footnote">
+                    Revenue confirmed by user
+                    {props.revenueConfirmedSource
+                      ? ` — source: ${props.revenueConfirmedSource}`
+                      : ""}
+                    . Estimator suggested {money(props.revenueEstimatorSuggestion)}.
+                  </p>
+                )}
             </div>
 
             <div className="rv4-tier2-inputs">
@@ -241,13 +267,17 @@ function HeroStat({
   badge,
   accent,
   big,
+  subNote,
 }: {
   label: string;
   value: number | null;
   source: string;
-  badge?: "actual" | "estimate" | null;
+  badge?: "actual" | "estimate" | "confirmed" | null;
   accent?: boolean;
   big?: boolean;
+  /** Phase 28 — sanity-check sub-note shown beneath the source line when
+   *  revenue is user-confirmed: "Estimator suggested $X". */
+  subNote?: string | null;
 }) {
   return (
     <div className={`rv4-hero${accent ? " rv4-hero-accent" : ""}${big ? " rv4-hero-big" : ""}`}>
@@ -259,9 +289,13 @@ function HeroStat({
         {badge === "estimate" && (
           <span className="rv2-rev-badge rv2-rev-badge-est">Estimate</span>
         )}
+        {badge === "confirmed" && (
+          <span className="rv2-rev-badge rv2-rev-badge-confirmed">Confirmed by user</span>
+        )}
       </div>
       <div className="rv4-hero-value">{value != null ? money(value) : "— not measured"}</div>
       <div className="rv4-hero-source">{source}</div>
+      {subNote && <div className="rv4-hero-source rv4-hero-subnote">{subNote}</div>}
     </div>
   );
 }
@@ -279,7 +313,7 @@ interface MathRow {
   source: string;
   format: "money" | "percent";
   total?: boolean;
-  badge?: "actual" | "estimate" | null;
+  badge?: "actual" | "estimate" | "confirmed" | null;
   estimate?: boolean;
 }
 
@@ -295,7 +329,7 @@ function FullMath({
   out: LegionOutputs;
   assumptions: LegionAssumptions;
   revenueSource: string;
-  revenueBadge: "actual" | "estimate" | null;
+  revenueBadge: "actual" | "estimate" | "confirmed" | null;
   brandControlledPct: number | null;
 }) {
   const haveRev = revenue != null && revenue > 0;
@@ -367,6 +401,7 @@ function FullMath({
                   {r.label}
                   {r.badge === "actual" && <span className="rv2-rev-badge rv2-rev-badge-actual">Actual</span>}
                   {r.badge === "estimate" && <span className="rv2-rev-badge rv2-rev-badge-est">Estimate</span>}
+                  {r.badge === "confirmed" && <span className="rv2-rev-badge rv2-rev-badge-confirmed">Confirmed by user</span>}
                 </td>
                 <td className="rv2-num">
                   {formatCell(r.value, r.format)}
@@ -391,6 +426,7 @@ function FullMath({
               <span>{r.label}</span>
               {r.badge === "actual" && <span className="rv2-rev-badge rv2-rev-badge-actual">Actual</span>}
               {r.badge === "estimate" && <span className="rv2-rev-badge rv2-rev-badge-est">Estimate</span>}
+              {r.badge === "confirmed" && <span className="rv2-rev-badge rv2-rev-badge-confirmed">Confirmed by user</span>}
             </div>
             <div className="rv4-card-value">
               {formatCell(r.value, r.format)}

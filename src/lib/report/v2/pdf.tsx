@@ -378,6 +378,7 @@ function MathPage({ narrative }: { narrative: NarrativeV2 }) {
               {l.label}
               {l.badge === "actual" && " [Actual]"}
               {l.badge === "estimate" && " [Estimate]"}
+              {l.badge === "confirmed" && " [Confirmed by user]"}
             </Text>
             <Text style={[styles.tableCellNum, { flex: 1.2, fontFamily: l.is_total ? "Helvetica-Bold" : "Helvetica" }]}>
               {l.value == null

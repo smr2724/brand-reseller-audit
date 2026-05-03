@@ -354,10 +354,18 @@ export interface MathContext {
   /** When revenue is estimator-derived, append this footnote to math.notes. */
   revenueFootnote?: string | null;
   /** Badge to render next to the revenue value:
-   *   "actual"   — SP-API or imported real number (green)
-   *   "estimate" — Keepa BSR + price (amber, with footnote)
+   *   "actual"    — SP-API or imported real number (green)
+   *   "estimate"  — Keepa BSR + price (amber, with footnote)
+   *   "confirmed" — Phase 28: user-confirmed TTM revenue
    * Default null (no badge). */
-  revenueBadge?: "actual" | "estimate" | null;
+  revenueBadge?: "actual" | "estimate" | "confirmed" | null;
+  /** Phase 28 — free-text source label the user typed when confirming
+   *  the TTM number (e.g. "Orion data"). Only set when revenue source is
+   *  user-confirmed. */
+  confirmedSource?: string | null;
+  /** Phase 28 — estimator number we'd have used absent the user
+   *  confirmation. Surfaces as an "Estimator suggested $X" sub-note. */
+  estimatorSuggestion?: number | null;
 }
 
 const PCT_FMT = (n: number, digits = 1) => `${(n * 100).toFixed(digits)}%`;
@@ -401,6 +409,8 @@ export function computeMath(ctx: MathContext): NarrativeMath {
       source: revenueSrc,
       editable: true,
       badge: ctx.revenueBadge ?? null,
+      confirmed_source: ctx.confirmedSource ?? null,
+      estimator_suggestion: ctx.estimatorSuggestion ?? null,
     },
     {
       key: "wholesale_invoice",

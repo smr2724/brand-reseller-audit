@@ -30,6 +30,7 @@ import {
   llmResellerRealityLine,
 } from "./narrative";
 import { withTiming } from "@/lib/util/timing";
+import { resolveBrandRevenue } from "@/lib/math/resolve-brand-revenue";
 import {
   DEFAULT_ASSUMPTIONS,
   type DiyStep,
@@ -205,15 +206,39 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     }
   }
 
-  const usingEstimate = revenueKind === "estimate" || revenueKind === "price_only";
-  const usingPriceOnly = revenueKind === "price_only";
+  // Phase 28 — user-confirmed TTM override. When set, overrides whichever
+  // revenue we just resolved above; downstream math (reseller_margin,
+  // delta_profit, exit_lift, capture plan, DIY recoverable) compiles on
+  // top of the confirmed number. The estimator value still flows through
+  // as a small "Estimator suggested $X" sub-note.
+  const resolvedRevenue = resolveBrandRevenue(
+    {
+      confirmed_ttm_revenue_dollars: brand.confirmed_ttm_revenue_dollars ?? null,
+      confirmed_ttm_source: brand.confirmed_ttm_source ?? null,
+    },
+    trailing12,
+  );
+  const isConfirmed = resolvedRevenue.source === "confirmed";
+  if (isConfirmed) {
+    trailing12 = resolvedRevenue.value;
+    revenueSource = resolvedRevenue.confirmed_source_label
+      ? `Confirmed by user · ${resolvedRevenue.confirmed_source_label}`
+      : "Confirmed by user";
+  }
 
-  const revenueBadge: "actual" | "estimate" | null =
-    revenueKind === "spapi" || revenueKind === "imported"
+  // Estimator/imported badges only matter when no confirmation overrode
+  // them. Confirmed wins → confirmed badge, no low-confidence footnote.
+  const usingEstimate =
+    !isConfirmed && (revenueKind === "estimate" || revenueKind === "price_only");
+  const usingPriceOnly = !isConfirmed && revenueKind === "price_only";
+
+  const revenueBadge: "actual" | "estimate" | "confirmed" | null = isConfirmed
+    ? "confirmed"
+    : revenueKind === "spapi" || revenueKind === "imported"
       ? "actual"
       : revenueKind === "estimate" || revenueKind === "price_only"
-      ? "estimate"
-      : null;
+        ? "estimate"
+        : null;
 
   const math: NarrativeMath = computeMath({
     trailing_12mo_revenue: trailing12,
@@ -230,6 +255,8 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
           "Directional estimate from Keepa BSR + buy-box price. Replace with seller's actual TTM during diligence."
         : null,
     revenueBadge,
+    confirmedSource: isConfirmed ? resolvedRevenue.confirmed_source_label : null,
+    estimatorSuggestion: isConfirmed ? resolvedRevenue.estimator_suggestion : null,
   });
 
   // Headline economics for the cover — Δ profit and 7× exit lift.

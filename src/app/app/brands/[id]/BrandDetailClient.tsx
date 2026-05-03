@@ -49,6 +49,10 @@ interface Brand {
   dataforseo_branded_trend_pct?: number | null;
   dataforseo_competitor_count?: number | null;
   dataforseo_top_keyword?: string | null;
+  // Phase 28 — user-confirmed TTM revenue override.
+  confirmed_ttm_revenue_dollars?: number | null;
+  confirmed_ttm_source?: string | null;
+  confirmed_ttm_set_at?: string | null;
 }
 
 interface DfsKeywordRow {
@@ -222,7 +226,12 @@ export default function BrandDetailClient({
         </Card>
 
         <Card title="Financial model">
-          <FinancialModelBody financials={financials} />
+          <FinancialModelBody
+            financials={financials}
+            brandId={brand.id}
+            confirmedTtm={brand.confirmed_ttm_revenue_dollars ?? null}
+            confirmedSource={brand.confirmed_ttm_source ?? null}
+          />
         </Card>
 
         <Card title="Notes">
@@ -848,7 +857,73 @@ function Field({ label, v }: { label: string; v: string }) {
   );
 }
 
-function FinancialModelBody({ financials }: { financials: BrandFinancialResult }) {
+function FinancialModelBody({
+  financials,
+  brandId,
+  confirmedTtm,
+  confirmedSource,
+}: {
+  financials: BrandFinancialResult;
+  brandId: string;
+  confirmedTtm: number | null;
+  confirmedSource: string | null;
+}) {
+  const router = useRouter();
+  const [editing, setEditing] = useState(false);
+  const [revInput, setRevInput] = useState(
+    confirmedTtm != null ? String(Math.round(confirmedTtm)) : "",
+  );
+  const [srcInput, setSrcInput] = useState(confirmedSource ?? "");
+  const [savingRev, setSavingRev] = useState(false);
+  const [revErr, setRevErr] = useState<string | null>(null);
+
+  async function saveRevenue(value: number | null, source: string | null) {
+    setSavingRev(true);
+    setRevErr(null);
+    try {
+      const res = await fetch(`/api/brands/${brandId}/revenue`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          confirmed_ttm_revenue_dollars: value,
+          confirmed_ttm_source: source,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      setEditing(false);
+      router.refresh();
+    } catch (e) {
+      setRevErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingRev(false);
+    }
+  }
+
+  function onConfirmEdit() {
+    const num = Number(revInput.replace(/[$,\s]/g, ""));
+    if (!Number.isFinite(num) || num < 0) {
+      setRevErr("Enter a non-negative number, or use 'Use estimator' to clear.");
+      return;
+    }
+    void saveRevenue(num, srcInput.trim().length > 0 ? srcInput.trim() : null);
+  }
+
+  function onClearToEstimator() {
+    setRevInput("");
+    setSrcInput("");
+    void saveRevenue(null, null);
+  }
+
+  const isConfirmed =
+    financials.ready && financials.revenueKind === "confirmed";
+  const estimatorSuggestion = financials.ready
+    ? financials.estimatorSuggestion ?? null
+    : null;
+  const displayedSource = financials.ready
+    ? financials.confirmedSource ?? confirmedSource
+    : confirmedSource;
+
   if (!financials.ready) {
     return (
       <>
@@ -869,9 +944,80 @@ function FinancialModelBody({ financials }: { financials: BrandFinancialResult }
   const out = financials.outputs;
   const m = (n: number | null | undefined) =>
     out == null || n == null ? "—" : formatMoney(n);
+
   return (
     <>
-      <Field label="Trailing 12mo Revenue" v={m(financials.revenue)} />
+      <div className="flex items-center justify-between py-1.5 border-b border-[var(--border-soft)] text-sm">
+        <span className="text-[var(--text-muted)] flex items-center gap-2">
+          Trailing 12mo Revenue
+          {isConfirmed && (
+            <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-300 border border-emerald-700/50">
+              Confirmed by user
+            </span>
+          )}
+        </span>
+        <span className="font-medium flex items-center gap-2">
+          {m(financials.revenue)}
+          <button
+            type="button"
+            onClick={() => setEditing((v) => !v)}
+            className="text-[11px] text-[var(--accent)] underline"
+          >
+            {editing ? "Cancel" : "Edit revenue"}
+          </button>
+        </span>
+      </div>
+      {isConfirmed && estimatorSuggestion != null && (
+        <div className="text-[11px] text-[var(--text-muted)] py-1">
+          Estimator suggested {formatMoney(estimatorSuggestion)} — using your
+          confirmed value.
+          {displayedSource ? ` Source: ${displayedSource}.` : ""}
+        </div>
+      )}
+      {editing && (
+        <div className="my-2 p-3 rounded-md border border-[var(--border)] bg-[var(--bg-3)] space-y-2">
+          <div className="text-xs text-[var(--text-muted)]">
+            Set a confirmed TTM revenue to override the estimator. Used as
+            the revenue base for all downstream math.
+          </div>
+          <input
+            className="input"
+            placeholder="$ TTM revenue (e.g. 1500000)"
+            value={revInput}
+            onChange={(e) => setRevInput(e.target.value)}
+            inputMode="decimal"
+            maxLength={20}
+          />
+          <input
+            className="input"
+            placeholder="Source (e.g. Orion data, seller call)"
+            value={srcInput}
+            onChange={(e) => setSrcInput(e.target.value)}
+            maxLength={200}
+          />
+          {revErr && (
+            <div className="text-[11px] text-red-300">{revErr}</div>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn btn-primary text-xs"
+              onClick={onConfirmEdit}
+              disabled={savingRev}
+            >
+              {savingRev ? "Saving…" : "Save confirmed TTM"}
+            </button>
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={onClearToEstimator}
+              disabled={savingRev}
+            >
+              Use estimator
+            </button>
+          </div>
+        </div>
+      )}
       <Field label="Current Profit" v={m(out?.current_profit)} />
       <Field label="Reseller's Margin" v={m(out?.reseller_margin_captured)} />
       <Field label="Recouped Shipping" v={m(out?.recouped_shipping)} />
@@ -888,17 +1034,16 @@ function FinancialModelBody({ financials }: { financials: BrandFinancialResult }
           during diligence.
         </div>
       )}
-      {!financials.lowConfidence && financials.revenue == null && (
+      {!isConfirmed && !financials.lowConfidence && financials.revenue == null && (
         <div className="text-[11px] text-[var(--text-muted)] mt-2">
           Revenue could not be sized from cached enrichment yet — generate a
           report to pull Keepa /product details, or import trailing-12mo
           revenue.
         </div>
       )}
-      {financials.outputs != null && (
+      {!isConfirmed && financials.outputs != null && (
         <div className="text-[11px] text-[var(--text-muted)] mt-2">
           Auto-computed from Keepa enrichment via computeLegionEconomics.
-          Read-only for now — editing comes later.
         </div>
       )}
     </>

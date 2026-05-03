@@ -172,10 +172,20 @@ export interface MathLine {
   is_total?: boolean;
   editable?: boolean; // assumption lines are editable per-prospect later
   /** Optional badge rendered next to the value:
-   *   "actual"   — green badge (SP-API or imported real number)
-   *   "estimate" — amber badge with diligence-replacement footnote
+   *   "actual"    — green badge (SP-API or imported real number)
+   *   "estimate"  — amber badge with diligence-replacement footnote
+   *   "confirmed" — Phase 28: user-confirmed TTM revenue from a trusted
+   *                 source (Orion, seller call, internal warehouse).
    * Currently only set on the `revenue` row. */
-  badge?: "actual" | "estimate" | null;
+  badge?: "actual" | "estimate" | "confirmed" | null;
+  /** Phase 28 — when source='confirmed', the free-text source label the
+   *  user typed (e.g. "Orion data"). Internal-only; not rendered on the
+   *  public token-share link unless explicitly opted in. */
+  confirmed_source?: string | null;
+  /** Phase 28 — when source='confirmed', the estimator number we'd
+   *  otherwise have shown. Renders as a small inline sub-note
+   *  ("Estimator suggested $X"). */
+  estimator_suggestion?: number | null;
 }
 
 export interface NarrativeMath {

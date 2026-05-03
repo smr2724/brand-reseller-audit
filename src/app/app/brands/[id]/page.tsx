@@ -47,6 +47,9 @@ export default async function BrandDetail({ params }: { params: { id: string } }
       trailing_12_months: brand.trailing_12_months,
       est_monthly_revenue: brand.est_monthly_revenue,
       brand_controlled_pct: brand.keepa_brand_controlled_pct,
+      // Phase 28 — user-confirmed TTM overrides the estimator path.
+      confirmed_ttm_revenue_dollars: brand.confirmed_ttm_revenue_dollars,
+      confirmed_ttm_source: brand.confirmed_ttm_source,
     },
     (asins ?? []).map((a) => ({ buy_box_price: a.buy_box_price ?? null })),
   );

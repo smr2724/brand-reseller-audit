@@ -55,6 +55,12 @@ export default function AddBrandByName() {
   const [asinInput, setAsinInput] = useState("");
   const [resolving, setResolving] = useState(false);
 
+  // Phase 28 — optional confirmed TTM revenue captured at picker time.
+  // Persisted on the brand row on insert when a candidate is selected.
+  const [showConfirmedTtm, setShowConfirmedTtm] = useState(false);
+  const [confirmedTtmInput, setConfirmedTtmInput] = useState("");
+  const [confirmedTtmSource, setConfirmedTtmSource] = useState("");
+
   function resetResults() {
     setKeepaCandidates(null);
     setFuzzyCandidates(null);
@@ -128,10 +134,24 @@ export default function AddBrandByName() {
     setError(null);
     setCreating(true);
     try {
+      const body: Record<string, unknown> = { brand };
+      // Phase 28 — only attach the confirmed TTM payload if the user
+      // actually expanded the form and entered a positive number.
+      const confirmedNum = Number(confirmedTtmInput.replace(/[$,\s]/g, ""));
+      if (
+        showConfirmedTtm &&
+        Number.isFinite(confirmedNum) &&
+        confirmedNum > 0
+      ) {
+        body.confirmed_ttm_revenue_dollars = confirmedNum;
+        if (confirmedTtmSource.trim().length > 0) {
+          body.confirmed_ttm_source = confirmedTtmSource.trim();
+        }
+      }
       const res = await fetch("/api/brands/create-from-lookup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brand }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok || !data?.brand_id) {
@@ -170,24 +190,60 @@ export default function AddBrandByName() {
 
   return (
     <div className="space-y-4">
-      <form onSubmit={search} className="card p-4 flex gap-2">
-        <input
-          className="flex-1 px-3 py-2 rounded-md bg-[var(--bg-3)] border border-[var(--border)] text-sm"
-          placeholder="e.g. World Amenities"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          autoFocus
-          required
-          minLength={2}
-          maxLength={200}
-        />
-        <button
-          type="submit"
-          className="btn btn-primary text-sm"
-          disabled={loading || creating || query.trim().length < 2}
-        >
-          {loading ? "Searching…" : "Search Keepa"}
-        </button>
+      <form onSubmit={search} className="card p-4 space-y-3">
+        <div className="flex gap-2">
+          <input
+            className="flex-1 px-3 py-2 rounded-md bg-[var(--bg-3)] border border-[var(--border)] text-sm"
+            placeholder="e.g. World Amenities"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            autoFocus
+            required
+            minLength={2}
+            maxLength={200}
+          />
+          <button
+            type="submit"
+            className="btn btn-primary text-sm"
+            disabled={loading || creating || query.trim().length < 2}
+          >
+            {loading ? "Searching…" : "Search Keepa"}
+          </button>
+        </div>
+        <div>
+          <button
+            type="button"
+            className="text-xs text-[var(--accent)] underline"
+            onClick={() => setShowConfirmedTtm((v) => !v)}
+          >
+            {showConfirmedTtm
+              ? "Hide confirmed TTM revenue"
+              : "Have confirmed TTM revenue? (optional)"}
+          </button>
+          {showConfirmedTtm && (
+            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input
+                className="px-3 py-2 rounded-md bg-[var(--bg-3)] border border-[var(--border)] text-sm"
+                placeholder="$ TTM revenue (e.g. 1500000)"
+                value={confirmedTtmInput}
+                onChange={(e) => setConfirmedTtmInput(e.target.value)}
+                inputMode="decimal"
+                maxLength={20}
+              />
+              <input
+                className="px-3 py-2 rounded-md bg-[var(--bg-3)] border border-[var(--border)] text-sm"
+                placeholder="Source (e.g. Orion data, seller call)"
+                value={confirmedTtmSource}
+                onChange={(e) => setConfirmedTtmSource(e.target.value)}
+                maxLength={200}
+              />
+              <div className="text-[11px] text-[var(--text-muted)] sm:col-span-2">
+                Bypasses the Keepa/price estimator. Used as the revenue
+                base for all downstream math when set. Internal-only.
+              </div>
+            </div>
+          )}
+        </div>
       </form>
 
       {error && (

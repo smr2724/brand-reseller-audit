@@ -16,6 +16,16 @@ export const maxDuration = 300;
 const Body = z.object({
   brand: z.string().trim().min(1).max(200),
   category: z.string().trim().max(120).optional(),
+  // Phase 28 — optional user-confirmed TTM revenue captured at picker
+  // time. Persisted on the brand row on first insert; ignored on reuse
+  // (the user can edit later from the brand-detail page).
+  confirmed_ttm_revenue_dollars: z
+    .union([z.number(), z.null()])
+    .optional()
+    .refine((v) => v == null || (Number.isFinite(v) && v >= 0), {
+      message: "confirmed_ttm_revenue_dollars must be a non-negative number",
+    }),
+  confirmed_ttm_source: z.string().trim().max(200).optional(),
 });
 
 export async function POST(req: Request) {
@@ -54,19 +64,39 @@ export async function POST(req: Request) {
     .eq("name_normalized", norm)
     .maybeSingle();
 
+  // Phase 28 — picker-time confirmed TTM (optional). Only persisted on
+  // first insert below; on reuse, the user edits from the brand-detail
+  // page via PATCH /api/brands/:id/revenue.
+  const confirmedTtm =
+    typeof parsed.data.confirmed_ttm_revenue_dollars === "number" &&
+    Number.isFinite(parsed.data.confirmed_ttm_revenue_dollars) &&
+    parsed.data.confirmed_ttm_revenue_dollars > 0
+      ? parsed.data.confirmed_ttm_revenue_dollars
+      : null;
+  const confirmedSource =
+    confirmedTtm != null && parsed.data.confirmed_ttm_source
+      ? parsed.data.confirmed_ttm_source
+      : null;
+
   let brandId: string;
   if (existing?.id) {
     brandId = existing.id;
   } else {
+    const insertRow: Record<string, unknown> = {
+      user_id: user.id,
+      name: brandName,
+      name_normalized: norm,
+      category: parsed.data.category ?? null,
+      status: "new",
+    };
+    if (confirmedTtm != null) {
+      insertRow.confirmed_ttm_revenue_dollars = confirmedTtm;
+      insertRow.confirmed_ttm_source = confirmedSource;
+      insertRow.confirmed_ttm_set_at = new Date().toISOString();
+    }
     const { data: created, error: insErr } = await supabase
       .from("brands")
-      .insert({
-        user_id: user.id,
-        name: brandName,
-        name_normalized: norm,
-        category: parsed.data.category ?? null,
-        status: "new",
-      })
+      .insert(insertRow)
       .select("id")
       .single();
     if (insErr || !created) {

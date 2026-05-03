@@ -72,6 +72,11 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
     typeof revenueLine?.value === "number" ? revenueLine.value : null;
   const revenueSource = revenueLine?.source ?? "Keepa";
   const revenueBadge = revenueLine?.badge ?? null;
+  const revenueConfirmedSource = revenueLine?.confirmed_source ?? null;
+  const revenueEstimatorSuggestion =
+    typeof revenueLine?.estimator_suggestion === "number"
+      ? revenueLine.estimator_suggestion
+      : null;
   const a: ReportAssumptions = { ...DEFAULT_ASSUMPTIONS, ...(assumptions ?? {}) };
   const initialAssumptions = {
     reseller_markup_pct: a.reseller_markup_pct,
@@ -111,6 +116,8 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
               revenueFootnote={extractRevenueFootnote(narrative.math.notes ?? "")}
               notes={cleanMathNotes(narrative.math.notes ?? "") || null}
               brandControlledPct={narrative.brand_controlled_pct ?? null}
+              revenueConfirmedSource={revenueConfirmedSource}
+              revenueEstimatorSuggestion={revenueEstimatorSuggestion}
             />
             <SectionPlan narrative={narrative} />
           </>
@@ -1388,6 +1395,10 @@ function V2Styles() {
       .rv2-rev-badge-est {
         background: rgba(224,170,76,0.15); color: var(--gold-soft);
         border: 1px solid rgba(224,170,76,0.4);
+      }
+      .rv2-rev-badge-confirmed {
+        background: rgba(108,185,138,0.15); color: var(--green);
+        border: 1px solid rgba(108,185,138,0.4);
       }
 
       /* Five-step plan */
