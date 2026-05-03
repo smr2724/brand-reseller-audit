@@ -120,6 +120,15 @@ export async function getBrandEnrichmentBundle(
   if (!brand) return null;
 
   // 2. Keepa: child rows (asins + sellers) for chart rendering and tables.
+  const sellersWithClassification = supabase
+    .from("brand_sellers")
+    .select(
+      "seller_name, seller_id, share_pct, asins_won, is_fba, seller_country, is_brand_controlled, classification_reason",
+    )
+    .eq("brand_id", brandId)
+    .order("share_pct", { ascending: false })
+    .limit(20);
+
   const [asinsRes, sellersRes] = await Promise.all([
     supabase
       .from("brand_asins")
@@ -127,15 +136,32 @@ export async function getBrandEnrichmentBundle(
       .eq("brand_id", brandId)
       .order("offers_count", { ascending: false })
       .limit(50),
-    supabase
-      .from("brand_sellers")
-      .select("seller_name, seller_id, share_pct, asins_won, is_fba, seller_country, is_brand_controlled, classification_reason")
-      .eq("brand_id", brandId)
-      .order("share_pct", { ascending: false })
-      .limit(20),
+    sellersWithClassification,
   ]);
 
-  const sellers = (sellersRes.data ?? []) as Array<KeepaSellerRow & { seller_country: string | null }>;
+  // Phase 23 — fall back to the legacy column set when the new
+  // classification columns haven't been migrated in yet.
+  let sellers: Array<KeepaSellerRow & { seller_country: string | null }>;
+  if (sellersRes.error) {
+    const msg = sellersRes.error.message ?? "";
+    if (/column .* does not exist|is_brand_controlled|classification_reason/i.test(msg)) {
+      const legacy = await supabase
+        .from("brand_sellers")
+        .select("seller_name, seller_id, share_pct, asins_won, is_fba, seller_country")
+        .eq("brand_id", brandId)
+        .order("share_pct", { ascending: false })
+        .limit(20);
+      sellers = (legacy.data ?? []) as Array<
+        KeepaSellerRow & { seller_country: string | null }
+      >;
+    } else {
+      sellers = [];
+    }
+  } else {
+    sellers = (sellersRes.data ?? []) as Array<
+      KeepaSellerRow & { seller_country: string | null }
+    >;
+  }
   const topSellerCountry = sellers[0]?.seller_country ?? null;
 
   const keepa: KeepaSnapshot = {

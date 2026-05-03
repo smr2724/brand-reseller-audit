@@ -276,7 +276,26 @@ export async function enrichBrandWithKeepa(
       const { error: insErr } = await supabase
         .from("brand_sellers")
         .insert(sellerRows);
-      if (insErr) throw new Error(`brand_sellers insert: ${insErr.message}`);
+      if (insErr) {
+        // Phase 23 — retry without the new classification columns when
+        // the migration hasn't landed yet. The classifier still drives
+        // brand_controlled_pct + top_seller below; persistence of the
+        // reason on brand_sellers is best-effort transparency.
+        const msg = insErr.message ?? "";
+        const looksLikeMissingColumn = /column .* does not exist|is_brand_controlled|classification_reason/i.test(msg);
+        if (looksLikeMissingColumn) {
+          console.warn(
+            `[keepa-brand] brand_sellers insert with classification columns failed (${msg}); retrying without them.`,
+          );
+          const legacyRows = sellerRows.map(({ is_brand_controlled, classification_reason, ...rest }) => rest);
+          const { error: retryErr } = await supabase
+            .from("brand_sellers")
+            .insert(legacyRows);
+          if (retryErr) throw new Error(`brand_sellers insert: ${retryErr.message}`);
+        } else {
+          throw new Error(`brand_sellers insert: ${msg}`);
+        }
+      }
     }
 
     // Build a seller-key → classification map so per-ASIN
