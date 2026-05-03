@@ -24,7 +24,7 @@ interface KeepaCandidate {
 
 interface FuzzyCandidate {
   name: string;
-  source: "keepa" | "dataforseo" | "both";
+  source: "keepa" | "dataforseo" | "both" | "fallback";
   asin_count: number | null;
   storefront_url: string | null;
   similarity: number;

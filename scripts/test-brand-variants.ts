@@ -1,5 +1,9 @@
 /**
  * Phase 25 — Unit tests for the variant generator + similarity ranker.
+ * Phase 25.1 — Adds coverage for suffix-ADD, ALL-CAPS, and singular
+ * non-possessive forms (the production bug was that none of these were
+ * generated, so Keepa's strict-equality /query never matched
+ * "COUPLE'S COFFEE CO.").
  *
  * Run with `npx tsx scripts/test-brand-variants.ts`.
  */
@@ -33,7 +37,7 @@ function lowerSet(arr: string[]): Set<string> {
     set.has("couple coffee"),
     JSON.stringify(v),
   );
-  check("tight: cap at <=8 entries", v.length <= 8, `len=${v.length}`);
+  check("tight: cap at <=16 entries", v.length <= 16, `len=${v.length}`);
 }
 
 {
@@ -68,6 +72,69 @@ function lowerSet(arr: string[]): Set<string> {
   check(
     "tight: plural → singular (Amenity)",
     set.has("world amenity"),
+    JSON.stringify(v),
+  );
+}
+
+// Phase 25.1 — suffix-ADD variants
+{
+  const v = tightVariants("Couple's Coffee");
+  const set = lowerSet(v);
+  check(
+    "tight 25.1: adds 'Co.' suffix variant",
+    set.has("couple's coffee co."),
+    JSON.stringify(v),
+  );
+  check(
+    "tight 25.1: adds 'Company' suffix variant",
+    set.has("couple's coffee company"),
+    JSON.stringify(v),
+  );
+}
+
+{
+  const v = tightVariants("Couples Coffee");
+  const set = lowerSet(v);
+  check(
+    "tight 25.1: Couples Coffee adds 'Co.' (Couples Coffee Co.)",
+    set.has("couples coffee co."),
+    JSON.stringify(v),
+  );
+}
+
+// Phase 25.1 — does NOT add suffix when one already present
+{
+  const v = tightVariants("Couples Coffee Co.");
+  const set = lowerSet(v);
+  check(
+    "tight 25.1: does not double-add suffix when already present",
+    !v.some((s) => /co\.?\s+co\.?$/i.test(s)),
+    JSON.stringify(v),
+  );
+}
+
+// Phase 25.1 — ALL-CAPS variants for Keepa's strict-equality brand filter
+{
+  const v = tightVariants("Couple's Coffee");
+  check(
+    "tight 25.1: includes ALL-CAPS variant",
+    v.includes("COUPLE'S COFFEE"),
+    JSON.stringify(v),
+  );
+  check(
+    "tight 25.1: includes ALL-CAPS + CO. variant (Amazon storefront form)",
+    v.includes("COUPLE'S COFFEE CO."),
+    JSON.stringify(v),
+  );
+}
+
+// Phase 25.1 — Couple → Couples (singular base)
+{
+  const v = tightVariants("Couple Coffee");
+  const set = lowerSet(v);
+  check(
+    "tight 25.1: singular base Couple → plural Couples Coffee",
+    set.has("couples coffee"),
     JSON.stringify(v),
   );
 }
@@ -121,6 +188,13 @@ check(
   "similarity: substring boost (Yeti vs Yeti Coolers)",
   similarity("Yeti", "Yeti Coolers") >= 0.75,
   similarity("Yeti", "Yeti Coolers").toFixed(3),
+);
+
+// Phase 25.1 — case-insensitive similarity
+check(
+  "similarity 25.1: case-insensitive (Couple's Coffee vs COUPLE'S COFFEE CO.)",
+  similarity("Couple's Coffee", "COUPLE'S COFFEE CO.") >= 0.7,
+  similarity("Couple's Coffee", "COUPLE'S COFFEE CO.").toFixed(3),
 );
 
 // Ranking sanity: Couple's Coffee should outrank a random brand
