@@ -1,9 +1,28 @@
 /**
- * Phase 20 — temporary admin endpoint to re-run the FULL enrichment
- * pipeline (CX scorecard, keywords, competitors, A+/video, branded
- * trend, ASIN-level $$$ fields) for an existing report and persist the
- * recomputed sub-narratives, WITHOUT disturbing the cover/math/plan
- * fields that Phase 19 already backfilled.
+ * Phase 20 — temporary admin endpoint to refresh the enrichment-derived
+ * subtrees of an existing v2 report's narrative_json (CX scorecard,
+ * keywords, competitors, A+/video, branded trend, ASIN-level $$$).
+ *
+ * Strategy: lightweight surgical re-compute, NOT a full Keepa/DFS
+ * re-enrichment. We rely on the bundle that is already cached on
+ * `brands` + `brand_asins` + `brand_sellers` + `brand_search_metrics`
+ * (these were populated when the report was originally generated, and
+ * the underlying upstream calls are still gated by 14-day freshness
+ * windows the cron path would respect anyway).
+ *
+ * What this endpoint does:
+ *   1. Pulls Keepa /product details for every ASIN already on the
+ *      brand — supplies has_a_plus / has_video / rating / reviews /
+ *      images / bullets, plus inputs to the per-ASIN revenue estimator.
+ *   2. Recomputes CX scorecard + per-ASIN ttm_revenue/units.
+ *   3. Recomputes reseller reality + dossier from the existing bundle.
+ *   4. Pulls competitor snapshots from the cross-user
+ *      `competitor_brands_cache` table (no network) to rebuild a real
+ *      competitor benchmark — replaces any "XYZ Corp" hallucinated rows.
+ *   5. Reruns the LLM section calls (reseller line, dossier risk, CX
+ *      callouts, competitor line).
+ *   6. Persists the recomputed subtrees back, preserving cover / math /
+ *      plan / why_rcg / cta from the existing narrative (Phase 19).
  *
  * Auth: x-internal-token must match INTERNAL_JOB_TOKEN (server env).
  * Body: { report_id: string }
@@ -12,12 +31,18 @@
  * phase20_full_enrichment_oxo_yeti_brief.md.
  */
 import { NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
-import { isKeepaConfigured } from "@/lib/keepa";
+import { getProductDetails, isKeepaConfigured } from "@/lib/keepa";
 import {
-  runV2Enrichment,
-  type BrandRowMin,
-} from "@/lib/report/v2/enrich";
+  getBrandEnrichmentBundle,
+  type BrandEnrichmentBundle,
+} from "@/lib/enrichment";
+import {
+  estimateBrandTtmRevenue,
+  type RevenueEstimate,
+} from "@/lib/enrichment/revenue-estimator";
+import type { CompetitorSnapshot, KeepaAsinDetail } from "@/lib/report/v2/enrich";
 import {
   computeCompetitorBenchmark,
   computeCxAuditBase,
@@ -47,7 +72,7 @@ interface Body {
   report_id?: string;
 }
 
-function countNotMeasuredAsinFields(narrative: NarrativeV2): {
+function countNotMeasured(narrative: NarrativeV2): {
   asin_ttm_revenue_missing: number;
   asin_ttm_units_missing: number;
   asin_total: number;
@@ -82,23 +107,55 @@ function countNotMeasuredAsinFields(narrative: NarrativeV2): {
   };
 }
 
+async function loadCachedCompetitorSnapshots(
+  admin: SupabaseClient<any, any, any>,
+  bundle: BrandEnrichmentBundle,
+  brandName: string,
+): Promise<CompetitorSnapshot[]> {
+  const candidates = new Set<string>();
+  for (const c of bundle.dataforseo?.competitor_brands ?? []) {
+    if (c.brand && c.brand.toLowerCase() !== brandName.toLowerCase()) {
+      candidates.add(c.brand);
+    }
+  }
+  if (!candidates.size) return [];
+
+  const norms = Array.from(candidates).map((b) => b.toLowerCase().trim());
+  const { data, error } = await admin
+    .from("competitor_brands_cache")
+    .select("payload, expires_at, display_name, brand_name_norm")
+    .in("brand_name_norm", norms);
+  if (error || !data) return [];
+
+  const out: CompetitorSnapshot[] = [];
+  for (const row of data) {
+    if (new Date(row.expires_at).getTime() < Date.now()) continue;
+    const cached = row.payload as Record<string, unknown> | null;
+    if (!cached || typeof cached !== "object") continue;
+    const v = (cached as { __v?: number }).__v;
+    if (v !== 2) continue; // only current shape
+    const { __v: _v, ...rest } = cached as { __v: number } & Record<string, unknown>;
+    const snap = rest as unknown as CompetitorSnapshot;
+    if ((snap.enriched_asin_count ?? 0) >= 2) {
+      out.push(snap);
+    }
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
 export async function POST(req: Request) {
   const expected = process.env.INTERNAL_JOB_TOKEN;
   if (!expected) {
-    return NextResponse.json(
-      { error: "INTERNAL_JOB_TOKEN not set" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "INTERNAL_JOB_TOKEN not set" }, { status: 500 });
   }
   const tok = req.headers.get("x-internal-token");
   if (tok !== expected) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
-
   if (!isKeepaConfigured()) {
     return NextResponse.json({ error: "KEEPA_API_KEY missing" }, { status: 500 });
   }
-
   const admin = createSupabaseAdminClient();
   if (!admin) {
     return NextResponse.json(
@@ -120,16 +177,12 @@ export async function POST(req: Request) {
     .eq("id", reportId)
     .maybeSingle();
   if (rErr) {
-    return NextResponse.json(
-      { error: `report lookup: ${rErr.message}` },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: `report lookup: ${rErr.message}` }, { status: 500 });
   }
   if (!reportRow) {
     return NextResponse.json({ error: "report not found" }, { status: 404 });
   }
   const report = reportRow as { id: string; brand_id: string | null; narrative_json: NarrativeV2 | null };
-
   const narrative = report.narrative_json;
   if (!narrative || (narrative as { version?: number }).version !== 2) {
     return NextResponse.json({ error: "report is not v2 narrative" }, { status: 400 });
@@ -138,65 +191,93 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "report has no brand_id" }, { status: 400 });
   }
 
-  // 2. Load brand row (full, for BrandForReport fields).
+  // 2. Load brand row (full).
   const { data: brandRow, error: bErr } = await admin
     .from("brands")
     .select("*")
     .eq("id", report.brand_id)
     .maybeSingle();
   if (bErr) {
-    return NextResponse.json(
-      { error: `brand lookup: ${bErr.message}` },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: `brand lookup: ${bErr.message}` }, { status: 500 });
   }
   if (!brandRow) {
     return NextResponse.json({ error: "brand not found" }, { status: 404 });
   }
-  const brand = brandRow as BrandForReport & BrandRowMin & { user_id: string };
+  const brand = brandRow as BrandForReport & { user_id: string };
 
-  // Snapshot before-state for the response.
-  const before = countNotMeasuredAsinFields(narrative);
+  // 3. Load existing bundle (Keepa + DFS — already populated when report
+  // was generated; this is a cheap DB read).
+  const bundle = await getBrandEnrichmentBundle(admin, brand.id);
+  if (!bundle) {
+    return NextResponse.json({ error: "bundle is null" }, { status: 500 });
+  }
 
-  // 3. Run enrichment using the brand's stored freshness timestamps.
-  // For OXO/Yeti these were enriched < 14 days ago, so Keepa + DFS upstream
-  // calls are skipped (within the 14-day freshness window). What still
-  // runs:
-  //   - getProductDetails for each ASIN (24h in-memory cache, but cold
-  //     here on a fresh server — issues per-ASIN /product calls). This
-  //     supplies has_a_plus / has_video / rating / reviews / images /
-  //     bullets fields, plus the per-ASIN revenue estimator inputs.
-  //   - competitor snapshots (cached cross-user for 14 days, so hot).
-  // This stays under Vercel's 300s ceiling for the brand sizes we
-  // care about.
-  const brandRowMin: BrandRowMin = {
-    id: brand.id,
-    name: brand.name,
-    user_id: brand.user_id,
-    category: brand.category,
-    keepa_last_enriched_at: brand.keepa_last_enriched_at ?? null,
-    dataforseo_last_enriched_at: brand.dataforseo_last_enriched_at ?? null,
-  };
-  const enrichResult = await runV2Enrichment(admin, brandRowMin);
+  const before = countNotMeasured(narrative);
 
-  // 4. Recompute sub-narratives.
-  const reality = computeResellerReality(enrichResult.bundle);
-  const dossierBase = computeDossierBase(enrichResult.bundle);
-  const cxBase = computeCxAuditBase(
-    enrichResult.bundle,
-    enrichResult.asinDetails,
-    enrichResult.revenueEstimate,
+  // 4. Pull /product details for the brand's existing ASINs. This is
+  // the primary cost: O(asin_count / 5) batched Keepa calls, throttled
+  // by the in-process token bucket. Easily fits under 300s for typical
+  // catalogs (≤ 60 ASINs).
+  const asins = (bundle.keepa.asins ?? []).map((a) => a.asin).filter(Boolean);
+  let asinDetails: KeepaAsinDetail[] = [];
+  let revenueEstimate: RevenueEstimate | null = null;
+  if (asins.length) {
+    const products = await getProductDetails(asins, 5);
+    asinDetails = products.map((p) => ({
+      asin: p.asin,
+      title: p.title ?? null,
+      rating: p.rating ?? null,
+      review_count: p.review_count ?? null,
+      images_count: p.images_count ?? null,
+      features_count: p.features_count ?? null,
+      has_video: p.has_video ?? null,
+      has_a_plus: p.has_a_plus ?? null,
+      buy_box_avg365: p.buy_box_avg365 ?? null,
+      sales_rank_avg365: p.sales_rank_avg365 ?? null,
+      product_group: p.product_group ?? null,
+      category_tree: p.category_tree ?? null,
+      root_category: p.root_category ?? null,
+    }));
+    revenueEstimate = estimateBrandTtmRevenue(
+      products.map((p) => ({
+        asin: p.asin,
+        sales_rank_avg365: p.sales_rank_avg365 ?? null,
+        sales_rank_current: p.sales_rank_current ?? null,
+        buy_box_avg365: p.buy_box_avg365 ?? null,
+        buy_box_current: p.buy_box_current ?? null,
+        buy_box_now: p.buy_box_price ?? null,
+        product_group: p.product_group ?? null,
+        root_category: p.root_category ?? null,
+        category_path: p.category_tree?.map((c: { name: string }) => c.name).join(" > ") ?? null,
+      })),
+    );
+  }
+
+  // 5. Competitor snapshots — load from the cross-user cache only. No
+  // fresh enrichment here; the cache TTL is 14 days and the cron path
+  // already populates it. If empty / expired, the benchmark just shows
+  // the audited row alone (which is fine — better than hallucinated
+  // competitors).
+  const competitorSnapshots = await loadCachedCompetitorSnapshots(
+    admin,
+    bundle,
+    brand.name,
   );
+
+  // 6. Pure compute.
+  const reality = computeResellerReality(bundle);
+  const dossierBase = computeDossierBase(bundle);
+  const cxBase = computeCxAuditBase(bundle, asinDetails, revenueEstimate);
   const benchmarkBase = computeCompetitorBenchmark(
     brand,
-    enrichResult.bundle,
-    enrichResult.competitorSnapshots,
+    bundle,
+    competitorSnapshots,
     cxBase,
   );
 
-  // 5. LLM section calls — fanned out in parallel.
+  // 7. LLM calls — fanned out in parallel.
   const [realityLine, dossierRisk, cxBroken, competitorLine] = await Promise.all([
-    llmResellerRealityLine(reality, enrichResult.bundle),
+    llmResellerRealityLine(reality, bundle),
     dossierBase.dossier ? llmDossierRisk(dossierBase.dossier, brand) : Promise.resolve(""),
     llmCxBroken(cxBase, brand),
     llmCompetitorLine(benchmarkBase, brand),
@@ -208,13 +289,15 @@ export async function POST(req: Request) {
     note: reality.top_sellers.length === 0 ? "Keepa returned no sellers for this brand." : null,
   };
 
-  // Preserve the existing dossier when the fresh compute returns null
-  // (e.g. fresh run sees < 20% top-seller share but the report's
-  // existing dossier was richer). Brief: "do NOT re-run dossier unless
-  // rows are missing". So we only overwrite when we have a fresh dossier.
+  // Brief: do NOT reset seller dossier (already enriched Phase 10).
+  // Preserve existing dossier when fresh compute returns null. Only
+  // overwrite when we have a fresh dossier — and even then, keep the
+  // existing risk_profile if the LLM call returned an empty string.
   let finalDossier: NarrativeResellerDossier | null = narrative.reseller_dossier ?? null;
   if (dossierBase.dossier) {
-    finalDossier = { ...dossierBase.dossier, risk_profile: dossierRisk || "" };
+    const risk =
+      dossierRisk || narrative.reseller_dossier?.risk_profile || "";
+    finalDossier = { ...dossierBase.dossier, risk_profile: risk };
   }
 
   const finalCx: NarrativeCxAudit = { ...cxBase, whats_broken: cxBroken };
@@ -224,7 +307,7 @@ export async function POST(req: Request) {
     one_liner: competitorLine,
   };
 
-  // 6. Compose updated narrative — preserve cover, math, plan, why_rcg,
+  // 8. Compose updated narrative — preserve cover, math, plan, why_rcg,
   // cta from the existing narrative (Phase 19 cover; v2.1 plan).
   const updatedNarrative: NarrativeV2 = {
     ...narrative,
@@ -234,14 +317,12 @@ export async function POST(req: Request) {
     competitor_benchmark: finalBenchmark,
     data_sources: {
       ...narrative.data_sources,
-      keepa:
-        (enrichResult.bundle.keepa.asin_count ?? 0) > 0 ||
-        (enrichResult.bundle.keepa.sellers?.length ?? 0) > 0,
-      keepa_freshness: enrichResult.bundle.keepa.last_enriched_at,
+      keepa: (bundle.keepa.asin_count ?? 0) > 0 || (bundle.keepa.sellers?.length ?? 0) > 0,
+      keepa_freshness: bundle.keepa.last_enriched_at,
       dataforseo:
-        (enrichResult.bundle.dataforseo?.top_keywords?.length ?? 0) > 0 ||
-        (enrichResult.bundle.dataforseo?.competitor_brands?.length ?? 0) > 0,
-      dataforseo_freshness: enrichResult.bundle.dataforseo?.captured_at ?? null,
+        (bundle.dataforseo?.top_keywords?.length ?? 0) > 0 ||
+        (bundle.dataforseo?.competitor_brands?.length ?? 0) > 0,
+      dataforseo_freshness: bundle.dataforseo?.captured_at ?? null,
       reseller_dossier: finalDossier !== null,
       competitor_benchmark: benchmarkBase.rows
         .filter((r) => !r.is_audited_brand)
@@ -258,8 +339,7 @@ export async function POST(req: Request) {
     },
   };
 
-  // 7. Persist — update narrative_json plus the side jsonb columns the
-  // generator writes alongside it. Email path is NOT touched.
+  // 9. Persist. Email path is NOT touched.
   const { error: updErr } = await admin
     .from("reports")
     .update({
@@ -271,13 +351,10 @@ export async function POST(req: Request) {
     } as Record<string, unknown>)
     .eq("id", reportId);
   if (updErr) {
-    return NextResponse.json(
-      { error: `update: ${updErr.message}` },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: `update: ${updErr.message}` }, { status: 500 });
   }
 
-  const after = countNotMeasuredAsinFields(updatedNarrative);
+  const after = countNotMeasured(updatedNarrative);
 
   return NextResponse.json({
     ok: true,
@@ -286,14 +363,14 @@ export async function POST(req: Request) {
     before,
     after,
     enrichment: {
-      keepa_asins: enrichResult.bundle.keepa.asins?.length ?? 0,
-      keepa_sellers: enrichResult.bundle.keepa.sellers?.length ?? 0,
-      dfs_keywords: enrichResult.bundle.dataforseo?.top_keywords?.length ?? 0,
-      dfs_branded_search_volume: enrichResult.bundle.dataforseo?.branded_search_volume ?? null,
-      dfs_branded_trend_pct: enrichResult.bundle.dataforseo?.branded_trend_pct ?? null,
-      competitors_returned: enrichResult.competitorSnapshots.length,
-      asin_details: enrichResult.asinDetails.length,
-      revenue_estimate_total: enrichResult.revenueEstimate?.total_ttm_revenue ?? null,
+      keepa_asins_in_bundle: bundle.keepa.asins?.length ?? 0,
+      keepa_sellers_in_bundle: bundle.keepa.sellers?.length ?? 0,
+      dfs_keywords_in_bundle: bundle.dataforseo?.top_keywords?.length ?? 0,
+      dfs_branded_search_volume: bundle.dataforseo?.branded_search_volume ?? null,
+      dfs_branded_trend_pct: bundle.dataforseo?.branded_trend_pct ?? null,
+      cached_competitors_used: competitorSnapshots.length,
+      asin_details_pulled: asinDetails.length,
+      revenue_estimate_total: revenueEstimate?.total_ttm_revenue ?? null,
     },
     cover_preserved: {
       delta_profit: updatedNarrative.cover.delta_profit ?? null,
