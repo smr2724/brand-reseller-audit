@@ -214,15 +214,40 @@ export async function POST(req: Request) {
 
   const before = countNotMeasured(narrative);
 
-  // 4. Pull /product details for the brand's existing ASINs. This is
-  // the primary cost: O(asin_count / 5) batched Keepa calls, throttled
-  // by the in-process token bucket. Easily fits under 300s for typical
-  // catalogs (≤ 60 ASINs).
-  const asins = (bundle.keepa.asins ?? []).map((a) => a.asin).filter(Boolean);
+  // 4. Pull /product details for the brand's existing ASINs. We cap at
+  // the top 20 ASINs (by offers_count desc — that's how the bundle is
+  // already sorted) because:
+  //   • the rendered report only shows the top 10 ASIN cards
+  //   • Keepa's token bucket can stall a 50-ASIN backfill past Vercel's
+  //     300s ceiling
+  // 20 ASINs in a single /product call costs ~100 tokens and one HTTP
+  // round-trip — comfortable margin under the timeout.
+  const ASIN_CAP = 20;
+  const asins = (bundle.keepa.asins ?? [])
+    .map((a) => a.asin)
+    .filter(Boolean)
+    .slice(0, ASIN_CAP);
   let asinDetails: KeepaAsinDetail[] = [];
   let revenueEstimate: RevenueEstimate | null = null;
+  // Race the Keepa fetch against a soft deadline so we always have time
+  // to do the LLM calls + DB persist + return a useful response. If we
+  // run out of time, we fall back to whatever was already in the
+  // existing bundle for the CX scorecard (per-ASIN $$$ stays missing,
+  // but at least the response is observable).
+  const KEEPA_DEADLINE_MS = 180_000; // 3 minutes
+  let keepaTimedOut = false;
   if (asins.length) {
-    const products = await getProductDetails(asins, 5);
+    const products = await Promise.race<
+      Awaited<ReturnType<typeof getProductDetails>>
+    >([
+      getProductDetails(asins, ASIN_CAP),
+      new Promise<Awaited<ReturnType<typeof getProductDetails>>>((resolve) =>
+        setTimeout(() => {
+          keepaTimedOut = true;
+          resolve([]);
+        }, KEEPA_DEADLINE_MS),
+      ),
+    ]);
     asinDetails = products.map((p) => ({
       asin: p.asin,
       title: p.title ?? null,
@@ -371,6 +396,7 @@ export async function POST(req: Request) {
       cached_competitors_used: competitorSnapshots.length,
       asin_details_pulled: asinDetails.length,
       revenue_estimate_total: revenueEstimate?.total_ttm_revenue ?? null,
+      keepa_timed_out: keepaTimedOut,
     },
     cover_preserved: {
       delta_profit: updatedNarrative.cover.delta_profit ?? null,
