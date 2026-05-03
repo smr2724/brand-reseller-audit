@@ -1,15 +1,17 @@
 /**
  * Phase 29 — stuck-brand recovery sweep + null-safety smoke tests.
+ * Phase 30 — Updated to assert the new `enrichment_state IN
+ * ('pending','failed')` filter (was `keepa_last_enriched_at IS NULL`).
  *
  * Verifies:
  *  1. resolveBrandRevenue is null-safe across the full grid of inputs
  *     a freshly-inserted brand row could present (mirrors the H2O Therapy
  *     bug context — Phase 28 added resolveBrandRevenue and we want to
  *     prove it never throws on missing fields).
- *  2. findStuckBrands returns rows whose keepa_last_enriched_at is NULL
- *     and created_at is older than the threshold.
+ *  2. findStuckBrands queries by `enrichment_state IN ('pending','failed')`
+ *     and a created_at cutoff.
  *  3. recoverStuckBrand calls enrichBrandWithKeepa with the right inputs
- *     and surfaces the resulting summary / error.
+ *     and surfaces the resulting summary / error structurally.
  *
  * Run:
  *   npx tsx scripts/test-recover-stuck-brands.ts
@@ -19,6 +21,7 @@ import {
   findStuckBrands,
   recoverStuckBrand,
   STUCK_BRAND_THRESHOLD_MS,
+  RECOVERY_BRAND_BATCH_LIMIT,
   type StuckBrand,
 } from "../src/lib/brand/recover-stuck-brands";
 
@@ -68,14 +71,13 @@ console.log("Case 1: resolveBrandRevenue — null-safe on H2O-Therapy-like input
   assert(g.value === null, "non-numeric confirmed → no throw");
 }
 
-console.log("Case 2: findStuckBrands query shape");
+console.log("Case 2: findStuckBrands query shape (Phase 30 — enrichment_state filter)");
 {
-  // Lightweight Supabase mock — captures the chain so we can inspect it.
   type Captured = {
     table?: string;
     select?: string;
-    isCol?: string;
-    isVal?: unknown;
+    inCol?: string;
+    inVal?: unknown;
     lteCol?: string;
     lteVal?: unknown;
     orderCol?: string;
@@ -88,9 +90,9 @@ console.log("Case 2: findStuckBrands query shape");
       cap.select = s;
       return this;
     },
-    is(col: string, val: unknown) {
-      cap.isCol = col;
-      cap.isVal = val;
+    in(col: string, val: unknown) {
+      cap.inCol = col;
+      cap.inVal = val;
       return this;
     },
     lte(col: string, val: unknown) {
@@ -112,6 +114,7 @@ console.log("Case 2: findStuckBrands query shape");
             user_id: "user-1",
             name: "Stuck Inc.",
             created_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+            enrichment_state: "pending",
           },
         ],
         error: null,
@@ -127,13 +130,16 @@ console.log("Case 2: findStuckBrands query shape");
 
   const rows = await findStuckBrands(adminMock);
   assert(cap.table === "brands", "queries the brands table");
+  assert(cap.inCol === "enrichment_state", "filters on enrichment_state column");
   assert(
-    cap.isCol === "keepa_last_enriched_at" && cap.isVal === null,
-    "filters on keepa_last_enriched_at IS NULL",
+    Array.isArray(cap.inVal) &&
+      (cap.inVal as string[]).includes("pending") &&
+      (cap.inVal as string[]).includes("failed"),
+    "includes 'pending' and 'failed' in the filter",
   );
   assert(cap.lteCol === "created_at", "filters by created_at <= cutoff");
   assert(cap.orderAsc === true, "orders oldest-first");
-  assert(cap.limit === 3, "default batch limit = 3");
+  assert(cap.limit === RECOVERY_BRAND_BATCH_LIMIT, "uses RECOVERY_BRAND_BATCH_LIMIT");
   assert(rows.length === 1 && rows[0].id === "brand-1", "returns mocked row");
 }
 
@@ -152,6 +158,13 @@ console.log("Case 3: recoverStuckBrand surfaces enrichment errors safely");
             },
           };
         },
+        update() {
+          return {
+            eq() {
+              return Promise.resolve({ error: null });
+            },
+          };
+        },
       };
     },
   };
@@ -160,10 +173,8 @@ console.log("Case 3: recoverStuckBrand surfaces enrichment errors safely");
     user_id: "user-x",
     name: "Boom Brand",
     created_at: new Date().toISOString(),
+    enrichment_state: "pending",
   };
-  // enrichBrandWithKeepa might catch internally and return a summary with
-  // enrichment_error, OR re-throw — either way, recoverStuckBrand should
-  // produce a structured RecoverBrandResult and never throw.
   let threw = false;
   try {
     const res = await recoverStuckBrand(adminMock, brand);
