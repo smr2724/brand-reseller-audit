@@ -199,7 +199,11 @@ export async function POST(req: Request) {
     note: reality.top_sellers.length === 0 ? "Keepa returned no sellers for this brand." : null,
   };
 
-  let finalDossier: NarrativeResellerDossier | null = null;
+  // Preserve the existing dossier when the fresh compute returns null
+  // (e.g. fresh run sees < 20% top-seller share but the report's
+  // existing dossier was richer). Brief: "do NOT re-run dossier unless
+  // rows are missing". So we only overwrite when we have a fresh dossier.
+  let finalDossier: NarrativeResellerDossier | null = narrative.reseller_dossier ?? null;
   if (dossierBase.dossier) {
     finalDossier = { ...dossierBase.dossier, risk_profile: dossierRisk || "" };
   }
