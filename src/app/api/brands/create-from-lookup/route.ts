@@ -112,6 +112,7 @@ export async function POST(req: Request) {
   // fire-and-forget. The client expects the brand to be enriched
   // before redirecting to the detail page.
   let keepaError: string | null = null;
+  let keepaAsinCount = 0;
   let dfsError: string | null = null;
   try {
     const summary = await enrichBrandWithKeepa(admin, {
@@ -120,6 +121,7 @@ export async function POST(req: Request) {
       user_id: user.id,
     });
     if (summary.enrichment_error) keepaError = summary.enrichment_error;
+    keepaAsinCount = summary.asin_count;
   } catch (e) {
     keepaError = e instanceof Error ? e.message : String(e);
   }
@@ -135,9 +137,33 @@ export async function POST(req: Request) {
     dfsError = e instanceof Error ? e.message : String(e);
   }
 
+  // Phase 29 — H2O Therapy bug. When Keepa enrichment fails or returns
+  // 0 ASINs, the previous code returned 200 with the error in the body
+  // and the client redirected to a half-broken detail page. Redirect
+  // there silently if the user opens it, but signal the failure to the
+  // client (non-2xx so generic "Load failed" turns into a real message)
+  // when there's nothing useful to show. The brand row still exists, so
+  // the recover-stuck-brands cron can pick it up on the next sweep.
+  const enrichmentFailed = keepaError != null || keepaAsinCount === 0;
+  if (enrichmentFailed) {
+    return NextResponse.json(
+      {
+        brand_id: brandId,
+        keepa_error: keepaError,
+        dataforseo_error: dfsError,
+        asin_count: keepaAsinCount,
+        error:
+          keepaError ??
+          "Keepa returned no ASINs for this brand. The brand was saved; the recovery sweep will retry within 5 minutes.",
+      },
+      { status: 502 },
+    );
+  }
+
   return NextResponse.json({
     brand_id: brandId,
     keepa_error: keepaError,
     dataforseo_error: dfsError,
+    asin_count: keepaAsinCount,
   });
 }

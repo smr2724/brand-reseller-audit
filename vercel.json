@@ -8,6 +8,10 @@
     {
       "path": "/api/cron/recover-stuck-reports",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/recover-stuck-brands",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
