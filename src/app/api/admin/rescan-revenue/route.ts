@@ -151,7 +151,7 @@ export async function POST(req: Request) {
   // 1. Load report.
   const { data: reportRow, error: rErr } = await admin
     .from("reports")
-    .select("id, brand_id, narrative_json, report_assumptions, revenue_estimate_dollars")
+    .select("id, brand_id, narrative_json, report_assumptions")
     .eq("id", reportId)
     .maybeSingle();
   if (rErr) return NextResponse.json({ error: `report lookup: ${rErr.message}` }, { status: 500 });
@@ -276,8 +276,6 @@ export async function POST(req: Request) {
     .update({
       narrative_json: updatedNarrative as any,
       report_assumptions: a as any,
-      revenue_estimate_dollars: newRevenue,
-      revenue_estimate_method: "keepa_bsr_price_v2",
     } as any)
     .eq("id", reportId);
   if (updErr) return NextResponse.json({ error: `update: ${updErr.message}` }, { status: 500 });
