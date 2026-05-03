@@ -29,6 +29,7 @@ import {
   llmPlan,
   llmResellerRealityLine,
 } from "./narrative";
+import { withTiming } from "@/lib/util/timing";
 import {
   DEFAULT_ASSUMPTIONS,
   type NarrativeCompetitorBenchmark,
@@ -148,6 +149,8 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
   const exitLift = exitLine?.value ?? null;
 
   // 3. LLM section calls — fanned out in parallel where possible.
+  // Phase 22 — wrap each in withTiming so we get one log line per
+  // section per scan, and they all run concurrently inside Promise.all.
   const [
     coverHeadline,
     realityLine,
@@ -158,37 +161,49 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     plan,
     fiveStep,
   ] = await Promise.all([
-    llmCoverHeadline({
-      brandName: brand.name,
-      topReseller: bundle.keepa.top_seller ?? null,
-      topResellerSharePct: bundle.keepa.top_seller_share_pct ?? null,
-      annualLeak,
-      exitLift,
-      brandedSearchVolume: bundle.dataforseo?.branded_search_volume ?? null,
-    }),
-    llmResellerRealityLine(reality, bundle),
+    withTiming("llm/coverHeadline", () =>
+      llmCoverHeadline({
+        brandName: brand.name,
+        topReseller: bundle.keepa.top_seller ?? null,
+        topResellerSharePct: bundle.keepa.top_seller_share_pct ?? null,
+        annualLeak,
+        exitLift,
+        brandedSearchVolume: bundle.dataforseo?.branded_search_volume ?? null,
+      }),
+    ),
+    withTiming("llm/resellerRealityLine", () =>
+      llmResellerRealityLine(reality, bundle),
+    ),
     dossierBase.dossier
-      ? llmDossierRisk(dossierBase.dossier, brand)
+      ? withTiming("llm/dossierRisk", () =>
+          llmDossierRisk(dossierBase.dossier!, brand),
+        )
       : Promise.resolve(""),
-    llmCxBroken(cxBase, brand),
-    llmCompetitorLine(benchmarkBase, brand),
-    llmMathNotes(math),
-    llmPlan({
-      brandName: brand.name,
-      topReseller: bundle.keepa.top_seller ?? null,
-      uniqueSellerCount: bundle.keepa.unique_seller_count,
-      brandedSearchVolume: bundle.dataforseo?.branded_search_volume ?? null,
-    }),
-    llmFiveStepPlan({
-      brandName: brand.name,
-      topReseller: bundle.keepa.top_seller ?? null,
-      topResellerSharePct: bundle.keepa.top_seller_share_pct ?? null,
-      uniqueSellerCount: bundle.keepa.unique_seller_count,
-      brandControlledPct: bundle.keepa.brand_controlled_pct,
-      annualLeak,
-      exitLift,
-      revenue: trailing12,
-    }),
+    withTiming("llm/cxBroken", () => llmCxBroken(cxBase, brand)),
+    withTiming("llm/competitorLine", () =>
+      llmCompetitorLine(benchmarkBase, brand),
+    ),
+    withTiming("llm/mathNotes", () => llmMathNotes(math)),
+    withTiming("llm/plan", () =>
+      llmPlan({
+        brandName: brand.name,
+        topReseller: bundle.keepa.top_seller ?? null,
+        uniqueSellerCount: bundle.keepa.unique_seller_count,
+        brandedSearchVolume: bundle.dataforseo?.branded_search_volume ?? null,
+      }),
+    ),
+    withTiming("llm/fiveStepPlan", () =>
+      llmFiveStepPlan({
+        brandName: brand.name,
+        topReseller: bundle.keepa.top_seller ?? null,
+        topResellerSharePct: bundle.keepa.top_seller_share_pct ?? null,
+        uniqueSellerCount: bundle.keepa.unique_seller_count,
+        brandControlledPct: bundle.keepa.brand_controlled_pct,
+        annualLeak,
+        exitLift,
+        revenue: trailing12,
+      }),
+    ),
   ]);
 
   // 4. Compose final structures.

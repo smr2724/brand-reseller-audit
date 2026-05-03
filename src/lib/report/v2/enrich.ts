@@ -34,6 +34,7 @@ import {
   type KeepaProductDetails,
 } from "@/lib/keepa";
 import { isBrandControlled } from "@/lib/enrichment/keepa-brand";
+import { withTiming } from "@/lib/util/timing";
 
 const FRESH_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -128,7 +129,9 @@ export async function runV2Enrichment(
   // data), but the math section will use SP-API revenue when available.
   let spApiTrailing: SpApiTrailingResult | null = null;
   try {
-    const spResult = await pullTrailing12FromSpApi(admin, brand.id);
+    const spResult = await withTiming("enrich/spApi", () =>
+      pullTrailing12FromSpApi(admin, brand.id),
+    );
     if (spResult.ok) {
       spApiTrailing = spResult;
       console.log(
@@ -146,11 +149,13 @@ export async function runV2Enrichment(
   // 1. Keepa.
   if (!isFresh(brand.keepa_last_enriched_at)) {
     try {
-      const summary = await enrichBrandWithKeepa(admin, {
-        brand_id: brand.id,
-        brand_name: brand.name,
-        user_id: brand.user_id,
-      });
+      const summary = await withTiming("enrich/keepa", () =>
+        enrichBrandWithKeepa(admin, {
+          brand_id: brand.id,
+          brand_name: brand.name,
+          user_id: brand.user_id,
+        }),
+      );
       if (summary.enrichment_error) {
         throw new EnrichmentStepError(
           "keepa",
@@ -171,7 +176,9 @@ export async function runV2Enrichment(
   // those seeds in the same enrichment cycle).
   let bundle: BrandEnrichmentBundle | null = null;
   try {
-    bundle = await getBrandEnrichmentBundle(admin, brand.id);
+    bundle = await withTiming("enrich/loadBundle1", () =>
+      getBrandEnrichmentBundle(admin, brand.id),
+    );
   } catch (e) {
     throw new EnrichmentStepError(
       "load_bundle",
@@ -206,7 +213,11 @@ export async function runV2Enrichment(
   try {
     const asins = (bundle.keepa.asins ?? []).map((a) => a.asin).filter(Boolean);
     if (asins.length) {
-      const products = await getProductDetails(asins, 5);
+      const products = await withTiming(
+        "enrich/keepaProductDetails",
+        () => getProductDetails(asins, 5),
+        { asin_count: asins.length },
+      );
       asinDetails = products.map(toAsinDetail);
       revenueEstimate = estimateBrandTtmRevenue(
         products.map((p) => ({
@@ -235,13 +246,15 @@ export async function runV2Enrichment(
   // brand name itself for many small brands.
   if (!isFresh(brand.dataforseo_last_enriched_at)) {
     try {
-      const snap = await enrichBrandWithDataForSeo(admin, {
-        brand_id: brand.id,
-        brand_name: brand.name,
-        user_id: brand.user_id,
-        category_seeds: productCategoryHints,
-        title_vocab: titleVocab,
-      });
+      const snap = await withTiming("enrich/dataforseo", () =>
+        enrichBrandWithDataForSeo(admin, {
+          brand_id: brand.id,
+          brand_name: brand.name,
+          user_id: brand.user_id,
+          category_seeds: productCategoryHints,
+          title_vocab: titleVocab,
+        }),
+      );
       if (snap.enrichment_error) {
         throw new EnrichmentStepError(
           "dataforseo",
@@ -257,7 +270,9 @@ export async function runV2Enrichment(
     }
     // Reload bundle so DFS data is visible to compute().
     try {
-      bundle = await getBrandEnrichmentBundle(admin, brand.id);
+      bundle = await withTiming("enrich/loadBundle2", () =>
+        getBrandEnrichmentBundle(admin, brand.id),
+      );
       if (!bundle) {
         throw new EnrichmentStepError("load_bundle", "bundle is null after DFS enrichment");
       }
@@ -275,11 +290,9 @@ export async function runV2Enrichment(
   // run through the lite Keepa+DFS pipeline so we can ship real numbers
   // (no LLM hallucination). Best effort: failure leaves the section
   // showing only the audited brand.
-  const competitorSnapshots = await collectCompetitorSnapshots(
-    admin,
-    brand.name,
-    bundle,
-    productCategoryHints,
+  const competitorSnapshots = await withTiming(
+    "enrich/competitorSnapshots",
+    () => collectCompetitorSnapshots(admin, brand.name, bundle!, productCategoryHints),
   );
 
   return {
@@ -500,26 +513,36 @@ async function collectCompetitorSnapshots(
     .slice(0, 8);
   if (!candidatePool.length) return [];
 
+  // Phase 22 — Walk competitors in parallel batches. Previously the
+  // loop ran one competitor at a time with a 1.5s sleep between, which
+  // alone was 4-5s of pure wait time on top of two Keepa+DFS calls
+  // per competitor (8 sequential network round-trips). The cache
+  // (competitor_brands_cache) means most candidates are already warm,
+  // so parallelism is mostly free; for fresh ones, we limit to 3
+  // concurrent so we don't slam Keepa's per-second limit.
+  const enriched = await Promise.all(
+    candidatePool.slice(0, 6).map(async (name) => {
+      try {
+        const snap = await getOrFetchCompetitorSnapshot(admin, name);
+        return snap;
+      } catch (e) {
+        console.warn("[v2/enrich] competitor snapshot failed:", name, e);
+        return null;
+      }
+    }),
+  );
+
   const out: CompetitorSnapshot[] = [];
-  for (const name of candidatePool) {
+  for (const snap of enriched) {
+    if (!snap) continue;
     if (out.length >= 3) break;
-    let snap: CompetitorSnapshot;
-    try {
-      snap = await getOrFetchCompetitorSnapshot(admin, name);
-    } catch (e) {
-      console.warn("[v2/enrich] competitor snapshot failed:", name, e);
-      continue;
-    }
     if (snap.enriched_asin_count < 2) {
       console.log(
-        `[v2/enrich] competitor "${name}" dropped — only ${snap.enriched_asin_count} ASIN(s) enriched`,
+        `[v2/enrich] competitor "${snap.brand}" dropped — only ${snap.enriched_asin_count} ASIN(s) enriched`,
       );
       continue;
     }
     out.push(snap);
-    // Throttle between competitors so we don't slam Keepa's per-second
-    // limit. Two ~50-token calls per competitor is comfortable at 1Hz.
-    await new Promise((r) => setTimeout(r, 1500));
   }
   return out;
 }
@@ -563,37 +586,46 @@ async function getOrFetchCompetitorSnapshot(
   //   • DataForSEO related_keywords → branded_search_volume + SERP rank
   // Cached cross-user for 14 days (keyed by `__v` so a future shape
   // change automatically invalidates).
-  let branded_search_volume: number | null = null;
-  let organic_serp_rank: number | null = null;
-  try {
-    const kws = await fetchBrandKeywords(admin, competitorBrand);
-    branded_search_volume = kws
-      .filter((k) =>
-        k.keyword.toLowerCase().includes(competitorBrand.toLowerCase()),
-      )
-      .reduce((a, k) => a + (k.search_volume ?? 0), 0);
-    if (!branded_search_volume) branded_search_volume = null;
+  // Phase 22 — Run the DFS path (keywords + optional SERP rank) and the
+  // Keepa path (brand search + /product) in parallel. They were strictly
+  // serial before, which doubled the wall-clock cost per competitor on
+  // a cold cache.
+  const dfsP = (async () => {
+    let branded_search_volume: number | null = null;
+    let organic_serp_rank: number | null = null;
+    try {
+      const kws = await fetchBrandKeywords(admin, competitorBrand);
+      branded_search_volume = kws
+        .filter((k) =>
+          k.keyword.toLowerCase().includes(competitorBrand.toLowerCase()),
+        )
+        .reduce((a, k) => a + (k.search_volume ?? 0), 0);
+      if (!branded_search_volume) branded_search_volume = null;
 
-    // Top branded keyword's first product brand match position.
-    const topKw = kws
-      .slice()
-      .sort((a, b) => (b.search_volume ?? 0) - (a.search_volume ?? 0))[0];
-    if (topKw?.keyword) {
-      const products = await fetchBrandSerp(admin, topKw.keyword);
-      const hit = products.find((p) =>
-        (p.brand ?? "").toLowerCase().includes(competitorBrand.toLowerCase()),
-      );
-      organic_serp_rank = hit?.position ?? null;
+      const topKw = kws
+        .slice()
+        .sort((a, b) => (b.search_volume ?? 0) - (a.search_volume ?? 0))[0];
+      if (topKw?.keyword) {
+        const products = await fetchBrandSerp(admin, topKw.keyword);
+        const hit = products.find((p) =>
+          (p.brand ?? "").toLowerCase().includes(competitorBrand.toLowerCase()),
+        );
+        organic_serp_rank = hit?.position ?? null;
+      }
+    } catch {
+      // soft fail
     }
-  } catch {
-    // soft fail
-  }
+    return { branded_search_volume, organic_serp_rank };
+  })();
 
-  let unique_seller_count: number | null = null;
-  let brand_controlled_pct: number | null = null;
-  let listing_health: number | null = null;
-  let enriched_asin_count = 0;
-  if (isKeepaConfigured()) {
+  const keepaP = (async () => {
+    let unique_seller_count: number | null = null;
+    let brand_controlled_pct: number | null = null;
+    let listing_health: number | null = null;
+    let enriched_asin_count = 0;
+    if (!isKeepaConfigured()) {
+      return { unique_seller_count, brand_controlled_pct, listing_health, enriched_asin_count };
+    }
     try {
       const search = await searchProductsByBrand(competitorBrand, 10);
       if (search.asins.length) {
@@ -630,16 +662,19 @@ async function getOrFetchCompetitorSnapshot(
     } catch (e) {
       console.warn("[v2/enrich] competitor Keepa lookup failed:", competitorBrand, e);
     }
-  }
+    return { unique_seller_count, brand_controlled_pct, listing_health, enriched_asin_count };
+  })();
+
+  const [dfsRes, keepaRes] = await Promise.all([dfsP, keepaP]);
 
   const snapshot: CompetitorSnapshot = {
     brand: competitorBrand,
-    unique_seller_count,
-    brand_controlled_pct,
-    branded_search_volume,
-    organic_serp_rank,
-    listing_health,
-    enriched_asin_count,
+    unique_seller_count: keepaRes.unique_seller_count,
+    brand_controlled_pct: keepaRes.brand_controlled_pct,
+    branded_search_volume: dfsRes.branded_search_volume,
+    organic_serp_rank: dfsRes.organic_serp_rank,
+    listing_health: keepaRes.listing_health,
+    enriched_asin_count: keepaRes.enriched_asin_count,
   };
 
   try {

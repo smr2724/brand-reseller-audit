@@ -8,8 +8,14 @@
  *
  * Auth: HTTP Basic with login:password (base64-encoded in Authorization header).
  */
+import { fetchWithTimeout } from "@/lib/util/timing";
 
 const BASE = "https://api.dataforseo.com";
+
+// Phase 22 — Per-request HTTP deadline. SERP polling has its own outer
+// timeout, but each task_get poll still needs a deadline so a hung
+// connection can't burn the whole 300s function budget.
+const DFS_HTTP_TIMEOUT_MS = 30_000;
 
 function authHeader() {
   const login = process.env.DATAFORSEO_LOGIN;
@@ -26,7 +32,7 @@ export function isDataForSEOConfigured() {
 async function dfs<T = any>(path: string, body?: any, method: "GET" | "POST" = "POST"): Promise<T> {
   const auth = authHeader();
   if (!auth) throw new Error("DataForSEO credentials missing");
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
     method,
     headers: {
       "Authorization": auth,
@@ -34,6 +40,8 @@ async function dfs<T = any>(path: string, body?: any, method: "GET" | "POST" = "
     },
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store",
+    timeoutMs: DFS_HTTP_TIMEOUT_MS,
+    label: `dfs${path}`,
   });
   if (!res.ok) {
     const text = await res.text();
@@ -153,12 +161,14 @@ export async function amazonSerpLive(keyword: string, opts: { depth?: number; lo
     throw new Error(`DataForSEO task_post failed: ${taskStatus} ${task?.status_message ?? "no id"}`);
   }
 
-  // 2. Poll for completion (max ~60s)
-  const maxAttempts = 30;
+  // 2. Poll for completion (Phase 22 — capped at ~25s instead of ~60s
+  // so the whole SERP fetch fits inside a tight per-stage budget. With
+  // priority=2 most tasks come back on the first or second poll anyway.)
+  const maxAttempts = 12;
   const intervalMs = 2000;
   let result: any = null;
   for (let i = 0; i < maxAttempts; i++) {
-    await sleep(i === 0 ? 4000 : intervalMs);
+    await sleep(i === 0 ? 2000 : intervalMs);
     try {
       const get = await dfs<any>(`/v3/merchant/amazon/products/task_get/advanced/${taskId}`, null, "GET");
       const t = get?.tasks?.[0];

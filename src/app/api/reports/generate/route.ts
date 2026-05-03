@@ -7,10 +7,11 @@ import { waitUntil } from "@vercel/functions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// Vercel Pro allows up to 300s on the Node runtime. Report generation
-// (Keepa lookup + LLM narrative + PDF render + Supabase storage upload) can
-// take 60-120s on cold paths, so 60s was too tight.
-export const maxDuration = 300;
+// Phase 22 — Bumped 300 → 800 (Vercel Pro Fluid Compute ceiling). The
+// audit-generation pipeline runs the full Keepa + DataForSEO + LLM
+// narrative + PDF render path; even with parallelism + timeouts, cold
+// runs need real headroom while we keep iterating on the stage budgets.
+export const maxDuration = 800;
 
 interface Body {
   brand_id?: string;

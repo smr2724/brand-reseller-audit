@@ -3,8 +3,13 @@
  * Token-conscious: checks Supabase product cache freshness (last_enriched_at)
  * before calling Keepa.
  */
+import { fetchWithTimeout } from "@/lib/util/timing";
 
 const BASE = "https://api.keepa.com";
+
+// Phase 22 — Per-request HTTP deadline. A single hung Keepa response was
+// silently consuming the entire 300s function budget; cap each call at 30s.
+const KEEPA_HTTP_TIMEOUT_MS = 30_000;
 
 export function isKeepaConfigured() {
   return !!process.env.KEEPA_API_KEY;
@@ -23,7 +28,11 @@ export async function testKeepa() {
   const key = process.env.KEEPA_API_KEY;
   if (!key) return { ok: false, error: "KEEPA_API_KEY missing" };
   try {
-    const res = await fetch(`${BASE}/token?key=${key}`, { cache: "no-store" });
+    const res = await fetchWithTimeout(`${BASE}/token?key=${key}`, {
+      cache: "no-store",
+      timeoutMs: KEEPA_HTTP_TIMEOUT_MS,
+      label: "keepa/token",
+    });
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     const data = await res.json();
     return {
@@ -61,7 +70,11 @@ export async function keepaEnrich(asins: string[]): Promise<Record<string, Keepa
   const clean = Array.from(new Set(asins.filter(a => a && /^[A-Z0-9]{10}$/i.test(a)))).slice(0, 100);
   if (!clean.length) return out;
   const url = `${BASE}/product?key=${key}&domain=${DOMAIN_ID}&asin=${clean.join(",")}&stats=180`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetchWithTimeout(url, {
+    cache: "no-store",
+    timeoutMs: KEEPA_HTTP_TIMEOUT_MS,
+    label: "keepa/product(legacy)",
+  });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Keepa ${res.status}: ${text.slice(0, 200)}`);
@@ -185,9 +198,15 @@ async function keepaFetch(path: string, params: Record<string, string | number>)
   const url = `${BASE}${path}?${qs.toString()}`;
   let lastErr = "";
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetchWithTimeout(url, {
+      cache: "no-store",
+      timeoutMs: KEEPA_HTTP_TIMEOUT_MS,
+      label: `keepa${path}`,
+    });
     if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
-      const backoff = Math.min(60_000, 1000 * Math.pow(2, attempt));
+      // Phase 22 — was up to 60s of backoff between retries; that alone
+      // could blow the budget. Cap at 5s and only retry once on 5xx/429.
+      const backoff = Math.min(5_000, 1000 * (attempt + 1));
       lastErr = `HTTP ${res.status}`;
       await sleep(backoff);
       continue;
@@ -207,7 +226,11 @@ export async function getKeepaTokenStatus(force = false): Promise<KeepaTokenStat
   }
   const key = process.env.KEEPA_API_KEY;
   if (!key) throw new Error("KEEPA_API_KEY missing");
-  const res = await fetch(`${BASE}/token?key=${key}`, { cache: "no-store" });
+  const res = await fetchWithTimeout(`${BASE}/token?key=${key}`, {
+    cache: "no-store",
+    timeoutMs: KEEPA_HTTP_TIMEOUT_MS,
+    label: "keepa/token",
+  });
   if (!res.ok) throw new Error(`Keepa token HTTP ${res.status}`);
   const data = await res.json();
   const v: KeepaTokenStatus = {
@@ -220,18 +243,20 @@ export async function getKeepaTokenStatus(force = false): Promise<KeepaTokenStat
 }
 
 async function ensureTokens(min = 20) {
-  // Loop until we have enough tokens. We give callers up to
-  // 30 minutes of total wait per call so a backfill against a low-tier
-  // Keepa account (refillRate 5/min) can grind through ~150 tokens of
-  // catchup. Production /generate runs that take this long will exceed
-  // upstream timeouts on their own; that's the same failure path as
-  // before, just routed through the timeout instead of a hard error.
+  // Phase 22 — Cap the wait budget at 30s. The previous 30-minute budget
+  // was meant to support batch backfills, but a Vercel function audit
+  // can't afford anywhere near that — a low-token Keepa account would
+  // silently consume the entire 300s function budget in token waits and
+  // never start the actual /product fetch. With the new cap, we either
+  // proceed with whatever tokens are available or surface the throttle
+  // upstream where it can be handled (and the audit-generation budget
+  // can go to LLM/PDF work instead).
   const startedAt = Date.now();
-  const TOTAL_BUDGET_MS = 1_800_000; // 30 minutes
+  const TOTAL_BUDGET_MS = 30_000;
   let s = await getKeepaTokenStatus(true);
   while (s.tokens_left < min) {
     if (Date.now() - startedAt > TOTAL_BUDGET_MS) return s;
-    const wait = Math.min(60_000, Math.max(2_000, s.refill_in_ms || 30_000));
+    const wait = Math.min(10_000, Math.max(2_000, s.refill_in_ms || 5_000));
     await sleep(wait);
     s = await getKeepaTokenStatus(true);
   }
@@ -702,9 +727,11 @@ export async function resolveSellerInfo(
     const url = `${BASE}/seller?key=${key}&domain=${DOMAIN_ID}&seller=${chunk.join(",")}`;
     let json: any = null;
     try {
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         cache: "no-store",
         headers: { "Accept-Encoding": "gzip" },
+        timeoutMs: KEEPA_HTTP_TIMEOUT_MS,
+        label: "keepa/seller",
       });
       if (!res.ok) {
         // soft fail — leave these IDs unresolved

@@ -16,7 +16,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const fetchCache = "force-no-store";
 export const revalidate = 0;
-export const maxDuration = 300;
+// Phase 22 — Bumped from 300 → 800 (Vercel Pro Fluid Compute ceiling)
+// to give the audit-generation pipeline real headroom while we tighten
+// the per-stage budgets. The Phase 21 cron stays at 300 (with the 10-min
+// stuck threshold + 5-min sweep that's plenty).
+export const maxDuration = 800;
 
 function authorize(req: Request): boolean {
   const auth = req.headers.get("authorization") ?? "";

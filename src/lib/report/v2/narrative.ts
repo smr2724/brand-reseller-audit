@@ -39,7 +39,11 @@ async function callJsonTool<T>(
   client: OpenAI,
   p: ToolSchemaParam,
 ): Promise<T | null> {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Phase 22 — Single attempt; the OpenAI client already retries once
+  // internally on transient errors. A second app-level attempt was
+  // adding up to 1.5s of sleep + a full second LLM call per failed
+  // section, and with eight sections in parallel that's a real budget hit.
+  for (let attempt = 0; attempt < 1; attempt++) {
     try {
       const resp = await client.chat.completions.create({
         model: p.model,
@@ -74,11 +78,8 @@ async function callJsonTool<T>(
       if (!args) throw new Error("no tool call returned");
       return JSON.parse(args) as T;
     } catch (e) {
-      if (attempt === 1) {
-        console.warn(`[v2/narrative] section '${p.toolName}' failed:`, e);
-        return null;
-      }
-      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      console.warn(`[v2/narrative] section '${p.toolName}' failed:`, e);
+      return null;
     }
   }
   return null;
@@ -86,7 +87,15 @@ async function callJsonTool<T>(
 
 function getClient(): OpenAI | null {
   if (!process.env.OPENAI_API_KEY) return null;
-  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  // Phase 22 — Hard 45s deadline + at-most-1 retry per section so a
+  // single slow section can't blow the function budget. Eight sections
+  // run in Promise.all, so a worst-case path is bounded by the slowest
+  // section, not by the sum.
+  return new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+    timeout: 45_000,
+    maxRetries: 1,
+  });
 }
 
 const MODEL = process.env.OPENAI_MODEL_REPORTS || "gpt-4o-mini";
