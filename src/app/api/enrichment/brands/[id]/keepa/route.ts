@@ -21,6 +21,15 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   if (!brand) return NextResponse.json({ error: "not found" }, { status: 404 });
 
+  // Phase 30 — keep enrichment_state in sync with the manual "Re-run
+  // Keepa" button so the recovery cron's filter (pending|failed) doesn't
+  // pick this brand back up mid-run.
+  await supabase
+    .from("brands")
+    .update({ enrichment_state: "enriching", updated_at: new Date().toISOString() })
+    .eq("id", brand.id)
+    .eq("user_id", user.id);
+
   try {
     const summary = await enrichBrandWithKeepa(supabase as any, {
       brand_id: brand.id,
@@ -28,8 +37,22 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
       user_id: user.id,
       existing_disqualifier_tags: brand.disqualifier_tags ?? [],
     });
+    await supabase
+      .from("brands")
+      .update({
+        enrichment_state:
+          summary.enrichment_error || summary.asin_count === 0 ? "failed" : "enriched",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", brand.id)
+      .eq("user_id", user.id);
     return NextResponse.json({ ok: true, summary });
   } catch (e: any) {
+    await supabase
+      .from("brands")
+      .update({ enrichment_state: "failed", updated_at: new Date().toISOString() })
+      .eq("id", brand.id)
+      .eq("user_id", user.id);
     return NextResponse.json({ error: String(e?.message ?? e) }, { status: 500 });
   }
 }

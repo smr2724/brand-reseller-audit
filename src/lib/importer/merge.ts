@@ -96,6 +96,12 @@ export async function mergeBrands(
         user_id: userId,
         name: p.name,
         name_normalized: norm,
+        // Phase 30 — Bulk imports are a "library to research later," not
+        // an active scan list. `deferred` keeps the recovery cron from
+        // hammering Keepa on 100s of rows the user never asked to enrich.
+        // The brand-detail page shows a "Run scan" button to flip it on
+        // demand.
+        enrichment_state: "deferred",
       };
       for (const [k, v] of Object.entries(fields)) {
         if (v !== null && v !== undefined && k !== "name") insertRow[k] = v;

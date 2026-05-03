@@ -111,6 +111,15 @@ export async function POST(req: Request) {
   // Run enrichment synchronously — Phase 6.7 hotfix lesson: no
   // fire-and-forget. The client expects the brand to be enriched
   // before redirecting to the detail page.
+  // Phase 30 — Picker-created brands start in `enrichment_state='pending'`
+  // (column default). We flip to `enriching` for the duration, then to
+  // `enriched` on success or `failed` on a Keepa error. The recovery cron
+  // is keyed off this column too.
+  await admin
+    .from("brands")
+    .update({ enrichment_state: "enriching", updated_at: new Date().toISOString() })
+    .eq("id", brandId);
+
   let keepaError: string | null = null;
   let keepaAsinCount = 0;
   let dfsError: string | null = null;
@@ -125,6 +134,14 @@ export async function POST(req: Request) {
   } catch (e) {
     keepaError = e instanceof Error ? e.message : String(e);
   }
+
+  await admin
+    .from("brands")
+    .update({
+      enrichment_state: keepaError != null || keepaAsinCount === 0 ? "failed" : "enriched",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", brandId);
 
   try {
     const snap = await enrichBrandWithDataForSeo(admin, {

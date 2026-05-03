@@ -53,6 +53,9 @@ interface Brand {
   confirmed_ttm_revenue_dollars?: number | null;
   confirmed_ttm_source?: string | null;
   confirmed_ttm_set_at?: string | null;
+  // Phase 30 — enrichment lifecycle. Bulk-imported brands land in
+  // `deferred` and require a manual "Run scan" click to enrich.
+  enrichment_state?: "pending" | "queued" | "enriching" | "enriched" | "failed" | "deferred" | null;
 }
 
 interface DfsKeywordRow {
@@ -109,6 +112,33 @@ export default function BrandDetailClient({
   const [dfsRunning, setDfsRunning] = useState(false);
   const [dfsErr, setDfsErr] = useState<string | null>(null);
   const [primaryContact, setPrimaryContact] = useState<{ id: string; full_name: string; first_name: string | null; title: string | null } | null>(null);
+  // Phase 30 — "Run scan" button for deferred (bulk-imported) brands and
+  // "Retry scan" for failed ones. Mirrors the report-generation polling
+  // UX: synchronous POST, spinner while we wait, refresh on success.
+  const [scanRunning, setScanRunning] = useState(false);
+  const [scanErr, setScanErr] = useState<string | null>(null);
+
+  async function runScan() {
+    setScanRunning(true);
+    setScanErr(null);
+    try {
+      const res = await fetch(`/api/brands/${brand.id}/enrich`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setScanErr(data?.error ?? `HTTP ${res.status}`);
+      } else {
+        router.refresh();
+      }
+    } catch (e) {
+      setScanErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setScanRunning(false);
+    }
+  }
 
   async function runEnrichment() {
     setEnriching(true);
@@ -208,6 +238,14 @@ export default function BrandDetailClient({
       </div>
 
       {msg && <div className="card-soft p-2 text-sm mb-4">{msg}</div>}
+
+      <ScanBanner
+        state={brand.enrichment_state ?? null}
+        lastError={brand.enrichment_error ?? null}
+        running={scanRunning}
+        err={scanErr}
+        onRun={runScan}
+      />
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card title="SmartScout signals">
@@ -837,6 +875,73 @@ function ReportStatusBadge({ status }: { status: string }) {
   };
   const cls = styles[status] ?? "bg-[var(--bg-3)] text-[var(--text-muted)] border-[var(--border)]";
   return <span className={`px-2 py-1 rounded text-[10px] border ${cls}`}>{status}</span>;
+}
+
+function ScanBanner({
+  state,
+  lastError,
+  running,
+  err,
+  onRun,
+}: {
+  state: Brand["enrichment_state"];
+  lastError: string | null;
+  running: boolean;
+  err: string | null;
+  onRun: () => void;
+}) {
+  // Phase 30 — Bulk-imported brands sit in `deferred` until the user opts
+  // in. Show a yellow banner with a Run scan button. Failed scans get a
+  // red banner + Retry button. While we're enriching, we mirror the
+  // report-generation polling UX with a spinner.
+  if (running || state === "enriching") {
+    return (
+      <div
+        className="mb-4 p-3 rounded border flex items-center gap-3"
+        style={{ background: "#1a2233", borderColor: "#2c3a55", color: "#bcd0ee" }}
+      >
+        <span
+          className="inline-block w-3 h-3 rounded-full border-2 border-[#bcd0ee] border-t-transparent animate-spin"
+          aria-hidden
+        />
+        <div className="text-sm">Scanning… (this takes 30–90s)</div>
+      </div>
+    );
+  }
+  if (state === "deferred") {
+    return (
+      <div
+        className="mb-4 p-3 rounded border flex items-start justify-between gap-3 flex-wrap"
+        style={{ background: "#2a2410", borderColor: "#4a4020", color: "#fde68a" }}
+      >
+        <div className="text-sm">
+          This brand hasn&rsquo;t been scanned yet. Click &ldquo;Run scan&rdquo; to enrich with Amazon data.
+        </div>
+        <button className="btn btn-primary text-xs" onClick={onRun} disabled={running}>
+          Run scan
+        </button>
+        {err && <div className="text-xs basis-full" style={{ color: "#f87171" }}>{err}</div>}
+      </div>
+    );
+  }
+  if (state === "failed") {
+    return (
+      <div
+        className="mb-4 p-3 rounded border flex items-start justify-between gap-3 flex-wrap"
+        style={{ background: "#2a1415", borderColor: "#4a1e21", color: "#f87171" }}
+      >
+        <div className="text-sm">
+          <div className="font-medium">Last scan failed</div>
+          {lastError && <div className="text-xs mt-1 opacity-90">{lastError}</div>}
+        </div>
+        <button className="btn btn-primary text-xs" onClick={onRun} disabled={running}>
+          Retry scan
+        </button>
+        {err && <div className="text-xs basis-full">{err}</div>}
+      </div>
+    );
+  }
+  return null;
 }
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
