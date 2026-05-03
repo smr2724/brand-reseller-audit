@@ -18,12 +18,20 @@ export const revalidate = 0;
 export const maxDuration = 300;
 
 function authorize(req: Request): boolean {
-  const expected = process.env.CRON_SECRET;
-  if (!expected) return false;
   const auth = req.headers.get("authorization") ?? "";
-  if (auth === `Bearer ${expected}`) return true;
   const cronHeader = req.headers.get("x-vercel-cron-signature");
-  if (cronHeader && cronHeader === expected) return true;
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret) {
+    if (auth === `Bearer ${cronSecret}`) return true;
+    if (cronHeader && cronHeader === cronSecret) return true;
+  }
+  // Phase 21 stuck-recovery: also accept the service-role key as a bearer.
+  // Anyone holding it already has full DB access via PostgREST, so this is
+  // not an escalation — it just lets us trigger generation from a script
+  // when CRON_SECRET isn't reachable. Remove with the rest of this admin
+  // route once the cron has had a couple of clean recovery cycles.
+  const sr = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (sr && auth === `Bearer ${sr}`) return true;
   return false;
 }
 
