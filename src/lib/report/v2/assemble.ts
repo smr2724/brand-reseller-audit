@@ -32,6 +32,7 @@ import {
 import { withTiming } from "@/lib/util/timing";
 import {
   DEFAULT_ASSUMPTIONS,
+  type DiyStep,
   type NarrativeCompetitorBenchmark,
   type NarrativeCxAudit,
   type NarrativeMath,
@@ -39,7 +40,54 @@ import {
   type NarrativeResellerReality,
   type NarrativeV2,
   type ReportAssumptions,
+  type ReportMode,
 } from "./types";
+
+/**
+ * Phase 24 — Recoverable-revenue floor for the high_fit pitch. Below this
+ * we render `diy_fit` mode (friendly self-serve advice) instead of the
+ * full RCG capture plan, because the residual reseller margin isn't
+ * enough to justify RCG's fees. Configurable via env so Steve can tune
+ * without a deploy.
+ */
+function diyFitMinRecoverableRevenue(): number {
+  const raw = process.env.RCG_FIT_MIN_RECOVERABLE_REVENUE;
+  if (!raw) return 500_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 500_000;
+}
+
+/**
+ * Phase 24 — Decide whether the brand is a DIY-fit (running a tight
+ * channel already; residual recoverable margin too small to justify RCG
+ * fees). Returns the chosen mode + the inputs that drove the decision so
+ * the caller can persist them on narrative_json for auditability.
+ */
+function decideReportMode(args: {
+  trailing12: number | null;
+  brandControlledPct: number | null;
+}): {
+  mode: ReportMode;
+  recoverable_revenue_dollars: number | null;
+  brand_controlled_pct: number | null;
+} {
+  const { trailing12, brandControlledPct } = args;
+  let recoverable: number | null = null;
+  if (trailing12 != null && brandControlledPct != null) {
+    const pct = Math.max(0, Math.min(1, brandControlledPct));
+    recoverable = Math.max(0, trailing12 * (1 - pct));
+  }
+  const tightChannel =
+    brandControlledPct != null && brandControlledPct >= 0.5;
+  const lowRecoverable =
+    recoverable != null && recoverable < diyFitMinRecoverableRevenue();
+  const mode: ReportMode = tightChannel && lowRecoverable ? "diy_fit" : "high_fit";
+  return {
+    mode,
+    recoverable_revenue_dollars: recoverable,
+    brand_controlled_pct: brandControlledPct,
+  };
+}
 
 export interface AssembleInput {
   brand: BrandForReport;
@@ -148,6 +196,18 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
   const annualLeak = deltaLine?.value ?? null;
   const exitLift = exitLine?.value ?? null;
 
+  // Phase 24 — pick high_fit vs diy_fit. We base the decision on the
+  // brand-controlled share (already in the bundle) and trailing-12 mo
+  // revenue (the same number that drives the math). When we land in
+  // diy_fit we still compute math/plan above (cheap), but the renderer
+  // suppresses the math + capture-plan + WHY-RCG sections in favor of a
+  // friendly 3-step self-serve list. The cover headline + hero numbers
+  // are also reframed.
+  const fitDecision = decideReportMode({
+    trailing12,
+    brandControlledPct: bundle.keepa.brand_controlled_pct ?? null,
+  });
+
   // 3. LLM section calls — fanned out in parallel where possible.
   // Phase 22 — wrap each in withTiming so we get one log line per
   // section per scan, and they all run concurrently inside Promise.all.
@@ -232,6 +292,17 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     : mathNotes;
   const finalMath: NarrativeMath = { ...math, notes: finalNotes };
 
+  // Phase 24 — DIY-mode reframes the cover: the headline becomes a
+  // congratulatory "you're already running a tight channel" line and the
+  // hero numbers collapse into a single percent. We still keep the
+  // delta_profit / exit_lift values on the narrative for legacy/PDF
+  // consumers, but the renderer suppresses them in DIY mode.
+  const isDiy = fitDecision.mode === "diy_fit";
+  const diyHeadline = isDiy
+    ? renderDiyCoverHeadline(brand.name, fitDecision.brand_controlled_pct)
+    : null;
+  const diySteps = isDiy ? buildDiySteps(brand.name) : null;
+
   // 5. Top-level NarrativeV2.
   const narrative: NarrativeV2 = {
     version: 2,
@@ -239,9 +310,15 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     brand_id: brand.id,
     brand_name: brand.name,
 
+    report_mode: fitDecision.mode,
+    recoverable_revenue_dollars: fitDecision.recoverable_revenue_dollars,
+    brand_controlled_pct: fitDecision.brand_controlled_pct,
+
     cover: {
-      headline: coverHeadline,
-      kpis: buildCoverKpis(annualLeak, exitLift),
+      headline: diyHeadline ?? coverHeadline,
+      kpis: isDiy
+        ? buildDiyCoverKpis(fitDecision.brand_controlled_pct)
+        : buildCoverKpis(annualLeak, exitLift),
       delta_profit: annualLeak,
       exit_lift: exitLift,
     },
@@ -261,10 +338,15 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
 
     why_rcg: buildWhyRcg(),
 
+    diy_steps: diySteps ?? undefined,
+
     cta: {
-      headline: `Book a strategy call for ${brand.name}.`,
+      // DIY mode keeps a soft CTA at the bottom only — no big sales push.
+      headline: isDiy
+        ? `When you're ready to scale, ${brand.name}, we're a click away.`
+        : `Book a strategy call for ${brand.name}.`,
       primary_cta_url: calendlyUrl,
-      primary_cta_label: "Book a strategy call",
+      primary_cta_label: isDiy ? "Book a free strategy call" : "Book a strategy call",
       secondary_email: contactEmail,
       secondary_phone: null,
     },
@@ -357,6 +439,70 @@ function buildWhyRcg(): NarrativeV2["why_rcg"] {
 function money(n: number | null): string {
   if (n == null) return "— not measured";
   return `$${Math.round(Number(n)).toLocaleString("en-US")}`;
+}
+
+// --------------------------------------------------------------------
+// Phase 24 — DIY-mode copy helpers
+// --------------------------------------------------------------------
+
+function pctText(pct: number | null): string {
+  if (pct == null) return "most";
+  return `${Math.round(Math.max(0, Math.min(1, pct)) * 100)}%`;
+}
+
+function leakageText(pct: number | null): string {
+  if (pct == null) return "the residual";
+  const leak = 1 - Math.max(0, Math.min(1, pct));
+  return `${Math.round(leak * 100)}%`;
+}
+
+function renderDiyCoverHeadline(
+  brandName: string,
+  brandControlledPct: number | null,
+): string {
+  return `${brandName}, you're already running a tight Amazon channel — here's how to seal the last ${leakageText(brandControlledPct)} of reseller leakage yourself.`;
+}
+
+function buildDiyCoverKpis(
+  brandControlledPct: number | null,
+): { label: string; value: string; sub: string | null }[] {
+  const pct = pctText(brandControlledPct);
+  return [
+    {
+      label: "Brand-controlled share of your Amazon channel",
+      value: pct,
+      sub: "Buy-box ownership across your top SKUs · Keepa",
+    },
+  ];
+}
+
+function buildDiySteps(brandName: string): DiyStep[] {
+  return [
+    {
+      number: 1,
+      title: "Send a polite request to the reseller asking them to stop selling.",
+      body:
+        `Most small unauthorized resellers — especially LLCs that look like ${brandName}'s own family or DBA — will comply when contacted directly. ` +
+        `A short note works: "Hi, we've noticed you're listing our products on Amazon. We don't have a wholesale agreement on file — could you confirm your source so we can make sure our distribution is clean?" ` +
+        `Give them 14 days.`,
+    },
+    {
+      number: 2,
+      title: "If they don't comply, file an Amazon Brand Registry complaint.",
+      body:
+        "Brand Registry gives you takedown power for unauthorized listings and counterfeit claims. " +
+        "It's the lever that converts a polite ask into an enforced outcome. " +
+        "Most resellers de-list within a week of the first complaint hitting their account.",
+    },
+    {
+      number: 3,
+      title: "Tighten distribution with your existing wholesale customers.",
+      body:
+        "Add a Minimum Advertised Price (MAP) policy and no-resale clauses for new accounts. " +
+        "For existing accounts, send a one-page distribution policy update (MAP, no Amazon resale, no transshipping) and ask for written acknowledgment. " +
+        "This is what stops the next reseller showing up six months from now.",
+    },
+  ];
 }
 
 function countNonNull(xs: (number | null | undefined)[]): number {

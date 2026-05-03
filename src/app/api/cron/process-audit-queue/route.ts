@@ -367,20 +367,54 @@ async function processLead(
   }
 
   // ---- 7. Hybrid: also create an Outlook draft in Steve's mailbox ----
+  // Phase 24 — pull the report's narrative_json so we can branch the
+  // draft subject + body for diy_fit reports. The standard pitch subject
+  // ("Following up — <brand> Channel Ownership Audit") doesn't fit when
+  // the report itself is friendly DIY advice, not a sales pitch.
+  let reportMode: "high_fit" | "diy_fit" | "not_a_fit" | null = null;
+  try {
+    const { data: reportRow } = await admin
+      .from("reports")
+      .select("narrative_json")
+      .eq("id", reportId)
+      .maybeSingle();
+    const n = (reportRow?.narrative_json as { report_mode?: string } | null) ?? null;
+    if (n?.report_mode === "diy_fit" || n?.report_mode === "high_fit" || n?.report_mode === "not_a_fit") {
+      reportMode = n.report_mode;
+    }
+  } catch {
+    // soft fail — fall back to the high_fit subject below.
+  }
+
   const reportUrl = `${APP_BASE_URL}/r/${encodeURIComponent(finalReport.token)}`;
   const firstName = firstNameFromContact(lead.contact_name) ?? "there";
-  const draftHtml =
-    `<p>Hey ${escapeHtml(firstName)},</p>` +
-    `<p>Just sent over your Channel Ownership Audit for <strong>${escapeHtml(brandName)}</strong>.</p>` +
-    `<p><a href="${reportUrl}">${reportUrl}</a></p>` +
-    `<p>Worth 15 minutes to walk through what we found?</p>` +
-    `<p>— Steve</p>`;
+
+  const isDiyDraft = reportMode === "diy_fit";
+  const draftSubject = isDiyDraft
+    ? `Quick recommendations for your Amazon channel`
+    : `Following up — ${brandName} Channel Ownership Audit`;
+  const draftHtml = isDiyDraft
+    ? `<p>Hey ${escapeHtml(firstName)},</p>` +
+      `<p>Took a quick look at <strong>${escapeHtml(brandName)}</strong>'s Amazon channel — you're in much better shape than most brands we audit.</p>` +
+      `<p>Wrote up a short note with what we saw and three things you can do yourself to clean up the residual reseller share:</p>` +
+      `<p><a href="${reportUrl}">${reportUrl}</a></p>` +
+      `<p>No pitch attached — just thought it might be useful. Happy to chat any time if you want a second pair of eyes.</p>` +
+      `<p>— Steve</p>`
+    : `<p>Hey ${escapeHtml(firstName)},</p>` +
+      `<p>Just sent over your Channel Ownership Audit for <strong>${escapeHtml(brandName)}</strong>.</p>` +
+      `<p><a href="${reportUrl}">${reportUrl}</a></p>` +
+      `<p>Worth 15 minutes to walk through what we found?</p>` +
+      `<p>— Steve</p>`;
+  const draftText = isDiyDraft
+    ? `Hey ${firstName}, took a quick look at ${brandName}'s Amazon channel — you're in better shape than most brands we audit. Wrote up a short note with three things you can do yourself: ${reportUrl}\n\nNo pitch attached — just thought it might be useful.\n\n— Steve`
+    : `Hey ${firstName}, just sent over your Channel Ownership Audit for ${brandName}: ${reportUrl}\n\nWorth 15 minutes to walk through what we found?\n\n— Steve`;
+
   const draft = await createDraft({
     userId: ownerId,
     to: { address: lead.email, name: lead.contact_name ?? undefined },
-    subject: `Following up — ${brandName} Channel Ownership Audit`,
+    subject: draftSubject,
     html: draftHtml,
-    text: `Hey ${firstName}, just sent over your Channel Ownership Audit for ${brandName}: ${reportUrl}\n\nWorth 15 minutes to walk through what we found?\n\n— Steve`,
+    text: draftText,
   });
 
   let outlookDraftId: string | null = null;

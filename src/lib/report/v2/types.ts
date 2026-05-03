@@ -6,11 +6,41 @@
  * `narrative_json.version === 2`.
  */
 
+/**
+ * Phase 24 — Report fit modes.
+ *
+ *   high_fit  — current default. Full RCG-pitch report (capture plan,
+ *               WHY RCG callouts, strategy-call CTA).
+ *   diy_fit   — friendly DIY advice. Triggered when recoverable revenue
+ *               < RCG_FIT_MIN_RECOVERABLE_REVENUE (default $500k) AND
+ *               brand_controlled_pct ≥ 50% AND no other disqualifier.
+ *               Brand already runs a tight channel; pitching RCG fees
+ *               wastes both parties' time. We give them three concrete
+ *               steps to wrap up the residual reseller share themselves.
+ *   not_a_fit — Phase 23 Amazon-1P disqualifier. Persisted as
+ *               `reports.status = 'not_a_fit'` (not surfaced in
+ *               narrative.report_mode — that state has its own narrative
+ *               kind). Listed here for completeness only.
+ */
+export type ReportMode = "high_fit" | "diy_fit" | "not_a_fit";
+
 export interface NarrativeV2 {
   version: 2;
   generated_at: string;
   brand_id: string;
   brand_name: string;
+
+  /** Phase 24 — render mode. Older reports omit this and default to
+   * `high_fit`. */
+  report_mode?: ReportMode;
+  /** Phase 24 — revenue × (1 − brand_controlled_pct). Persisted so the
+   * mode decision is auditable from narrative_json alone. Null when we
+   * couldn't compute it (no revenue, or no classification). */
+  recoverable_revenue_dollars?: number | null;
+  /** Phase 24 — copy of bundle.keepa.brand_controlled_pct at the time of
+   * the report, for the same auditability reason. Null when we couldn't
+   * classify. */
+  brand_controlled_pct?: number | null;
 
   cover: NarrativeCover;
   reseller_reality: NarrativeResellerReality;
@@ -22,6 +52,11 @@ export interface NarrativeV2 {
   why_rcg: NarrativeWhyRcg;
   cta: NarrativeCta;
 
+  /** Phase 24 — diy_fit-only: the three self-serve steps that replace
+   * capture plan + WHY RCG callouts + math in DIY mode. Omitted on
+   * high_fit reports. */
+  diy_steps?: DiyStep[];
+
   data_sources: {
     keepa: boolean;
     keepa_freshness: string | null;
@@ -30,6 +65,12 @@ export interface NarrativeV2 {
     reseller_dossier: boolean;
     competitor_benchmark: boolean;
   };
+}
+
+export interface DiyStep {
+  number: number;
+  title: string;
+  body: string;
 }
 
 export interface NarrativeCover {

@@ -17,6 +17,7 @@ import Link from "next/link";
 import type { BrandEnrichmentBundle } from "@/lib/enrichment";
 import type {
   CxAuditAsinScore,
+  DiyStep,
   MathLine,
   NarrativeV2,
   PlanStep,
@@ -59,6 +60,10 @@ function strategyCallHref(narrative: NarrativeV2, brandName: string): string {
 export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, assumptions }: PublicReportV2Props) {
   const callHref = strategyCallHref(narrative, brand.name);
 
+  // Phase 24 — Report mode controls which sections render. Older reports
+  // omit `report_mode`; treat as the default high_fit pitch.
+  const isDiy = narrative.report_mode === "diy_fit";
+
   // Pull the seed values for the editable math input panel out of
   // narrative_json + the persisted ReportAssumptions row. Anything
   // missing falls back to DEFAULT_ASSUMPTIONS.
@@ -81,25 +86,39 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
   return (
     <div className="rv2">
       <V2Styles />
-      <Header brand={brand} pdfUrl={pdfUrl} narrative={narrative} />
-      <SideNav />
+      <Header brand={brand} pdfUrl={pdfUrl} narrative={narrative} isDiy={isDiy} />
+      <SideNav isDiy={isDiy} />
 
       <main className="rv2-main">
-        <SectionCover narrative={narrative} brand={brand} callHref={callHref} />
+        {isDiy ? (
+          <SectionDiyCover narrative={narrative} brand={brand} />
+        ) : (
+          <SectionCover narrative={narrative} brand={brand} callHref={callHref} />
+        )}
         <SectionResellerReality narrative={narrative} bundle={bundle} />
         <SectionResellerDossier narrative={narrative} />
         <SectionTopProducts narrative={narrative} />
-        <LegionMathSection
-          reportToken={reportToken}
-          initialRevenue={initialRevenue}
-          initialAssumptions={initialAssumptions}
-          revenueSource={revenueSource}
-          revenueBadge={revenueBadge ?? null}
-          revenueFootnote={extractRevenueFootnote(narrative.math.notes ?? "")}
-          notes={cleanMathNotes(narrative.math.notes ?? "") || null}
-        />
-        <SectionPlan narrative={narrative} />
-        <SectionFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
+        {isDiy ? (
+          <SectionDiySteps narrative={narrative} />
+        ) : (
+          <>
+            <LegionMathSection
+              reportToken={reportToken}
+              initialRevenue={initialRevenue}
+              initialAssumptions={initialAssumptions}
+              revenueSource={revenueSource}
+              revenueBadge={revenueBadge ?? null}
+              revenueFootnote={extractRevenueFootnote(narrative.math.notes ?? "")}
+              notes={cleanMathNotes(narrative.math.notes ?? "") || null}
+            />
+            <SectionPlan narrative={narrative} />
+          </>
+        )}
+        {isDiy ? (
+          <SectionDiyFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
+        ) : (
+          <SectionFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
+        )}
       </main>
 
       <footer className="rv2-footer">
@@ -128,11 +147,20 @@ function Header({
   brand,
   pdfUrl,
   narrative,
+  isDiy,
 }: {
   brand: PublicReportV2Brand;
   pdfUrl: string | null;
   narrative: NarrativeV2;
+  isDiy?: boolean;
 }) {
+  // DIY mode keeps the same header chrome but reframes the subtitle —
+  // "Channel Ownership Recommendations" lands warmer than "Audit" when
+  // the report is congratulating the brand on already running a tight
+  // channel.
+  const subtitle = isDiy
+    ? `Channel Ownership Recommendations · ${formatShortDate(narrative.generated_at)}`
+    : `Channel Ownership Audit · ${formatShortDate(narrative.generated_at)}`;
   return (
     <header className="rv2-hdr">
       <div className="rv2-hdr-row">
@@ -142,9 +170,7 @@ function Header({
         </Link>
         <div className="rv2-hdr-mid">
           <div className="rv2-hdr-title">{brand.name}</div>
-          <div className="rv2-hdr-sub">
-            Channel Ownership Audit · {formatShortDate(narrative.generated_at)}
-          </div>
+          <div className="rv2-hdr-sub">{subtitle}</div>
         </div>
         <div className="rv2-hdr-actions">
           {pdfUrl && (
@@ -162,16 +188,25 @@ function Header({
 // Side nav (anchors)
 // ====================================================================
 
-function SideNav() {
-  const items: [string, string][] = [
-    ["s-cover", "The opportunity"],
-    ["s-reseller-reality", "Reseller reality"],
-    ["s-dossier", "Reseller dossier"],
-    ["s-products", "Top products"],
-    ["s-math", "The math"],
-    ["s-plan", "Capture plan"],
-    ["s-cta", "Book a call"],
-  ];
+function SideNav({ isDiy }: { isDiy?: boolean }) {
+  const items: [string, string][] = isDiy
+    ? [
+        ["s-cover", "The good news"],
+        ["s-reseller-reality", "Reseller reality"],
+        ["s-dossier", "Reseller dossier"],
+        ["s-products", "Top products"],
+        ["s-diy", "3 steps to wrap this up"],
+        ["s-cta", "Want help later?"],
+      ]
+    : [
+        ["s-cover", "The opportunity"],
+        ["s-reseller-reality", "Reseller reality"],
+        ["s-dossier", "Reseller dossier"],
+        ["s-products", "Top products"],
+        ["s-math", "The math"],
+        ["s-plan", "Capture plan"],
+        ["s-cta", "Book a call"],
+      ];
   return (
     <nav className="rv2-sidenav" aria-label="Sections">
       <ul>
@@ -723,6 +758,120 @@ function SectionFooterCta({
 }
 
 // ====================================================================
+// Phase 24 — DIY-mode sections (rendered only when narrative.report_mode
+// === 'diy_fit'). The brand is already running a tight Amazon channel;
+// the residual reseller share is too small to justify RCG fees, so we
+// drop the capture plan / WHY-RCG callouts / math section in favor of a
+// friendly "wrap this up yourself" 3-step list. Reseller dossier + CX +
+// keywords + competitors stay because they're genuinely useful info.
+// ====================================================================
+
+function SectionDiyCover({
+  narrative,
+  brand,
+}: {
+  narrative: NarrativeV2;
+  brand: PublicReportV2Brand;
+}) {
+  const pct = narrative.brand_controlled_pct ?? null;
+  const pctLabel =
+    pct != null ? `${Math.round(Math.max(0, Math.min(1, pct)) * 100)}%` : "most";
+  const headline =
+    narrative.cover.headline ||
+    `${brand.name}, you're already running a tight Amazon channel.`;
+  return (
+    <section id="s-cover" className="rv2-section rv2-section-cover">
+      <div className="rv2-eyebrow">Channel Ownership Recommendations</div>
+      <div className="rv2-cover-meta">
+        <div className="rv2-cover-meta-line">Prepared for {brand.name}</div>
+        <div className="rv2-cover-meta-line rv2-muted">
+          {formatLongDate(narrative.generated_at)} · By Rolle Consulting Group
+        </div>
+      </div>
+      <h1 className="rv2-h1">{headline}</h1>
+
+      <div className="rv2-kpi-grid rv2-kpi-grid-1">
+        <BigStat
+          label={`You already control ${pctLabel} of your own Amazon sales — that's strong.`}
+          value={pctLabel}
+          sub="Buy-box ownership across your top SKUs · Keepa"
+        />
+      </div>
+
+      <p className="rv2-prose rv2-cta-prose">
+        Below: who's left on your listings, what they're shipping, and three concrete steps to seal the leak yourself.
+      </p>
+    </section>
+  );
+}
+
+function SectionDiySteps({ narrative }: { narrative: NarrativeV2 }) {
+  const steps: DiyStep[] = narrative.diy_steps ?? [];
+  if (!steps.length) return null;
+  return (
+    <section id="s-diy" className="rv2-section rv2-section-alt">
+      <SectionHead
+        eyebrow="3 steps to wrap this up yourself"
+        title="How to seal the residual reseller leakage"
+      />
+      <div className="rv2-fivestep">
+        {steps.map((s) => (
+          <div key={s.number} className="rv2-step">
+            <div className="rv2-step-head">
+              <div className="rv2-step-num">Step {s.number}</div>
+              <div className="rv2-step-title">{s.title}</div>
+            </div>
+            <p className="rv2-step-body">{s.body}</p>
+          </div>
+        ))}
+      </div>
+      <p className="rv2-prose rv2-plan-closing">
+        Most brands at this stage close the residual leakage in 30–60 days using just these three moves. No agency needed.
+      </p>
+    </section>
+  );
+}
+
+function SectionDiyFooterCta({
+  narrative,
+  brand,
+  pdfUrl,
+  callHref,
+}: {
+  narrative: NarrativeV2;
+  brand: PublicReportV2Brand;
+  pdfUrl: string | null;
+  callHref: string;
+}) {
+  const c = narrative.cta;
+  return (
+    <section id="s-cta" className="rv2-section rv2-section-cta">
+      <h2 className="rv2-h2">
+        When you're ready to scale or want a hand executing on this, we're a click away.
+      </h2>
+      <p className="rv2-prose rv2-cta-prose">
+        Most brands at {brand.name}'s stage don't need a consultant — they just need a clean plan. If you'd like a second pair of eyes later, the strategy call is free and we'll walk through whatever you're seeing.
+      </p>
+
+      <div className="rv2-cta-actions">
+        <a className="rv2-btn" href={callHref}>
+          Book a free strategy call
+        </a>
+        {pdfUrl && (
+          <a className="rv2-btn" href={pdfUrl} target="_blank" rel="noreferrer">
+            Download the PDF
+          </a>
+        )}
+      </div>
+
+      <p className="rv2-cta-contact rv2-muted">
+        <a href={`mailto:${c.secondary_email}`}>{c.secondary_email}</a>
+      </p>
+    </section>
+  );
+}
+
+// ====================================================================
 // Building blocks
 // ====================================================================
 
@@ -988,6 +1137,10 @@ function V2Styles() {
       }
       .rv2-kpi-grid-2 {
         grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+      .rv2-kpi-grid-1 {
+        grid-template-columns: 1fr;
+        max-width: 560px;
       }
 
       /* Big stats on the cover */
