@@ -120,14 +120,22 @@ function buildCoverKpis(deltaProfit: number | null, exitLift: number | null) {
   return kpis;
 }
 
-async function backfillOne(admin: ReturnType<typeof createClient>, reportId: string, label: string) {
+interface ReportRow {
+  id: string;
+  narrative_json: NarrativeV2 | null;
+  report_assumptions: Partial<ReportAssumptions> | null;
+  brand_id: string | null;
+}
+
+async function backfillOne(admin: any, reportId: string, label: string) {
   console.log(`\n[backfill] ${label}  id=${reportId}`);
-  const { data: report, error } = await admin
+  const { data, error } = await admin
     .from("reports")
     .select("id, narrative_json, report_assumptions, brand_id")
     .eq("id", reportId)
     .maybeSingle();
   if (error) throw new Error(`lookup ${reportId}: ${error.message}`);
+  const report = data as ReportRow | null;
   if (!report) {
     console.error(`  not found: ${reportId}`);
     return;
@@ -198,7 +206,7 @@ async function backfillOne(admin: ReturnType<typeof createClient>, reportId: str
     .update({
       narrative_json: updatedNarrative as any,
       report_assumptions: a as any,
-    })
+    } as never)
     .eq("id", reportId);
   if (updErr) throw new Error(`update ${reportId}: ${updErr.message}`);
   console.log(`  ✓ persisted`);
