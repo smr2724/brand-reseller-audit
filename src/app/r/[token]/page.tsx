@@ -21,6 +21,7 @@ import { PublicReportView, type PublicReportBrand, type PublicReportRow } from "
 import type { NarrativeOutput } from "@/lib/report/narrative";
 import { PublicReportV2 } from "@/lib/report/v2/web";
 import type { NarrativeV2 } from "@/lib/report/v2/types";
+import AuditProgress from "@/components/marketing/AuditProgress";
 
 // ISR: the report row is largely immutable once `status='completed'`, but
 // enrichment (Keepa / DataForSEO) can refresh underneath it. 5 minutes is
@@ -119,7 +120,7 @@ export default async function ReportPage({ params }: PageProps) {
 
   // ---- generating / failed states (brand-audit reports only) ----
   if (report.brand_id && report.status === "generating") {
-    return <GeneratingState />;
+    return <GeneratingState token={report.token} />;
   }
   if (report.brand_id && report.status === "failed") {
     return <FailedState message={report.error_message ?? null} />;
@@ -212,22 +213,13 @@ export default async function ReportPage({ params }: PageProps) {
 
 // ---------------------------- helper components ----------------------------
 
-function GeneratingState() {
+function GeneratingState({ token }: { token: string }) {
   return (
-    <>
-      {/* Auto-refresh every 8s while the row is still generating. */}
-      <meta httpEquiv="refresh" content="8" />
-      <div style={shellStyle}>
-        <div style={panelStyle}>
-          <div style={pillStyle}>Still generating</div>
-          <h1 style={h1Style}>Your audit is being prepared.</h1>
-          <p style={pStyle}>
-            Channel Ownership Audits typically take 60–120 seconds to compile. This page
-            will refresh automatically.
-          </p>
-        </div>
+    <div style={shellStyle}>
+      <div style={panelStyle}>
+        <AuditProgress token={token} />
       </div>
-    </>
+    </div>
   );
 }
 
