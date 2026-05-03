@@ -12,6 +12,7 @@ import type { BrandEnrichmentBundle } from "@/lib/enrichment";
 import type { BrandForReport } from "@/lib/report/narrative";
 import type { CompetitorSnapshot, KeepaAsinDetail } from "./enrich";
 import type { RevenueEstimate, RevenueEstimatePerAsin } from "@/lib/enrichment/revenue-estimator";
+import { classifySellerSync } from "@/lib/enrichment/seller-classification";
 import type {
   CompetitorRow,
   CxAuditAsinScore,
@@ -37,17 +38,34 @@ export function computeResellerReality(
   // bundle (it lives on brand_sellers). For now we leave country null
   // here; the dossier section pulls country from the bundle's top_seller_country.
   const sellers = bundle.keepa.sellers ?? [];
-  const top_sellers: ResellerRow[] = sellers.slice(0, 10).map((s, i) => ({
-    rank: i + 1,
-    seller_name: s.seller_name,
-    share_pct: s.share_pct ?? null,
-    asins_won: s.asins_won ?? null,
-    is_fba: s.is_fba ?? null,
-    country: null,
-    // Phase 23 — surface classification verdict + reason for transparency.
-    is_brand_controlled: s.is_brand_controlled ?? null,
-    classification_reason: s.classification_reason ?? null,
-  }));
+  const top_sellers: ResellerRow[] = sellers.slice(0, 10).map((s, i) => {
+    // Phase 23 — when the persisted classification column is null
+    // (legacy row, or migration not applied yet), recompute synchronously
+    // from seller_name vs brand_name so the dossier and reality narrative
+    // can still skip the brand's own LLC.
+    let isBrand: boolean | null = s.is_brand_controlled ?? null;
+    let reason: string | null = s.classification_reason ?? null;
+    if (isBrand == null) {
+      const v = classifySellerSync({
+        brand_name: bundle.brandName,
+        seller_name: s.seller_name,
+        seller_id: s.seller_id,
+      });
+      isBrand = v.is_brand_controlled;
+      reason = v.reason;
+    }
+    return {
+      rank: i + 1,
+      seller_name: s.seller_name,
+      share_pct: s.share_pct ?? null,
+      asins_won: s.asins_won ?? null,
+      is_fba: s.is_fba ?? null,
+      country: null,
+      // Phase 23 — surface classification verdict + reason for transparency.
+      is_brand_controlled: isBrand,
+      classification_reason: reason,
+    };
+  });
   return { top_sellers, one_liner: "", note: null };
 }
 
@@ -64,11 +82,19 @@ export function computeDossierBase(
   // Phase 23 — pick the top *reseller*, not the top seller overall.
   // Brand-controlled sellers (the brand's own LLC) shouldn't end up as
   // the dossier subject — RCG can't "remove" Fantaswick LLC from
-  // Fantaswick's listings.
+  // Fantaswick's listings. Backfill classification on the fly when the
+  // persisted columns are null (legacy / pre-migration rows).
   const sellers = bundle.keepa.sellers ?? [];
-  const resellers = sellers.filter(
-    (s) => s.is_brand_controlled !== true,
-  );
+  const resellers = sellers.filter((s) => {
+    if (s.is_brand_controlled === true) return false;
+    if (s.is_brand_controlled === false) return true;
+    const v = classifySellerSync({
+      brand_name: bundle.brandName,
+      seller_name: s.seller_name,
+      seller_id: s.seller_id,
+    });
+    return !v.is_brand_controlled;
+  });
   const top = resellers[0] ?? sellers[0];
   // When `top_seller` (the brand row) and the picked reseller diverge
   // (because legacy data has no classification yet), prefer the picked

@@ -309,6 +309,92 @@ async function llmTiebreaker(
 }
 
 /**
+ * Synchronous classifier — no LLM, no async. Runs only the deterministic
+ * paths (exact normalize, substring, Jaccard >=0.6). Use this when the
+ * caller can't await (computeResellerReality / computeDossierBase) or
+ * when classification on persisted rows wasn't recorded yet.
+ */
+export function classifySellerSync(opts: {
+  brand_name: string;
+  seller_name: string;
+  seller_id?: string | null;
+}): SellerClassification {
+  const { brand_name, seller_name, seller_id } = opts;
+
+  if (seller_id && seller_id === AMAZON_RETAIL_SELLER_ID) {
+    return {
+      is_brand_controlled: false,
+      reason: "Amazon Retail (ATVPDKIKX0DER) — never classified as brand-controlled.",
+      method: "exact",
+      confidence: 1,
+    };
+  }
+  if (!seller_name || !brand_name) {
+    return {
+      is_brand_controlled: false,
+      reason: "Missing seller or brand name — defaulted to reseller.",
+      method: "fallback",
+      confidence: null,
+    };
+  }
+  const brandN = normalizeName(brand_name);
+  const sellerN = normalizeName(seller_name);
+  if (brandN.cleaned && brandN.cleaned === sellerN.cleaned) {
+    return {
+      is_brand_controlled: true,
+      reason: `Seller "${seller_name}" normalizes to the brand name after stripping corporate suffixes.`,
+      method: "exact",
+      confidence: 1,
+    };
+  }
+  const brandSlug = brand_name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const sellerSlug = seller_name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (
+    brandSlug &&
+    sellerSlug &&
+    (sellerSlug.includes(brandSlug) || brandSlug.includes(sellerSlug))
+  ) {
+    return {
+      is_brand_controlled: true,
+      reason: `Seller "${seller_name}" contains the brand name "${brand_name}" as a substring.`,
+      method: "substring",
+      confidence: 0.95,
+    };
+  }
+  if (
+    brandN.cleaned &&
+    sellerN.cleaned &&
+    (sellerN.cleaned.includes(brandN.cleaned) ||
+      brandN.cleaned.includes(sellerN.cleaned))
+  ) {
+    return {
+      is_brand_controlled: true,
+      reason: `Seller "${seller_name}" contains the brand name after corporate-suffix stripping.`,
+      method: "substring",
+      confidence: 0.9,
+    };
+  }
+  const jacc = tokenJaccard(brandN.tokens, sellerN.tokens);
+  if (jacc >= 0.6) {
+    return {
+      is_brand_controlled: true,
+      reason: `Token-level Jaccard similarity ${jacc.toFixed(2)} >= 0.6 between "${seller_name}" and brand "${brand_name}".`,
+      method: "jaccard",
+      confidence: jacc,
+    };
+  }
+  return {
+    is_brand_controlled: false,
+    reason:
+      jacc > 0
+        ? `No substring match; Jaccard ${jacc.toFixed(2)} below threshold — classified as reseller.`
+        : `No name overlap with brand — classified as reseller.`,
+    method: "fallback",
+    confidence: jacc,
+  };
+}
+
+/**
  * Classify a list of sellers against a brand, sharing the LLM budget
  * across the whole call. Returns the same array order with classification
  * attached.

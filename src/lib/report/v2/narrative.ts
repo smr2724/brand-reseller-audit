@@ -178,7 +178,9 @@ export async function llmResellerRealityLine(
       required: ["one_liner"],
     },
     userInstruction:
-      "Write one sentence (max 25 words) describing the reseller landscape. Cite the unique seller count and the top seller's share.",
+      "Write one sentence (max 25 words) describing the THIRD-PARTY reseller landscape — the sellers riding on the brand's listings. " +
+      "Sellers tagged `is_brand_controlled=true` are the brand's own selling entity (e.g. an LLC) and must be EXCLUDED from any reseller share you cite. " +
+      "Cite the unique seller count and the top reseller's share, where 'top reseller' is the largest seller with `is_brand_controlled=false` (or null).",
     userPayload: {
       top_sellers: reality.top_sellers.slice(0, 5),
       unique_seller_count: bundle.keepa.unique_seller_count,
