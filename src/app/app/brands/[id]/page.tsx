@@ -2,6 +2,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import BrandDetailClient from "./BrandDetailClient";
+import { computeBrandDetailFinancials } from "@/lib/brand-detail/financial-model";
 
 export const dynamic = "force-dynamic";
 
@@ -35,6 +36,17 @@ export default async function BrandDetail({ params }: { params: { id: string } }
     .limit(1)
     .maybeSingle();
 
+  // Phase 26 — auto-populate the FINANCIAL MODEL panel as soon as
+  // Keepa enrichment lands. Single source: computeLegionEconomics.
+  const financials = computeBrandDetailFinancials(
+    {
+      keepa_last_enriched_at: brand.keepa_last_enriched_at,
+      trailing_12_months: brand.trailing_12_months,
+      est_monthly_revenue: brand.est_monthly_revenue,
+    },
+    (asins ?? []).map((a) => ({ buy_box_price: a.buy_box_price ?? null })),
+  );
+
   return (
     <div className="p-6 max-w-[1100px] mx-auto">
       <div className="mb-4">
@@ -42,7 +54,12 @@ export default async function BrandDetail({ params }: { params: { id: string } }
           ← All brands
         </Link>
       </div>
-      <BrandDetailClient brand={brand} asins={asins ?? []} dfsMetrics={dfs ?? null} />
+      <BrandDetailClient
+        brand={brand}
+        asins={asins ?? []}
+        dfsMetrics={dfs ?? null}
+        financials={financials}
+      />
     </div>
   );
 }

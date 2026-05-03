@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { formatNumber, formatMoney, formatDateTime } from "@/lib/utils";
 import BrandContactsCard from "./BrandContactsCard";
 import BrandOutreachCard from "./BrandOutreachCard";
+import type { BrandFinancialResult } from "@/lib/brand-detail/financial-model";
 
 interface Brand {
   id: string;
@@ -85,10 +86,12 @@ export default function BrandDetailClient({
   brand,
   asins,
   dfsMetrics,
+  financials,
 }: {
   brand: Brand;
   asins: BrandAsin[];
   dfsMetrics: DfsMetricsRow | null;
+  financials: BrandFinancialResult;
 }) {
   const router = useRouter();
   const [status, setStatus] = useState(brand.status);
@@ -219,15 +222,7 @@ export default function BrandDetailClient({
         </Card>
 
         <Card title="Financial model">
-          <Field label="Current Profit" v={formatMoney(brand.current_profit)} />
-          <Field label="Reseller's Margin" v={formatMoney(brand.resellers_margin)} />
-          <Field label="Recouped Shipping" v={formatMoney(brand.recouped_shipping)} />
-          <Field label="Labor Cost" v={formatMoney(brand.labor_cost)} />
-          <Field label="Additional Profit" v={formatMoney(brand.additional_profit)} />
-          <Field label="RCG Fees" v={formatMoney(brand.rcg_fees)} />
-          <Field label="New Profit" v={formatMoney(brand.new_profit)} />
-          <Field label="7× Multiple Value" v={formatMoney(brand.seven_x_multiple_value)} />
-          <div className="text-[11px] text-[var(--text-muted)] mt-2">Read-only for now — editing comes later.</div>
+          <FinancialModelBody financials={financials} />
         </Card>
 
         <Card title="Notes">
@@ -850,5 +845,62 @@ function Field({ label, v }: { label: string; v: string }) {
       <span className="text-[var(--text-muted)]">{label}</span>
       <span className="font-medium">{v}</span>
     </div>
+  );
+}
+
+function FinancialModelBody({ financials }: { financials: BrandFinancialResult }) {
+  if (!financials.ready) {
+    return (
+      <>
+        <Field label="Current Profit" v="—" />
+        <Field label="Reseller's Margin" v="—" />
+        <Field label="Recouped Shipping" v="—" />
+        <Field label="Labor Cost" v="—" />
+        <Field label="Additional Profit" v="—" />
+        <Field label="RCG Fees" v="—" />
+        <Field label="New Profit" v="—" />
+        <Field label="7× Multiple Value" v="—" />
+        <div className="text-[11px] text-[var(--text-muted)] mt-2">
+          Run Keepa enrichment to populate. Read-only for now — editing comes later.
+        </div>
+      </>
+    );
+  }
+  const out = financials.outputs;
+  const m = (n: number | null | undefined) =>
+    out == null || n == null ? "—" : formatMoney(n);
+  return (
+    <>
+      <Field label="Trailing 12mo Revenue" v={m(financials.revenue)} />
+      <Field label="Current Profit" v={m(out?.current_profit)} />
+      <Field label="Reseller's Margin" v={m(out?.reseller_margin_captured)} />
+      <Field label="Recouped Shipping" v={m(out?.recouped_shipping)} />
+      <Field label="Labor Cost" v={m(out?.labor_cost)} />
+      <Field label="Additional Profit" v={m(out?.delta_profit)} />
+      <Field label="RCG Fees" v="—" />
+      <Field label="New Profit" v={m(out?.new_profit)} />
+      <Field label="7× Multiple Value" v={m(out?.exit_lift)} />
+      {financials.lowConfidence && (
+        <div className="text-[11px] text-[var(--text-muted)] mt-2">
+          Low-confidence revenue: Keepa returned no salesRank for this brand&apos;s
+          ASINs, so trailing-12mo revenue is sized from buy-box prices × a
+          conservative units-per-ASIN floor. Replace with seller&apos;s actual TTM
+          during diligence.
+        </div>
+      )}
+      {!financials.lowConfidence && financials.revenue == null && (
+        <div className="text-[11px] text-[var(--text-muted)] mt-2">
+          Revenue could not be sized from cached enrichment yet — generate a
+          report to pull Keepa /product details, or import trailing-12mo
+          revenue.
+        </div>
+      )}
+      {financials.outputs != null && (
+        <div className="text-[11px] text-[var(--text-muted)] mt-2">
+          Auto-computed from Keepa enrichment via computeLegionEconomics.
+          Read-only for now — editing comes later.
+        </div>
+      )}
+    </>
   );
 }
