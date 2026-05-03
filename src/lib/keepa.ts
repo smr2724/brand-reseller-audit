@@ -264,6 +264,55 @@ async function ensureTokens(min = 20) {
 }
 
 /**
+ * Free-text product search on Keepa's `/search?type=product` endpoint.
+ * Returns lightweight product objects (each with the canonical `brand`
+ * string and `asin`) — the *only* Keepa endpoint that maps a fuzzy user
+ * term to Amazon-canonical brand names. `/query` requires a strict-equality
+ * brand filter (so it can never *discover* canonical names from a fuzzy
+ * input — it can only confirm a guess). Phase 25.2 picker is built on this.
+ *
+ * The response shape from Keepa is `{ products: [...], totalProducts, ... }`.
+ * We don't care about price/history here; just `brand` and `asin`. Each
+ * call costs ~5 tokens regardless of `pageCount` because Keepa returns
+ * full product objects unless `asins-only=1`.
+ */
+export interface KeepaSearchHit {
+  asin: string;
+  brand: string | null;
+  title: string | null;
+}
+
+export async function keepaProductSearch(
+  term: string,
+  page = 0,
+): Promise<{ products: KeepaSearchHit[]; tokens_left: number }> {
+  const key = process.env.KEEPA_API_KEY;
+  if (!key) throw new Error("KEEPA_API_KEY missing");
+  const cleaned = normalizeBrandQuery(term);
+  if (!cleaned || cleaned.length < 3) return { products: [], tokens_left: 0 };
+  await ensureTokens(5);
+  // Keepa `/search?type=product`: free-text product search. `term` accepts
+  // multiple space-separated keywords (all must match). Page 0 returns up
+  // to ~40 products. We keep `history=0` to keep the response small.
+  const { json } = await keepaFetch("/search", {
+    type: "product",
+    term: cleaned,
+    page,
+    history: 0,
+  });
+  const products: KeepaSearchHit[] = Array.isArray(json?.products)
+    ? json.products.map((p: any) => ({
+        asin: typeof p?.asin === "string" ? p.asin : "",
+        brand: typeof p?.brand === "string" && p.brand.trim() ? p.brand.trim() : null,
+        title: typeof p?.title === "string" ? p.title : null,
+      })).filter((p: KeepaSearchHit) => /^[A-Z0-9]{10}$/.test(p.asin))
+    : [];
+  const tokensLeft = Number(json?.tokensLeft ?? 0);
+  TOKEN_CACHE = { t: Date.now(), v: { tokens_left: tokensLeft, refill_in_ms: Number(json?.refillIn ?? 0), refill_rate: Number(json?.refillRate ?? 0) } };
+  return { products, tokens_left: tokensLeft };
+}
+
+/**
  * Search Keepa for top ASINs under a brand name.
  * Uses /query?type=product so we can filter by brand.
  */

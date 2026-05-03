@@ -28,8 +28,16 @@ interface FuzzyCandidate {
   asin_count: number | null;
   storefront_url: string | null;
   similarity: number;
+  low_confidence?: boolean;
   matched_variant?: string;
 }
+
+const SOURCE_BADGE_COPY: Record<FuzzyCandidate["source"], string> = {
+  keepa: "Keepa",
+  dataforseo: "Amazon search",
+  both: "Keepa + Amazon",
+  fallback: "Search Amazon",
+};
 
 export default function AddBrandByName() {
   const router = useRouter();
@@ -107,6 +115,12 @@ export default function AddBrandByName() {
   }
 
   async function confirmFuzzy(c: FuzzyCandidate) {
+    // Phase 25.2: never auto-create a brand from the fallback row — its
+    // name is the user's literal input, not a canonical Amazon brand. The
+    // row exists only so the UI is never blank; the user is expected to
+    // click through to Amazon and either come back with the canonical
+    // name, or paste an ASIN into the resolver below.
+    if (c.source === "fallback") return;
     await createBrand(c.name);
   }
 
@@ -304,39 +318,65 @@ function FuzzyPicker(props: FuzzyPickerProps) {
           <div className="text-xs text-[var(--text-muted)]">
             {list.length} candidate{list.length === 1 ? "" : "s"} (ranked by similarity)
           </div>
-          {list.map((c, i) => (
-            <button
-              key={`${c.name}-${i}`}
-              type="button"
-              onClick={() => onSelect(c)}
-              disabled={creating}
-              className="card p-4 w-full text-left hover:border-[var(--accent)] disabled:opacity-50 transition-colors"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="font-medium">{c.name}</div>
-                  <div className="text-xs text-[var(--text-muted)] mt-1 space-x-3">
-                    {c.asin_count !== null && (
-                      <span>{c.asin_count} ASIN{c.asin_count === 1 ? "" : "s"}</span>
-                    )}
-                    <span>Match: {(c.similarity * 100).toFixed(0)}%</span>
-                    <span>Source: {c.source}</span>
+          {list.map((c, i) => {
+            const isFallback = c.source === "fallback";
+            return (
+              <button
+                key={`${c.name}-${i}`}
+                type="button"
+                onClick={() => onSelect(c)}
+                disabled={creating || isFallback}
+                className={`card p-4 w-full text-left transition-colors ${
+                  isFallback
+                    ? "opacity-70 cursor-default"
+                    : "hover:border-[var(--accent)] disabled:opacity-50"
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-medium">
+                        {isFallback ? `No canonical match — search Amazon for “${c.name}”` : c.name}
+                      </span>
+                      <span
+                        className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                          isFallback
+                            ? "bg-yellow-900/40 text-yellow-300 border border-yellow-700/50"
+                            : "bg-[var(--bg-3)] text-[var(--text-muted)] border border-[var(--border)]"
+                        }`}
+                      >
+                        {SOURCE_BADGE_COPY[c.source]}
+                      </span>
+                      {c.low_confidence && !isFallback && (
+                        <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--bg-3)] text-[var(--text-muted)] border border-[var(--border)]">
+                          low confidence
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-[var(--text-muted)] mt-1 space-x-3">
+                      {c.asin_count !== null && (
+                        <span>{c.asin_count} ASIN{c.asin_count === 1 ? "" : "s"}</span>
+                      )}
+                      {!isFallback && (
+                        <span>Match: {(c.similarity * 100).toFixed(0)}%</span>
+                      )}
+                    </div>
                   </div>
+                  {c.storefront_url && (
+                    <a
+                      href={c.storefront_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs underline text-[var(--accent)] whitespace-nowrap"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      View on Amazon →
+                    </a>
+                  )}
                 </div>
-                {c.storefront_url && (
-                  <a
-                    href={c.storefront_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs underline text-[var(--accent)] whitespace-nowrap"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    View on Amazon →
-                  </a>
-                )}
-              </div>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
       )}
 

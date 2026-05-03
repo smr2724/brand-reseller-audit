@@ -1,14 +1,17 @@
 /**
- * Phase 25 — Integration-style test for the fuzzy brand picker pipeline.
- * Phase 25.1 — Adds coverage for the safety-net fallback (when both
- * providers return zero, return a single Search-Amazon row), DFS
- * title-derived brand inference, and the alphanumeric dedupe key that
- * collapses "Couple's Coffee" + "COUPLE'S COFFEE CO." into one row.
+ * Phase 25.2 — Integration-style test for the fuzzy brand picker pipeline.
+ *
+ * Phase 25.1 used to rely on `inferBrandFromTitle` (since removed) and on
+ * variant strings being labelled as candidates. Both were the architectural
+ * bug that surfaced as the picker echoing the user's query back in
+ * production. After Phase 25.2, candidate.name only ever comes from an
+ * external API response (Keepa /search canonical brand, or DFS explicit
+ * `brand` attribute) — never from variant generation or title inference.
  *
  * Run: npx tsx scripts/test-brand-search-integration.ts
  */
 import { similarity } from "../src/lib/brand-search/similarity";
-import { dedupeByBrand, dedupeKey, inferBrandFromTitle, fallbackCandidate } from "../src/lib/brand-search/search";
+import { dedupeByBrand, dedupeKey, fallbackCandidate } from "../src/lib/brand-search/search";
 
 let pass = 0;
 let fail = 0;
@@ -18,7 +21,7 @@ function check(name: string, ok: boolean, detail?: string) {
   else fail++;
 }
 
-// Phase 25 baseline — Couple's Coffee outranks noise & dedupes Keepa+DFS.
+// Phase 25.2 — Couple's Coffee outranks noise & dedupes Keepa+DFS into "both".
 {
   const QUERY = "Couples Coffee";
   const merged = dedupeByBrand([
@@ -48,91 +51,76 @@ function check(name: string, ok: boolean, detail?: string) {
   );
 }
 
-// Phase 25.1 — alphanumeric dedupe key collapses casing/punctuation
+// dedupe key collapses casing/punctuation
 {
   const merged = dedupeByBrand([
     { name: "Couple's Coffee", source: "keepa", asin_count: 14, storefront_url: null, similarity: 0 },
     { name: "COUPLE'S COFFEE", source: "keepa", asin_count: 12, storefront_url: null, similarity: 0 },
   ]);
   check(
-    "25.1 dedupe: 'Couple's Coffee' and 'COUPLE'S COFFEE' merge to one row",
+    "dedupe: 'Couple's Coffee' and 'COUPLE'S COFFEE' merge to one row",
     merged.length === 1,
     `len=${merged.length}: ${JSON.stringify(merged)}`,
   );
 }
 
-// Phase 25.1 — alphanumeric dedupe does NOT collapse different brands
+// dedupe does NOT collapse different brands
 {
   const merged = dedupeByBrand([
     { name: "Couples Coffee", source: "keepa", asin_count: 14, storefront_url: null, similarity: 0 },
     { name: "Couples Coffee Roasters", source: "dataforseo", asin_count: 5, storefront_url: null, similarity: 0 },
   ]);
   check(
-    "25.1 dedupe: distinct brands stay separate",
+    "dedupe: distinct brands stay separate",
     merged.length === 2,
     `len=${merged.length}: ${JSON.stringify(merged)}`,
   );
 }
 
-// Phase 25.1 — dedupeKey
+// dedupeKey
 check(
-  "dedupeKey 25.1: collapses apostrophe + casing",
+  "dedupeKey: collapses apostrophe + casing",
   dedupeKey("Couple's Coffee") === "couples coffee",
   `got '${dedupeKey("Couple's Coffee")}'`,
 );
 check(
-  "dedupeKey 25.1: collapses 'COUPLE'S COFFEE CO.' to 'couples coffee co'",
+  "dedupeKey: collapses 'COUPLE'S COFFEE CO.' to 'couples coffee co'",
   dedupeKey("COUPLE'S COFFEE CO.") === "couples coffee co",
   `got '${dedupeKey("COUPLE'S COFFEE CO.")}'`,
 );
 check(
-  "dedupeKey 25.1: empty string gives empty",
+  "dedupeKey: empty string gives empty",
   dedupeKey("") === "",
 );
 
-// Phase 25.1 — DFS title-derived brand
-check(
-  "inferBrandFromTitle 25.1: extracts brand head from comma-separated title",
-  inferBrandFromTitle("Couple's Coffee Co. - 12oz Bag, Medium Roast") === "Couple's Coffee Co.",
-  `got '${inferBrandFromTitle("Couple's Coffee Co. - 12oz Bag, Medium Roast")}'`,
-);
-check(
-  "inferBrandFromTitle 25.1: caps at 4 leading tokens",
-  (inferBrandFromTitle("One Two Three Four Five Six Seven") ?? "").split(/\s+/).length <= 4,
-);
-check(
-  "inferBrandFromTitle 25.1: rejects empty/null",
-  inferBrandFromTitle(undefined) === null,
-);
-check(
-  "inferBrandFromTitle 25.1: rejects numbers-only head",
-  inferBrandFromTitle("12345 — fancy product") === null,
-);
-
-// Phase 25.1 — Safety-net fallback candidate
+// Safety-net fallback candidate
 {
   const fb = fallbackCandidate("Couple's Coffee");
   check(
-    "fallback 25.1: source is 'fallback'",
+    "fallback: source is 'fallback'",
     fb.source === "fallback",
   );
   check(
-    "fallback 25.1: name matches original query",
+    "fallback: name matches original query",
     fb.name === "Couple's Coffee",
   );
   check(
-    "fallback 25.1: storefront URL is Amazon brand search",
+    "fallback: storefront URL is Amazon brand search",
     !!fb.storefront_url && fb.storefront_url.includes("amazon.com/s?k=") && fb.storefront_url.includes("brands"),
     fb.storefront_url ?? "(null)",
   );
   check(
-    "fallback 25.1: URL contains the original brand text (encoded)",
+    "fallback: URL contains the original brand text (encoded)",
     !!fb.storefront_url && /Couple/.test(fb.storefront_url) && /Coffee/.test(fb.storefront_url),
     fb.storefront_url ?? "(null)",
   );
   check(
-    "fallback 25.1: similarity is 1 (it's the literal user input)",
+    "fallback: similarity is 1 (it's the literal user input)",
     fb.similarity === 1,
+  );
+  check(
+    "fallback: low_confidence flag set so UI can de-emphasize",
+    fb.low_confidence === true,
   );
 }
 
