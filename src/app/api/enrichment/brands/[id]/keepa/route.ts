@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
+import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,15 +38,18 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
       user_id: user.id,
       existing_disqualifier_tags: brand.disqualifier_tags ?? [],
     });
+    const enrichedNow = !(summary.enrichment_error || summary.asin_count === 0);
     await supabase
       .from("brands")
       .update({
-        enrichment_state:
-          summary.enrichment_error || summary.asin_count === 0 ? "failed" : "enriched",
+        enrichment_state: enrichedNow ? "enriched" : "failed",
         updated_at: new Date().toISOString(),
       })
       .eq("id", brand.id)
       .eq("user_id", user.id);
+    if (enrichedNow) {
+      maybeTriggerOwnerResolution(brand.id);
+    }
     return NextResponse.json({ ok: true, summary });
   } catch (e: any) {
     await supabase

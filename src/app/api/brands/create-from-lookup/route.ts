@@ -7,6 +7,7 @@ import {
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 import { enrichBrandWithDataForSeo } from "@/lib/enrichment/dataforseo";
 import { normalizeName } from "@/lib/importer/merge";
+import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -135,13 +136,19 @@ export async function POST(req: Request) {
     keepaError = e instanceof Error ? e.message : String(e);
   }
 
+  const enrichedNow = !(keepaError != null || keepaAsinCount === 0);
   await admin
     .from("brands")
     .update({
-      enrichment_state: keepaError != null || keepaAsinCount === 0 ? "failed" : "enriched",
+      enrichment_state: enrichedNow ? "enriched" : "failed",
       updated_at: new Date().toISOString(),
     })
     .eq("id", brandId);
+
+  // Phase 33 — fire owner resolver as a non-blocking follow-up on success.
+  if (enrichedNow) {
+    maybeTriggerOwnerResolution(brandId);
+  }
 
   try {
     const snap = await enrichBrandWithDataForSeo(admin, {
