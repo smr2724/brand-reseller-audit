@@ -783,6 +783,45 @@ function assertNear(actual: number, expected: number, tol: number, msg: string) 
 }
 
 // --------------------------------------------------------------------
+// Test 18 — Phase 32.2 regression: pallet ASIN with raw_monthly_units=15
+// (rank-derived), attributed_monthly_units=0 (post Phase 32.1 zero-signal
+// rule), buy_box_avg365=$4,414 must contribute $0 to TTM revenue. This
+// asserts the report's per-ASIN aggregation honors the attribution
+// override and does NOT fall back to raw × price for inactive
+// variations. Mirrors H2O Therapy ASIN B0CNS6GYVK.
+// --------------------------------------------------------------------
+{
+  const out = estimateBrandTtmRevenue([
+    {
+      asin: "B0CNS6GYVK",
+      sales_rank_avg365: 250000,
+      sales_rank_current: 250000,
+      buy_box_avg365: 4414,
+      buy_box_current: 4414,
+      buy_box_now: 4414,
+      product_group: "Health & Personal Care",
+      root_category: null,
+      category_path: "Health & Personal Care",
+      attributed_monthly_units: 0,
+      variation_group_size: 4,
+    },
+  ]);
+  const pallet = out.per_asin.find((r) => r.asin === "B0CNS6GYVK")!;
+  assert(
+    pallet.ttm_revenue === 0,
+    "phase32.2 pallet: attributed=0 → ttm_revenue=0 (was raw=15 × $4,414 × 12 = $794,520 before fix)",
+  );
+  assert(
+    out.total_ttm_revenue === 0,
+    "phase32.2 pallet: brand TTM = $0 (single-ASIN brand, pallet is inactive)",
+  );
+  assert(
+    pallet.variation_attributed === true,
+    "phase32.2 pallet: variation_attributed flag set so renderer shows the badge",
+  );
+}
+
+// --------------------------------------------------------------------
 // Done.
 // --------------------------------------------------------------------
 if (failures === 0) {

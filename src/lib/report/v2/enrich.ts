@@ -271,6 +271,15 @@ export async function runV2Enrichment(
           parent_asin: p.parent_asin ?? null,
           raw_monthly_units: raw,
           recent_review_count: p.review_count ?? null,
+          // Phase 32.2 — must match the writer in keepa-brand.ts. Without
+          // this signal, the report path's attribution falls back to
+          // review-only weighting and pallet siblings (no Buy Box churn,
+          // legacy reviews comparable to active siblings) keep ~10% of
+          // group volume each — which then flows into TTM revenue. The
+          // writer already passes this and persists pallet
+          // attributed_monthly_units = 0; the report path must compute
+          // the same number so its TTM matches the persisted truth.
+          buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
         };
       });
       const attribution = indexAttributionByAsin(
