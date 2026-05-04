@@ -328,11 +328,13 @@ function CxAuditPage({ narrative }: { narrative: NarrativeV2 }) {
             inactive variations. We attribute group-level sales to each
             variation using a combined signal: recent review activity
             (last 90 days) plus Buy Box win frequency (how often each
-            variation actually held the Buy Box recently). Variations with
-            no recent buyer activity — for example, dormant bulk-pack
-            listings — correctly receive minimal attributed sales. These
-            per-ASIN sales numbers are estimates derived from Keepa rank,
-            review, and Buy Box data, not direct sales reporting.
+            variation actually held the Buy Box recently). When some
+            siblings have Buy Box history and others don&apos;t, the
+            absence of Buy Box activity is itself evidence the listing
+            hasn&apos;t been selling — those variations correctly receive
+            minimal attributed sales. These per-ASIN sales numbers are
+            estimates derived from Keepa rank, review, and Buy Box data,
+            not direct sales reporting.
           </Text>
         </View>
       )}

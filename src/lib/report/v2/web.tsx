@@ -578,10 +578,11 @@ function VariationMethodologyPanel() {
         group-level sales to each variation using a combined signal: <strong>
         recent review activity (last 90 days)</strong> plus <strong>Buy Box win
         frequency (how often each variation actually held the Buy Box recently)
-        </strong>. Variations with no recent buyer activity — for example,
-        dormant bulk-pack listings — correctly receive minimal attributed
-        sales. <strong>These per-ASIN sales numbers are estimates derived from
-        Keepa rank, review, and Buy Box data, not direct sales reporting.</strong>
+        </strong>. When some siblings have Buy Box history and others don't, the
+        absence of Buy Box activity is itself evidence the listing hasn't been
+        selling — those variations correctly receive minimal attributed sales.
+        <strong> These per-ASIN sales numbers are estimates derived from Keepa
+        rank, review, and Buy Box data, not direct sales reporting.</strong>
       </p>
     </aside>
   );
