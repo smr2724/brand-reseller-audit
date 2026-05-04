@@ -334,6 +334,17 @@ export const KEEPA_MAX_PAGES_PER_BRAND = (() => {
 })();
 
 /**
+ * Phase 33.1 — exclude dead inventory at fetch time. ASINs with sales
+ * rank worse than this threshold contribute essentially zero TTM revenue
+ * and waste Keepa tokens. Override via env for one-off audits where the
+ * tail matters.
+ */
+export const KEEPA_BRAND_SEARCH_RANK_CEILING = (() => {
+  const raw = Number(process.env.KEEPA_BRAND_SEARCH_RANK_CEILING ?? "500000");
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 500_000;
+})();
+
+/**
  * Search Keepa for top ASINs under a brand name.
  * Uses /query?type=product so we can filter by brand.
  *
@@ -380,6 +391,8 @@ export async function searchProductsByBrand(brandName: string, maxResults = 20):
     const selection = JSON.stringify({
       brand: [cleaned],
       sort: [["current_SALES", "asc"]],
+      current_SALES_lte: KEEPA_BRAND_SEARCH_RANK_CEILING,
+      availabilityAmazon_gte: 0,
       perPage,
       page,
     });
@@ -409,7 +422,7 @@ export async function searchProductsByBrand(brandName: string, maxResults = 20):
   }
 
   console.log(
-    `[phase33] keepa brand search "${cleaned}" — pages_fetched=${pagesFetched}, accumulated=${accumulated.length}, keepa_total_products=${totalProducts ?? "unknown"}, maxResults=${maxResults}, tokens_used=${tokensConsumed}, tokens_left=${tokensLeft}`,
+    `[phase33] keepa brand search "${cleaned}" — pages_fetched=${pagesFetched}, accumulated=${accumulated.length}, keepa_total_products=${totalProducts ?? "unknown"}, maxResults=${maxResults}, rank_ceiling=${KEEPA_BRAND_SEARCH_RANK_CEILING}, tokens_used=${tokensConsumed}, tokens_left=${tokensLeft}`,
   );
 
   return {

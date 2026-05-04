@@ -7,6 +7,7 @@
  *  2. `tokens_used` is the *sum* of `tokensConsumed` across pages.
  *  3. The caller's `maxResults` slice still applies after pagination.
  *  4. The pagination respects `KEEPA_MAX_PAGES_PER_BRAND` as a hard ceiling.
+ *  5. Phase 33.1 — selection includes rank-ceiling and Amazon-availability filters.
  *
  * Run:
  *   npx tsx scripts/test-keepa-brand-pagination.ts
@@ -55,6 +56,7 @@ interface PageStub {
 function makeFakeFetch(pages: PageStub[], tokensLeftBetween = 3000) {
   let queryCalls = 0;
   const pageIndices: number[] = [];
+  const selections: any[] = [];
   const fn = async (url: string, _init?: any) => {
     const u = String(url);
     if (u.includes("/token?")) {
@@ -67,6 +69,7 @@ function makeFakeFetch(pages: PageStub[], tokensLeftBetween = 3000) {
       const m = u.match(/selection=([^&]+)/);
       const sel = m ? JSON.parse(decodeURIComponent(m[1])) : null;
       pageIndices.push(Number(sel?.page ?? -1));
+      selections.push(sel);
       const stub = pages[queryCalls] ?? {
         asinList: [],
         totalProducts: 0,
@@ -85,6 +88,7 @@ function makeFakeFetch(pages: PageStub[], tokensLeftBetween = 3000) {
     fetch: fn,
     queryCount: () => queryCalls,
     pageIndices: () => pageIndices,
+    selections: () => selections,
   };
 }
 
@@ -92,7 +96,7 @@ function makeFakeFetch(pages: PageStub[], tokensLeftBetween = 3000) {
   process.env.KEEPA_API_KEY = "test-key";
 
   const keepaMod = await import("../src/lib/keepa");
-  const { searchProductsByBrand, KEEPA_MAX_PAGES_PER_BRAND } = keepaMod;
+  const { searchProductsByBrand, KEEPA_MAX_PAGES_PER_BRAND, KEEPA_BRAND_SEARCH_RANK_CEILING } = keepaMod;
 
   // 1. Three pages — 100 / 100 / 50 — totalProducts 250.
   //    Loop must exit after page 2 (last page short). Accumulated = 250.
@@ -254,6 +258,47 @@ function makeFakeFetch(pages: PageStub[], tokensLeftBetween = 3000) {
       1,
     );
     assertEq("token-floor — accumulated from page 0 only", result.asins.length, 100);
+  }
+
+  // 6. Phase 33.1 — selection payload must carry the rank-ceiling filter
+  //    and the Amazon-availability filter on every /query call.
+  {
+    const pages: PageStub[] = [
+      {
+        asinList: Array.from({ length: 30 }, (_, i) => `R${String(i).padStart(9, "0")}`),
+        totalProducts: 30,
+        tokensConsumed: 5,
+        tokensLeft: 2995,
+      },
+    ];
+    const fake = makeFakeFetch(pages);
+    globalThis.fetch = fake.fetch as any;
+
+    await searchProductsByBrand("Filter Brand", 500);
+
+    const sels = fake.selections();
+    assertEq("phase33.1 — exactly 1 /query call captured", sels.length, 1);
+    assertEq(
+      "phase33.1 — selection.current_SALES_lte equals KEEPA_BRAND_SEARCH_RANK_CEILING",
+      sels[0]?.current_SALES_lte,
+      KEEPA_BRAND_SEARCH_RANK_CEILING,
+    );
+    assertEq(
+      "phase33.1 — selection.availabilityAmazon_gte is 0",
+      sels[0]?.availabilityAmazon_gte,
+      0,
+    );
+    // URLSearchParams encodes spaces as `+`; decodeURIComponent leaves
+    // them as `+`. Either way, the brand string round-trips through the
+    // selection — we just check it's present.
+    assert(
+      "phase33.1 — selection still carries brand + sort + perPage + page",
+      typeof sels[0]?.brand?.[0] === "string" &&
+        sels[0].brand[0].length > 0 &&
+        Array.isArray(sels[0]?.sort) &&
+        sels[0]?.perPage === 100 &&
+        sels[0]?.page === 0,
+    );
   }
 
   globalThis.fetch = ORIGINAL_FETCH;
