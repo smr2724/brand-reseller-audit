@@ -2,17 +2,16 @@
  * Phase 33 — Brand Owner Resolver orchestrator.
  *
  * Pipeline:
- *   1. Insert an `owner_resolution_runs` row (status=running).
- *   2. Load brand context (name, category, top product titles).
+ *   1. CAS-claim the brand: UPDATE brands SET state='running' WHERE
+ *      state IN ('pending','candidates_ready','failed','selected'). If 0
+ *      rows hit, another runner won — bail out (B5).
+ *   2. Insert an `owner_resolution_runs` row (status=running).
  *   3. Run USPTO + web-search adapters in parallel; both soft-fail.
  *   4. Score candidates with the deterministic heuristic.
- *   5. Bulk insert `owner_candidates`.
+ *   5. Bulk insert `owner_candidates` — surface failure to caller (B7).
  *   6. Update brand.owner_resolution_state to `candidates_ready` (or
- *      `failed` if both adapters errored).
+ *      `failed`).
  *   7. Update the run row with final counts and status.
- *
- * Never throws — always returns a structured `ResolveBrandOwnerResult`
- * the caller can serialise to a route response.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { searchUsptoTrademarks } from "./uspto";
@@ -30,6 +29,8 @@ export interface ResolveBrandOwnerOptions {
   /** Override adapters — used by tests. */
   usptoFn?: typeof searchUsptoTrademarks;
   webSearchFn?: typeof searchWebForOwners;
+  /** Bypass CAS guard — used by tests. */
+  skipCasGuard?: boolean;
 }
 
 export interface ResolveBrandOwnerResult {
@@ -37,22 +38,48 @@ export interface ResolveBrandOwnerResult {
   run_id: string | null;
   candidates_count: number;
   top_score: number | null;
-  state: "candidates_ready" | "failed";
+  state: "candidates_ready" | "failed" | "skipped";
   error?: string;
 }
 
 const TOP_PRODUCT_TITLE_LIMIT = 20;
 
-async function loadBrandContext(
+interface ClaimedBrand {
+  brand_id: string;
+  brand_name: string;
+  category: string | null;
+}
+
+async function claimBrand(
   admin: SupabaseClient,
   brandId: string,
-): Promise<BrandContext | null> {
-  const { data: brand, error } = await admin
-    .from("brands")
-    .select("id, name, category")
-    .eq("id", brandId)
-    .maybeSingle();
-  if (error || !brand) return null;
+): Promise<ClaimedBrand | null> {
+  const { data, error } = await admin.rpc("claim_owner_resolution_run", {
+    p_brand_id: brandId,
+  });
+  if (error) {
+    console.warn("[owner-resolver] claim RPC failed", error.message);
+    return null;
+  }
+  const rows = (data ?? []) as Array<{
+    claimed: boolean;
+    brand_id: string | null;
+    brand_name: string | null;
+    category: string | null;
+  }>;
+  const row = rows[0];
+  if (!row || !row.claimed || !row.brand_id) return null;
+  return {
+    brand_id: row.brand_id,
+    brand_name: row.brand_name ?? "",
+    category: row.category ?? null,
+  };
+}
+
+async function loadProductTitles(
+  admin: SupabaseClient,
+  brandId: string,
+): Promise<string[]> {
   const { data: asins } = await admin
     .from("brand_asins")
     .select("title")
@@ -64,12 +91,7 @@ async function loadBrandContext(
       titles.push(row.title.trim());
     }
   }
-  return {
-    brand_id: (brand as { id: string }).id,
-    brand_name: String((brand as { name: string }).name),
-    category: ((brand as { category?: string | null }).category ?? null),
-    product_titles: titles,
-  };
+  return titles;
 }
 
 function dedupeCandidates(
@@ -86,8 +108,6 @@ function dedupeCandidates(
       seen.set(key, c);
       continue;
     }
-    // Prefer the USPTO record over a web hit when keys collide so we
-    // keep the trademark metadata, but copy across the domain if missing.
     if (existing.candidate_source !== "uspto" && c.candidate_source === "uspto") {
       seen.set(key, { ...c, candidate_domain: existing.candidate_domain ?? c.candidate_domain });
     } else if (!existing.candidate_domain && c.candidate_domain) {
@@ -143,6 +163,10 @@ function toPersisted(
   };
 }
 
+function truncate(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n - 3)}...` : s;
+}
+
 export async function resolveBrandOwner(
   admin: SupabaseClient,
   brandId: string,
@@ -151,7 +175,44 @@ export async function resolveBrandOwner(
   const usptoFn = opts.usptoFn ?? searchUsptoTrademarks;
   const webSearchFn = opts.webSearchFn ?? searchWebForOwners;
 
-  // 1. Insert a run row.
+  // 1. Atomic CAS claim — bail out if another runner already owns the brand.
+  let claimed: ClaimedBrand | null;
+  if (opts.skipCasGuard) {
+    const { data } = await admin
+      .from("brands")
+      .select("id, name, category")
+      .eq("id", brandId)
+      .maybeSingle();
+    if (!data) {
+      return {
+        ok: false,
+        run_id: null,
+        candidates_count: 0,
+        top_score: null,
+        state: "failed",
+        error: "brand not found",
+      };
+    }
+    claimed = {
+      brand_id: (data as { id: string }).id,
+      brand_name: String((data as { name: string }).name ?? ""),
+      category: ((data as { category?: string | null }).category ?? null),
+    };
+  } else {
+    claimed = await claimBrand(admin, brandId);
+    if (!claimed) {
+      return {
+        ok: false,
+        run_id: null,
+        candidates_count: 0,
+        top_score: null,
+        state: "skipped",
+        error: "owner-resolution already running or brand missing",
+      };
+    }
+  }
+
+  // 2. Insert run row.
   const { data: runRow, error: runErr } = await admin
     .from("owner_resolution_runs")
     .insert({
@@ -162,6 +223,13 @@ export async function resolveBrandOwner(
     .select("id")
     .single();
   if (runErr || !runRow) {
+    await admin
+      .from("brands")
+      .update({
+        owner_resolution_state: "failed",
+        owner_resolution_error: runErr?.message ?? "failed to create resolution run",
+      })
+      .eq("id", brandId);
     return {
       ok: false,
       run_id: null,
@@ -173,46 +241,18 @@ export async function resolveBrandOwner(
   }
   const runId = (runRow as { id: string }).id;
 
-  await admin
-    .from("brands")
-    .update({
-      owner_resolution_state: "running",
-      owner_resolution_error: null,
-    })
-    .eq("id", brandId);
+  // 3. Load product titles and run adapters.
+  const productTitles = await loadProductTitles(admin, brandId);
+  const brandContext: BrandContext = {
+    brand_id: claimed.brand_id,
+    brand_name: claimed.brand_name,
+    category: claimed.category,
+    product_titles: productTitles,
+  };
 
-  // 2. Load brand context.
-  const brand = await loadBrandContext(admin, brandId);
-  if (!brand) {
-    await admin
-      .from("owner_resolution_runs")
-      .update({
-        status: "failed",
-        completed_at: new Date().toISOString(),
-        error_message: "brand not found",
-      })
-      .eq("id", runId);
-    await admin
-      .from("brands")
-      .update({
-        owner_resolution_state: "failed",
-        owner_resolution_error: "brand not found",
-      })
-      .eq("id", brandId);
-    return {
-      ok: false,
-      run_id: runId,
-      candidates_count: 0,
-      top_score: null,
-      state: "failed",
-      error: "brand not found",
-    };
-  }
-
-  // 3. Run adapters in parallel (each soft-fails internally).
   const [usptoResult, webResult] = await Promise.all([
-    safeUspto(brand.brand_name, usptoFn),
-    safeWebSearch(brand.brand_name, webSearchFn),
+    safeUspto(brandContext.brand_name, usptoFn),
+    safeWebSearch(brandContext.brand_name, webSearchFn),
   ]);
 
   // 4. Dedupe + score.
@@ -220,35 +260,51 @@ export async function resolveBrandOwner(
     ...usptoResult.candidates,
     ...webResult.candidates,
   ]);
-  const scored = scoreCandidates(merged, brand);
+  const scored = scoreCandidates(merged, brandContext);
 
-  // 5. Bulk insert candidates.
+  // 5. Bulk insert candidates. Surface PG errors to brand state (B7).
   let insertedCount = 0;
+  let persistError: string | null = null;
   if (scored.length > 0) {
     const rows = scored.map((c) => toPersisted(c, brandId, runId));
-    const { error: insErr, count } = await admin
-      .from("owner_candidates")
-      .insert(rows, { count: "exact" });
-    if (insErr) {
-      console.warn("[owner-resolver] candidate insert failed", insErr.message);
-    } else {
-      insertedCount = count ?? rows.length;
+    try {
+      const { error: insErr, count } = await admin
+        .from("owner_candidates")
+        .insert(rows, { count: "exact" });
+      if (insErr) {
+        persistError = `Failed to persist candidates: ${insErr.message}`;
+      } else {
+        insertedCount = count ?? rows.length;
+        // If the count came back smaller than expected, that's still a partial failure.
+        if (insertedCount < rows.length) {
+          persistError = `Persisted ${insertedCount}/${rows.length} candidates — ${rows.length - insertedCount} failed`;
+        }
+      }
+    } catch (e) {
+      persistError = `Failed to persist candidates: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
 
   // 6. Determine final state.
-  const bothFailed =
-    usptoResult.error != null && webResult.error != null;
-  const finalState = bothFailed && insertedCount === 0 ? "failed" : "candidates_ready";
-  const errorMessage = bothFailed
-    ? [usptoResult.error, webResult.error].filter(Boolean).join("; ")
-    : null;
+  const bothFailed = usptoResult.error != null && webResult.error != null;
+  let finalState: "candidates_ready" | "failed";
+  let errorMessage: string | null = null;
+  if (persistError) {
+    finalState = "failed";
+    errorMessage = truncate(persistError, 1000);
+  } else if (bothFailed && insertedCount === 0) {
+    finalState = "failed";
+    errorMessage = [usptoResult.error, webResult.error].filter(Boolean).join("; ");
+  } else {
+    finalState = "candidates_ready";
+    errorMessage = null;
+  }
 
   // 7. Persist run row.
   await admin
     .from("owner_resolution_runs")
     .update({
-      status: bothFailed && insertedCount === 0 ? "failed" : "succeeded",
+      status: finalState === "failed" ? "failed" : "succeeded",
       completed_at: new Date().toISOString(),
       error_message: errorMessage,
       uspto_query: usptoResult.query,
@@ -265,13 +321,20 @@ export async function resolveBrandOwner(
     .from("brands")
     .update({
       owner_resolution_state: finalState,
-      owner_resolution_error: errorMessage,
+      owner_resolution_error: persistError
+        ? `Candidate persist failed (run ${runId}) — check run row for details`
+        : errorMessage,
     })
     .eq("id", brandId);
 
   const topScore = scored.length > 0
     ? scored.reduce((m, c) => (c.heuristic_score > m ? c.heuristic_score : m), scored[0]!.heuristic_score)
     : null;
+
+  if (persistError) {
+    // Re-throw the persist error so callers (cron / admin endpoint) see it.
+    throw new Error(persistError);
+  }
 
   return {
     ok: finalState === "candidates_ready",

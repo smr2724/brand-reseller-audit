@@ -2,8 +2,10 @@
  * Phase 33 — POST /api/owner-resolver/trigger
  *
  * Manually run or rerun the brand owner resolver for a single brand.
- * Auth mirrors /api/admin/recover-stuck-brand: CRON_SECRET bearer or
- * SUPABASE_SERVICE_ROLE_KEY bearer.
+ *
+ * Auth (M10 unified helper): CRON_SECRET / x-vercel-cron-signature /
+ * service-role bearer, OR a Supabase user session whose user_id matches
+ * the target brand's user_id.
  *
  * Body: { brand_id: string }
  * Returns: { run_id, candidates_count, top_score, state }
@@ -18,6 +20,7 @@
 import { NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import { resolveBrandOwner } from "@/lib/owner-resolver/resolve";
+import { authorizeOwnerResolverRequest } from "@/lib/owner-resolver/auth";
 import type { OwnerResolutionTrigger } from "@/lib/owner-resolver/types";
 
 export const runtime = "nodejs";
@@ -26,24 +29,7 @@ export const fetchCache = "force-no-store";
 export const revalidate = 0;
 export const maxDuration = 300;
 
-function authorize(req: Request): boolean {
-  const auth = req.headers.get("authorization") ?? "";
-  const cronHeader = req.headers.get("x-vercel-cron-signature");
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret) {
-    if (auth === `Bearer ${cronSecret}`) return true;
-    if (cronHeader && cronHeader === cronSecret) return true;
-  }
-  const sr = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (sr && auth === `Bearer ${sr}`) return true;
-  return false;
-}
-
 export async function POST(req: Request) {
-  if (!authorize(req)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-
   let body: { brand_id?: unknown } = {};
   try {
     body = (await req.json()) as { brand_id?: unknown };
@@ -53,6 +39,11 @@ export async function POST(req: Request) {
   const brandId = typeof body.brand_id === "string" ? body.brand_id.trim() : "";
   if (!brandId) {
     return NextResponse.json({ error: "brand_id required" }, { status: 400 });
+  }
+
+  const auth = await authorizeOwnerResolverRequest(req, brandId);
+  if (auth.kind === "unauthorized") {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const admin = createSupabaseAdminClient();
@@ -81,8 +72,15 @@ export async function POST(req: Request) {
   );
   const triggered_by: OwnerResolutionTrigger = state === "selected" ? "rerun" : "manual";
 
-  const result = await resolveBrandOwner(admin, brandId, { triggered_by });
-  return NextResponse.json(result, {
-    status: result.ok ? 200 : 500,
-  });
+  try {
+    const result = await resolveBrandOwner(admin, brandId, { triggered_by });
+    return NextResponse.json(result, {
+      status: result.ok ? 200 : 500,
+    });
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : String(e) },
+      { status: 500 },
+    );
+  }
 }

@@ -2,8 +2,8 @@
  * Phase 33 — POST /api/owner-resolver/select
  *
  * Persist the user's selection of one or more candidate owners for a
- * brand. The user can select multiple candidates (e.g. when multiple
- * brand-owned shell companies represent the same parent on Amazon).
+ * brand. Atomic via the `select_owner_candidates` SECURITY DEFINER RPC
+ * (B2 / M1 / M2 / M9 — see migration 0030).
  *
  * Body:
  *   {
@@ -12,20 +12,12 @@
  *     resolved_owner_type: 'manufacturer'|'brand_owner'|'licensee'|'distributor'|'dba'|'holding_co'|'unknown'
  *   }
  *
- * On selection:
- *   - is_selected_owner=true on each picked candidate, false on others
- *     for that brand.
- *   - brands.owner_resolution_state='selected', owner_resolved_at=NOW()
- *   - brands.resolved_owner_type set to the supplied type
- *   - If exactly one candidate selected: copy its name/domain to brands
- *   - If multiple selected: copy the highest-scoring one to brands
- *
- * Returns: { ok: true, selected_count }
+ * Returns: { ok: true, selected_count, primary }
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
-import type { ResolvedOwnerType } from "@/lib/owner-resolver/types";
+import { authorizeOwnerResolverRequest } from "@/lib/owner-resolver/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,20 +39,7 @@ const Body = z.object({
   ]),
 });
 
-function authorize(req: Request): boolean {
-  const auth = req.headers.get("authorization") ?? "";
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && auth === `Bearer ${cronSecret}`) return true;
-  const sr = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (sr && auth === `Bearer ${sr}`) return true;
-  return false;
-}
-
 export async function POST(req: Request) {
-  if (!authorize(req)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-
   let parsed;
   try {
     parsed = Body.safeParse(await req.json());
@@ -74,7 +53,11 @@ export async function POST(req: Request) {
     );
   }
   const { brand_id, candidate_ids, resolved_owner_type } = parsed.data;
-  const ownerType = resolved_owner_type as ResolvedOwnerType;
+
+  const auth = await authorizeOwnerResolverRequest(req, brand_id);
+  if (auth.kind === "unauthorized") {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
 
   const admin = createSupabaseAdminClient();
   if (!admin) {
@@ -84,55 +67,33 @@ export async function POST(req: Request) {
     );
   }
 
-  // Load the picked candidates so we know their names/domains/scores.
-  const { data: picked, error: pickErr } = await admin
-    .from("owner_candidates")
-    .select("id, brand_id, candidate_company_name, candidate_domain, heuristic_score")
-    .in("id", candidate_ids)
-    .eq("brand_id", brand_id);
-  if (pickErr) {
-    return NextResponse.json(
-      { error: pickErr.message },
-      { status: 500 },
-    );
+  const { data, error } = await admin.rpc("select_owner_candidates", {
+    p_brand_id: brand_id,
+    p_candidate_ids: candidate_ids,
+    p_resolved_owner_type: resolved_owner_type,
+    p_user_id: auth.kind === "user" ? auth.userId : null,
+  });
+  if (error) {
+    const msg = error.message ?? "select RPC failed";
+    const status = /not belong to|no resolution runs|invalid/i.test(msg) ? 400 : 500;
+    return NextResponse.json({ error: msg }, { status });
   }
-  if (!picked || picked.length === 0) {
-    return NextResponse.json(
-      { error: "no matching candidates for that brand" },
-      { status: 404 },
-    );
-  }
-
-  const now = new Date().toISOString();
-
-  // Clear is_selected_owner on all candidates for this brand first.
-  await admin
-    .from("owner_candidates")
-    .update({ is_selected_owner: false, selected_at: null })
-    .eq("brand_id", brand_id);
-
-  // Mark the picked ones.
-  await admin
-    .from("owner_candidates")
-    .update({ is_selected_owner: true, selected_at: now })
-    .in("id", candidate_ids);
-
-  // Decide which candidate to mirror onto the brand row.
-  const sorted = [...(picked as Array<{ id: string; candidate_company_name: string; candidate_domain: string | null; heuristic_score: number | null }>)]
-    .sort((a, b) => (b.heuristic_score ?? 0) - (a.heuristic_score ?? 0));
-  const top = sorted[0]!;
-
-  await admin
-    .from("brands")
-    .update({
-      owner_resolution_state: "selected",
-      owner_resolved_at: now,
-      resolved_owner_type: ownerType,
-      resolved_owner_company_name: top.candidate_company_name,
-      resolved_owner_domain: top.candidate_domain,
-      owner_resolution_error: null,
-    })
-    .eq("id", brand_id);
-
-  return NextResponse.json({ ok: true, selected_count: picked.length });
+  const rows = (data ?? []) as Array<{
+    selected_count: number | null;
+    primary_candidate_id: string | null;
+    primary_candidate_name: string | null;
+    primary_candidate_domain: string | null;
+  }>;
+  const row = rows[0];
+  return NextResponse.json({
+    ok: true,
+    selected_count: row?.selected_count ?? candidate_ids.length,
+    primary: row
+      ? {
+          id: row.primary_candidate_id,
+          name: row.primary_candidate_name,
+          domain: row.primary_candidate_domain,
+        }
+      : null,
+  });
 }

@@ -39,6 +39,17 @@ const RESELLER_PATTERNS: RegExp[] = [];
 
 const DEAD_TRADEMARK_STATUSES = ["DEAD", "ABANDONED", "CANCELLED", "EXPIRED"];
 
+// US state codes + DC (M8 — strict allow-list to defeat false-positives
+// like "PO" / "RR" matching as 2-letter tokens).
+export const US_STATE_CODES: ReadonlySet<string> = new Set([
+  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA",
+  "HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
+  "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
+  "NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
+  "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY",
+  "DC",
+]);
+
 interface ScoringContext {
   brand: BrandContext;
   /** All candidates from this resolver run — used to detect multi-query
@@ -116,11 +127,19 @@ function isResellerPattern(domain: string | null): boolean {
   return RESELLER_PATTERNS.some((re) => re.test(domain));
 }
 
-function extractStateFromAddress(address: string | null): string | null {
+/**
+ * Extract a US state code from a US-style address. M8 fix: only return a
+ * code present in US_STATE_CODES so generic 2-letter tokens like "PO"
+ * (PO Box), "RR" (Rural Route), "BR" don't get mis-labelled as states.
+ * Pattern requires the 2-letter token to immediately precede a 5-digit
+ * ZIP code so we don't match arbitrary capitalised words.
+ */
+export function extractStateFromAddress(address: string | null): string | null {
   if (!address) return null;
-  const m = address.match(/\b([A-Z]{2})\b\s*\d{5}/);
-  if (m) return m[1] ?? null;
-  return null;
+  const m = address.match(/\b([A-Z]{2})\b\s+\d{5}(?:-\d{4})?\b/);
+  if (!m) return null;
+  const code = m[1] ?? "";
+  return US_STATE_CODES.has(code) ? code : null;
 }
 
 function buildContext(
@@ -197,7 +216,8 @@ export function scoreCandidate(
     if (hits && hits.size >= 2) score += 20;
   }
 
-  if (hasCategoryMatch(candidate, ctx.brand.category)) {
+  const categoryMatch = hasCategoryMatch(candidate, ctx.brand.category);
+  if (categoryMatch) {
     score += 15;
   }
 
@@ -205,7 +225,11 @@ export function scoreCandidate(
     score += 10;
   }
 
-  if (anyProductOverlap(candidate.candidate_company_name, ctx.brand.product_titles)) {
+  const productMatch = anyProductOverlap(
+    candidate.candidate_company_name,
+    ctx.brand.product_titles,
+  );
+  if (productMatch) {
     score += 10;
   }
 
@@ -244,9 +268,12 @@ export function scoreCandidate(
     score -= 15;
   }
 
+  // M3 fix: only apply the category-mismatch penalty when the brand has a
+  // category to compare against. Null category = no signal, not negative.
   if (
-    !hasCategoryMatch(candidate, ctx.brand.category) &&
-    !anyProductOverlap(candidate.candidate_company_name, ctx.brand.product_titles)
+    ctx.brand.category != null &&
+    !categoryMatch &&
+    !productMatch
   ) {
     score -= 10;
   }

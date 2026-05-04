@@ -7,10 +7,15 @@
  * any failure is swallowed (the manual /admin/brands/:id/owner page can
  * always re-run).
  *
- * Idempotency: skip if `owner_resolution_state` is already 'running',
- * 'candidates_ready', or 'selected'.
+ * Idempotency (B5): the resolver itself does an atomic CAS-claim, so even
+ * if multiple call-sites race we only run once.
+ *
+ * Vercel safety (B6): we register the work with `waitUntil` so the
+ * function host extends its lifetime for the background work instead of
+ * dropping it after the response is sent.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { waitUntil } from "@vercel/functions";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import { resolveBrandOwner } from "./resolve";
 
@@ -18,20 +23,25 @@ const SKIP_STATES = new Set(["running", "candidates_ready", "selected"]);
 
 /**
  * Fire-and-forget. Returns immediately; resolver runs in the background
- * via `Promise.resolve().then(...)` so it's compatible with Vercel
- * serverless functions that complete the response before all work is done.
+ * via Vercel's `waitUntil` so the function host keeps it alive after the
+ * response has been sent.
  */
 export function maybeTriggerOwnerResolution(brandId: string): void {
   if (!brandId) return;
-  Promise.resolve()
-    .then(() => runIfNeeded(brandId))
-    .catch((e: unknown) => {
-      console.warn(
-        "[owner-resolver] auto-trigger failed",
-        brandId,
-        e instanceof Error ? e.message : String(e),
-      );
-    });
+  const work = runIfNeeded(brandId).catch((e: unknown) => {
+    console.warn(
+      "[owner-resolver] auto-trigger failed",
+      brandId,
+      e instanceof Error ? e.message : String(e),
+    );
+  });
+  try {
+    waitUntil(work);
+  } catch {
+    // waitUntil only available inside a Vercel request context — outside
+    // (cron scripts, local dev, tests) the bare promise still completes
+    // because the surrounding process is long-lived.
+  }
 }
 
 async function runIfNeeded(brandId: string): Promise<void> {
@@ -52,6 +62,8 @@ async function runIfNeeded(brandId: string): Promise<void> {
     (brand as { owner_resolution_state?: string }).owner_resolution_state ??
       "pending",
   );
+  // Cheap pre-check before the CAS — avoids creating a noisy "skipped"
+  // result for the common case where state is already terminal.
   if (SKIP_STATES.has(state)) return;
   await resolveBrandOwner(admin, brandId, {
     triggered_by: "auto_post_enrichment",

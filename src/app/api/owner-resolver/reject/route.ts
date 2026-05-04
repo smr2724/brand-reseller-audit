@@ -1,10 +1,20 @@
 /**
- * Phase 33 — POST /api/owner-resolver/notes
+ * Phase 33 review fix B3 — POST /api/owner-resolver/reject
  *
- * Save free-text manual notes the user wrote on the candidate review
- * page. Stored on `brands.owner_resolution_notes`.
+ * Implements the "None of these — manual research" path. Sets
+ * `brands.owner_resolution_state='failed'`, clears any selected candidates
+ * brand-wide, marks the latest run as failed, and appends a system note.
+ *
+ * Body: { brand_id: string, note?: string }
  *
  * Auth (M10 unified helper).
+ *
+ * Safety belts (NEVER remove):
+ *   runtime = nodejs
+ *   dynamic = force-dynamic
+ *   fetchCache = force-no-store
+ *   revalidate = 0
+ *   maxDuration = 300
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -19,7 +29,7 @@ export const maxDuration = 300;
 
 const Body = z.object({
   brand_id: z.string().trim().min(1),
-  notes: z.string().max(8000),
+  note: z.string().max(2000).optional(),
 });
 
 export async function POST(req: Request) {
@@ -32,8 +42,9 @@ export async function POST(req: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "invalid input" }, { status: 400 });
   }
+  const { brand_id, note } = parsed.data;
 
-  const auth = await authorizeOwnerResolverRequest(req, parsed.data.brand_id);
+  const auth = await authorizeOwnerResolverRequest(req, brand_id);
   if (auth.kind === "unauthorized") {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
@@ -46,12 +57,16 @@ export async function POST(req: Request) {
     );
   }
 
-  const { error } = await admin
-    .from("brands")
-    .update({ owner_resolution_notes: parsed.data.notes })
-    .eq("id", parsed.data.brand_id);
+  const { error } = await admin.rpc("reject_owner_candidates", {
+    p_brand_id: brand_id,
+    p_user_id: auth.kind === "user" ? auth.userId : null,
+    p_note: note ?? null,
+  });
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { error: error.message ?? "reject RPC failed" },
+      { status: 500 },
+    );
   }
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, state: "failed" });
 }

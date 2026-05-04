@@ -2,13 +2,14 @@
  * Phase 33 — GET /api/owner-resolver/candidates?brand_id=...
  *
  * Returns the latest run + candidates for a brand. Candidates are ordered
- * by `heuristic_score DESC, created_at DESC`. The brand row's resolution
- * fields are echoed back so the UI doesn't need a second round-trip.
+ * by `heuristic_score DESC, created_at DESC`.
  *
- * Auth: same scheme as the trigger route (CRON_SECRET / service-role bearer).
+ * Auth (M10 unified helper): CRON_SECRET / service-role bearer or a
+ * Supabase session whose user_id matches the brand's user_id.
  */
 import { NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { authorizeOwnerResolverRequest } from "@/lib/owner-resolver/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,24 +17,16 @@ export const fetchCache = "force-no-store";
 export const revalidate = 0;
 export const maxDuration = 300;
 
-function authorize(req: Request): boolean {
-  const auth = req.headers.get("authorization") ?? "";
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && auth === `Bearer ${cronSecret}`) return true;
-  const sr = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (sr && auth === `Bearer ${sr}`) return true;
-  return false;
-}
-
 export async function GET(req: Request) {
-  if (!authorize(req)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-
   const url = new URL(req.url);
   const brandId = url.searchParams.get("brand_id")?.trim() ?? "";
   if (!brandId) {
     return NextResponse.json({ error: "brand_id required" }, { status: 400 });
+  }
+
+  const auth = await authorizeOwnerResolverRequest(req, brandId);
+  if (auth.kind === "unauthorized") {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const admin = createSupabaseAdminClient();

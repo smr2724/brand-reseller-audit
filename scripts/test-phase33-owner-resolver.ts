@@ -619,6 +619,7 @@ async function main() {
       triggered_by: "manual",
       usptoFn: fakeUspto,
       webSearchFn: fakeWeb,
+      skipCasGuard: true,
     });
     assert(result.ok === true, "ok=true on success");
     assert(result.run_id === "run-1", "run id returned");
@@ -653,6 +654,7 @@ async function main() {
       triggered_by: "manual",
       usptoFn: failUspto,
       webSearchFn: failWeb,
+      skipCasGuard: true,
     });
     assert(result.ok === false, "ok=false when both fail");
     assert(result.state === "failed", "state failed");
@@ -680,6 +682,7 @@ async function main() {
       triggered_by: "manual",
       usptoFn: throwUspto,
       webSearchFn: okWeb,
+      skipCasGuard: true,
     });
     assert(result.run_id !== null, "run row created even when adapter throws");
     assert(result.state === "candidates_ready" || result.state === "failed", "no exception escaped");
@@ -721,14 +724,293 @@ async function main() {
       triggered_by: "manual",
       usptoFn: fakeUspto,
       webSearchFn: fakeWeb,
+      skipCasGuard: true,
     });
     await resolveBrandOwner(mock.client, "b1", {
       triggered_by: "rerun",
       usptoFn: fakeUspto,
       webSearchFn: fakeWeb,
+      skipCasGuard: true,
     });
     assert(mock.state.runs.length === 2, "two run rows after rerun");
     assert(mock.state.candidates.length === 2, "history preserved (2 candidate rows)");
+  }
+
+  // ============================================================
+  // Phase 33 review-fix coverage (PR #31 follow-ups)
+  // ============================================================
+  console.log("\n=== Review fixes ===");
+
+  // M3 — null-category brand should NOT be penalized -10 when there's no
+  // category to compare against.
+  {
+    const nullCatBrand: BrandContext = {
+      brand_id: "b1",
+      brand_name: "X",
+      category: null,
+      product_titles: [],
+    };
+    const noMatchCand = makeCandidate({
+      candidate_company_name: "Acme",
+      candidate_domain: "acme.com",
+      // no category, no product overlap -> with null cat the -10 penalty must NOT apply
+    });
+    const matchedBrand: BrandContext = { ...nullCatBrand, category: "shampoo" };
+    const [nullScored] = scoreCandidates([noMatchCand], nullCatBrand);
+    const [withCatScored] = scoreCandidates([noMatchCand], matchedBrand);
+    assert(
+      (nullScored?.heuristic_score ?? 0) > (withCatScored?.heuristic_score ?? 0),
+      `null-category brand not penalized -10 (${nullScored?.heuristic_score} > ${withCatScored?.heuristic_score})`,
+    );
+  }
+
+  // M4 — "PUBLISHED FOR OPPOSITION" must NOT be treated as LIVE.
+  {
+    const rec = parseUsptoRecord({
+      serial_number: "11",
+      mark_text: "Brand X",
+      current_owner_name: "Brand X Co",
+      status: "PUBLISHED FOR OPPOSITION",
+    });
+    assert(rec === null, "PUBLISHED FOR OPPOSITION rejected (not LIVE)");
+  }
+  {
+    const rec = parseUsptoRecord({
+      serial_number: "12",
+      mark_text: "Brand Y",
+      current_owner_name: "Brand Y Co",
+      status: "ALLOWED — INTENT TO USE",
+    });
+    assert(rec === null, "ALLOWED / INTENT TO USE rejected (not LIVE)");
+  }
+  {
+    const rec = parseUsptoRecord({
+      serial_number: "13",
+      mark_text: "Brand Z",
+      current_owner_name: "Brand Z Co",
+      status: "REGISTERED",
+    });
+    assert(rec !== null, "REGISTERED accepted as LIVE");
+  }
+  {
+    const rec = parseUsptoRecord({
+      serial_number: "14",
+      mark_text: "Brand W",
+      current_owner_name: "Brand W Co",
+      status: "Some text",
+      status_code: 712,
+    });
+    assert(rec !== null, "status_code 712 accepted as LIVE");
+  }
+
+  // M5 — USPTO record with null/empty mark_text or serial_number rejected.
+  {
+    const rec = parseUsptoRecord({
+      mark_text: null,
+      serial_number: "9",
+      current_owner_name: "Owner",
+      status: "REGISTERED",
+    });
+    assert(rec === null, "missing mark_text rejected");
+  }
+  {
+    const rec = parseUsptoRecord({
+      mark_text: "Some Mark",
+      serial_number: "",
+      current_owner_name: "Owner",
+      status: "REGISTERED",
+    });
+    assert(rec === null, "empty serial_number rejected");
+  }
+
+  // M7 — extended deny list covers Crunchbase, Bloomberg, Google, Yahoo, etc.
+  assert(isDeniedDomain("crunchbase.com") === true, "crunchbase denied");
+  assert(isDeniedDomain("bloomberg.com") === true, "bloomberg denied");
+  assert(isDeniedDomain("dnb.com") === true, "dnb denied");
+  assert(isDeniedDomain("zoominfo.com") === true, "zoominfo denied");
+  assert(isDeniedDomain("owler.com") === true, "owler denied");
+  assert(isDeniedDomain("google.com") === true, "google.com denied");
+  assert(isDeniedDomain("google.co.uk") === true, "google.co.uk denied via prefix");
+  assert(isDeniedDomain("yahoo.com") === true, "yahoo.com denied");
+  assert(isDeniedDomain("yahoo.fr") === true, "yahoo.fr denied via prefix");
+  assert(isDeniedDomain("glassdoor.com") === true, "glassdoor denied");
+  assert(isDeniedDomain("indeed.com") === true, "indeed denied");
+  assert(isDeniedDomain("pinterest.de") === true, "pinterest.de denied via prefix");
+  assert(isDeniedDomain("linkedin.de") === true, "linkedin.de denied via prefix");
+
+  // M8 — state extractor only matches real US states + DC.
+  {
+    const { extractStateFromAddress } = require(
+      "../src/lib/owner-resolver/heuristic-scoring",
+    ) as typeof import("../src/lib/owner-resolver/heuristic-scoring");
+    assert(
+      extractStateFromAddress("123 Main St, Atlanta, GA 30301") === "GA",
+      "valid GA extracted",
+    );
+    assert(
+      extractStateFromAddress("PO Box 123, 12345") === null,
+      "PO Box does NOT match as state code",
+    );
+    assert(
+      extractStateFromAddress("RR 12345") === null,
+      "Rural Route token does NOT match as state",
+    );
+    assert(
+      extractStateFromAddress("Washington DC 20500") === "DC",
+      "DC counted as state",
+    );
+    assert(
+      extractStateFromAddress("Some Street XX 99999") === null,
+      "fake state code XX rejected",
+    );
+  }
+
+  // B5 — auto-trigger CAS guard: a second concurrent attempt sees state
+  // 'running' and bails out without inserting a run row.
+  {
+    const calls: string[] = [];
+    const claimResults = [
+      // First call wins the claim
+      [{ claimed: true, brand_id: "b1", brand_name: "Terra Pure", category: null }],
+      // Second call loses (no rows)
+      [{ claimed: false, brand_id: null, brand_name: null, category: null }],
+    ];
+    const mock = makeAdminMock();
+    let claimCallCount = 0;
+    (mock.client as any).rpc = async (name: string) => {
+      calls.push(name);
+      if (name === "claim_owner_resolution_run") {
+        const idx = Math.min(claimCallCount, claimResults.length - 1);
+        claimCallCount += 1;
+        return { data: claimResults[idx], error: null };
+      }
+      return { data: null, error: null };
+    };
+    const fakeAdapter: any = async () => ({
+      query: "u",
+      candidates: [],
+      raw: null,
+      error: null,
+      results_count: 0,
+      queries: [],
+    });
+    const r1 = await resolveBrandOwner(mock.client, "b1", {
+      triggered_by: "manual",
+      usptoFn: fakeAdapter,
+      webSearchFn: fakeAdapter,
+    });
+    const r2 = await resolveBrandOwner(mock.client, "b1", {
+      triggered_by: "manual",
+      usptoFn: fakeAdapter,
+      webSearchFn: fakeAdapter,
+    });
+    assert(r1.run_id !== null, "first runner claims and inserts run row");
+    assert(r2.run_id === null, "second runner is skipped (CAS lost)");
+    assert(r2.state === "skipped", "second runner state=skipped");
+    assert(mock.state.runs.length === 1, "exactly 1 run row across both attempts");
+  }
+
+  // B7 — bulk-insert PG error must surface to brand state and re-throw.
+  {
+    const mock = makeAdminMock();
+    // Inject an insert error for owner_candidates.
+    const origFrom = mock.client.from;
+    mock.client.from = (table: string) => {
+      const b = origFrom(table);
+      if (table === "owner_candidates") {
+        return {
+          ...b,
+          insert: (rows: any) => {
+            const arr = Array.isArray(rows) ? rows : [rows];
+            return Object.assign(
+              Promise.resolve({
+                error: { message: "duplicate key" },
+                count: 0,
+              }),
+              {
+                select: () => ({
+                  single: async () => ({
+                    data: null,
+                    error: { message: "duplicate key" },
+                  }),
+                }),
+              },
+            );
+          },
+        };
+      }
+      return b;
+    };
+    const fakeUspto: any = async () => ({
+      query: "u",
+      candidates: [
+        {
+          candidate_company_name: "Acme",
+          candidate_domain: null,
+          candidate_source: "uspto",
+          evidence_text: null,
+          evidence_url: null,
+          match_reason: null,
+          trademark_serial_number: "1",
+          trademark_status: "LIVE",
+          trademark_registration_date: null,
+          trademark_owner_address: null,
+          goods_services_text: null,
+          raw_payload: {},
+        },
+      ],
+      raw: null,
+      error: null,
+      results_count: 1,
+    });
+    const fakeWeb: any = async () => ({
+      queries: [],
+      candidates: [],
+      raw: null,
+      error: null,
+      results_count: 0,
+    });
+    let threw = false;
+    try {
+      await resolveBrandOwner(mock.client, "b1", {
+        triggered_by: "manual",
+        usptoFn: fakeUspto,
+        webSearchFn: fakeWeb,
+        skipCasGuard: true,
+      });
+    } catch {
+      threw = true;
+    }
+    assert(threw === true, "persist error rethrown to caller");
+    const brandFinal = mock.state.brandUpdates[mock.state.brandUpdates.length - 1];
+    assert(
+      brandFinal && brandFinal.owner_resolution_state === "failed",
+      "brand state set to failed on persist error",
+    );
+  }
+
+  // B8 — rate-limit module enforces concurrency.
+  {
+    const { rateLimit, __resetRateLimitBuckets } = require(
+      "../src/lib/owner-resolver/rate-limit",
+    ) as typeof import("../src/lib/owner-resolver/rate-limit");
+    __resetRateLimitBuckets();
+    let active = 0;
+    let maxActive = 0;
+    const work = async () => {
+      active += 1;
+      if (active > maxActive) maxActive = active;
+      await new Promise((r) => setTimeout(r, 30));
+      active -= 1;
+    };
+    await Promise.all([
+      rateLimit({ key: "test", maxConcurrent: 2, minIntervalMs: 0 }, work),
+      rateLimit({ key: "test", maxConcurrent: 2, minIntervalMs: 0 }, work),
+      rateLimit({ key: "test", maxConcurrent: 2, minIntervalMs: 0 }, work),
+      rateLimit({ key: "test", maxConcurrent: 2, minIntervalMs: 0 }, work),
+    ]);
+    assert(maxActive <= 2, `max concurrency respected (got ${maxActive})`);
+    __resetRateLimitBuckets();
   }
 
   console.log("\n--------");

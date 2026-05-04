@@ -6,14 +6,13 @@
  * Lets the admin reviewer:
  *   - inspect candidate owners ranked by deterministic heuristic_score
  *   - select one or many as the resolved owner(s) of the brand
- *   - mark "none of these — manual research needed"
+ *   - mark "none of these — manual research needed" (B3 reject route)
  *   - save free-text notes
  *   - rerun the resolver
  *
- * All mutating actions go through the /api/owner-resolver/* routes,
- * which are bearer-auth gated. The page reads the user-supplied bearer
- * from localStorage (key: 'owner_resolver_bearer'). If absent the user is
- * prompted once on first action.
+ * Auth (B4 fix): no bearer prompt, no localStorage. The browser is
+ * authenticated via the user's Supabase session cookies; the API routes
+ * verify `brands.user_id = current_user.id` before any read or write.
  */
 import { useCallback, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -78,35 +77,6 @@ const OWNER_TYPES = [
   "holding_co",
   "unknown",
 ] as const;
-
-function readBearer(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem("owner_resolver_bearer");
-}
-
-function writeBearer(value: string): void {
-  if (typeof window === "undefined") return;
-  if (value.trim().length === 0) {
-    window.localStorage.removeItem("owner_resolver_bearer");
-  } else {
-    window.localStorage.setItem("owner_resolver_bearer", value.trim());
-  }
-}
-
-function ensureBearer(): string | null {
-  const cur = readBearer();
-  if (cur) return cur;
-  if (typeof window === "undefined") return null;
-  const supplied = window.prompt(
-    "Paste CRON_SECRET or SUPABASE_SERVICE_ROLE_KEY (kept in localStorage):",
-    "",
-  );
-  if (supplied && supplied.trim().length > 0) {
-    writeBearer(supplied);
-    return supplied.trim();
-  }
-  return null;
-}
 
 function fmtTime(iso: string | null): string {
   if (!iso) return "—";
@@ -204,21 +174,14 @@ export default function OwnerResolverClient({
 
   const callApi = useCallback(
     async (path: string, body: unknown, method: "POST" | "GET" = "POST") => {
-      const bearer = ensureBearer();
-      if (!bearer) {
-        setErrorMsg("Auth token required");
-        return null;
-      }
       setBusy(path);
       setErrorMsg(null);
       setStatusMsg(null);
       try {
         const res = await fetch(path, {
           method,
-          headers: {
-            Authorization: `Bearer ${bearer}`,
-            "Content-Type": "application/json",
-          },
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
           body: method === "POST" ? JSON.stringify(body) : undefined,
         });
         const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -282,22 +245,15 @@ export default function OwnerResolverClient({
       "Mark this brand as 'none of these — manual research needed'? This sets the resolution state to 'failed' and clears any selection.",
     );
     if (!ok) return;
-    const trimmedNotes =
-      notes.trim().length > 0
-        ? notes
-        : `${notes ?? ""}${notes ? "\n" : ""}Manual review: none of the surfaced candidates matched.`;
-    setNotes(trimmedNotes);
-    await callApi("/api/owner-resolver/notes", {
+    const result = await callApi("/api/owner-resolver/reject", {
       brand_id: brand.id,
-      notes: trimmedNotes,
+      note: notes.trim().length > 0 ? notes.trim() : undefined,
     });
-    // Re-use the trigger endpoint to NOT auto-pick — instead drop a tiny
-    // direct write via select with a dummy is impossible; just use notes
-    // and let the user re-run later. We also flip the brand state via the
-    // trigger endpoint NOT helpful here. Easiest path: leave brand state
-    // untouched and let notes capture the human signal.
-    setStatusMsg("Marked for manual research (notes updated).");
-  }, [brand.id, callApi, notes]);
+    if (result) {
+      setStatusMsg("Marked failed — none of the candidates matched.");
+      router.refresh();
+    }
+  }, [brand.id, callApi, notes, router]);
 
   return (
     <div>

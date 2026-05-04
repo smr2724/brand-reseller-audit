@@ -3,12 +3,16 @@
  *
  * Server component that loads the latest resolution run and its candidates
  * directly from Supabase (admin client) and hands them to the client
- * component for selection. Auth: any authenticated user can view; mutating
- * actions go through the API routes which require CRON_SECRET / service-role.
+ * component for selection.
+ *
+ * Auth (B1 fix): the page enforces `brands.user_id = currentUser.id` —
+ * any unauthorized access returns 404 (not 403) to avoid leaking the
+ * existence of a brand. There is no service-role bypass on this page;
+ * cron / curl callers go through the API routes.
  */
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { createSupabaseAdminClient, createSupabaseServerClient } from "@/lib/supabase/server";
+import { authorizeBrandPageView } from "@/lib/owner-resolver/auth";
 import OwnerResolverClient, { type CandidateRow, type RunRow, type BrandRow } from "./OwnerResolverClient";
 
 export const runtime = "nodejs";
@@ -21,24 +25,8 @@ export default async function BrandOwnerResolverPage({
 }: {
   params: { brand_id: string };
 }) {
-  const supabase = createSupabaseServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) notFound();
-
-  const admin = createSupabaseAdminClient();
-  if (!admin) {
-    return (
-      <div className="p-6 max-w-[1100px] mx-auto">
-        <h1 className="text-xl font-semibold">Brand Owner Resolver</h1>
-        <p className="text-sm text-red-600 mt-2">
-          Server is missing SUPABASE_SERVICE_ROLE_KEY. Configure it before using
-          this page.
-        </p>
-      </div>
-    );
-  }
+  const { allowed, admin } = await authorizeBrandPageView(params.brand_id);
+  if (!allowed || !admin) notFound();
 
   const { data: brand } = await admin
     .from("brands")

@@ -12,6 +12,7 @@
  * domain and capped at 30 per run.
  */
 import type { RawOwnerCandidate } from "./types";
+import { rateLimit } from "./rate-limit";
 
 export interface WebSearchOptions {
   fetchImpl?: typeof fetch;
@@ -42,7 +43,7 @@ const DEFAULT_MAX_PER_QUERY = 15;
 const DEFAULT_MAX_TOTAL = 30;
 
 /** Static deny-list — no candidate may have a registrable domain in this set
- * or matching one of the suffix patterns. */
+ * or matching one of the suffix patterns (M7: extended). */
 export const DOMAIN_DENY_LIST: ReadonlyArray<string> = [
   "amazon.com",
   "amazon.co.uk",
@@ -77,10 +78,31 @@ export const DOMAIN_DENY_LIST: ReadonlyArray<string> = [
   "yelp.com",
   "bbb.org",
   "trustpilot.com",
+  // M7 additions — business directories / search engines / job sites.
+  "crunchbase.com",
+  "bloomberg.com",
+  "owler.com",
+  "dnb.com",
+  "zoominfo.com",
+  "google.com",
+  "bing.com",
+  "duckduckgo.com",
+  "yahoo.com",
+  "glassdoor.com",
+  "indeed.com",
 ];
 
 const DENY_TLD_PREFIXES: ReadonlyArray<string> = [
-  "amazon.", // any amazon.<tld>
+  "amazon.",
+  "google.",
+  "yahoo.",
+  "yelp.",
+  "pinterest.",
+  "linkedin.",
+  "facebook.",
+  "instagram.",
+  "twitter.",
+  "x.",
 ];
 
 /** Strip `www.`, `m.`, `mobile.`, `shop.` from the host and return just the
@@ -173,6 +195,17 @@ async function searchPerplexity(
   apiKey: string,
   fetchImpl: typeof fetch,
 ): Promise<ProviderResult> {
+  return rateLimit(
+    { key: "perplexity", maxConcurrent: 5, minIntervalMs: 200, maxWaitMs: 60_000 },
+    () => searchPerplexityImpl(query, apiKey, fetchImpl),
+  );
+}
+
+async function searchPerplexityImpl(
+  query: string,
+  apiKey: string,
+  fetchImpl: typeof fetch,
+): Promise<ProviderResult> {
   try {
     const res = await fetchImpl("https://api.perplexity.ai/search", {
       method: "POST",
@@ -221,6 +254,17 @@ async function searchPerplexity(
 }
 
 async function searchBrave(
+  query: string,
+  apiKey: string,
+  fetchImpl: typeof fetch,
+): Promise<ProviderResult> {
+  return rateLimit(
+    { key: "brave", maxConcurrent: 5, minIntervalMs: 200, maxWaitMs: 60_000 },
+    () => searchBraveImpl(query, apiKey, fetchImpl),
+  );
+}
+
+async function searchBraveImpl(
   query: string,
   apiKey: string,
   fetchImpl: typeof fetch,
