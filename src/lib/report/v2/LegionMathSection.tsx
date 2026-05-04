@@ -27,6 +27,12 @@ import {
 
 export interface LegionMathSectionProps {
   reportToken: string;
+  /** Phase 34.1 — narrative_json.generated_at, used to namespace
+   *  localStorage so a regenerated report invalidates any prior
+   *  per-device tweaks (otherwise stale revenue / assumptions from a
+   *  previous visit overwrite the fresh server values on hydrate and
+   *  the math card silently drifts from the cover/PDF). */
+  reportGeneratedAt: string | null;
   initialRevenue: number | null;
   initialAssumptions: LegionAssumptions;
   /** Source string for the revenue line (e.g. "Keepa, 2026-04-15"). */
@@ -71,8 +77,40 @@ interface PersistedState {
   assumptions: LegionAssumptions;
 }
 
+/** Phase 34.1 — the legacy key (token only) was vulnerable to stale
+ *  hydration after a regen: a returning visitor's localStorage value
+ *  would override the fresh `initialRevenue` from the server, and the
+ *  whole math chain would compute off the old revenue (Terra Pure
+ *  symptom: cover correct at $5.29M, math card stuck at $916k). The
+ *  storage key now includes `generated_at`, so a regen produces a new
+ *  key and the user-saved tweaks attached to the prior generation are
+ *  cleanly orphaned (and pruned on hydrate). */
+function buildStorageKey(token: string, generatedAt: string | null): string {
+  const stamp = generatedAt ? `:${generatedAt}` : "";
+  return `${STORAGE_PREFIX}${token}${stamp}`;
+}
+
+/** Drop any prior `legion-math-inputs:<token>...` entries left in
+ *  localStorage from earlier visits / earlier generations of the same
+ *  report. Keeps the active (current `generated_at`) key intact. */
+function pruneStaleStorageKeys(token: string, currentKey: string) {
+  try {
+    const prefix = `${STORAGE_PREFIX}${token}`;
+    const toDelete: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith(prefix) && k !== currentKey) {
+        toDelete.push(k);
+      }
+    }
+    for (const k of toDelete) window.localStorage.removeItem(k);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function LegionMathSection(props: LegionMathSectionProps) {
-  const storageKey = `${STORAGE_PREFIX}${props.reportToken}`;
+  const storageKey = buildStorageKey(props.reportToken, props.reportGeneratedAt);
 
   const [revenue, setRevenue] = useState<number | null>(props.initialRevenue);
   const [assumptions, setAssumptions] = useState<LegionAssumptions>(props.initialAssumptions);
@@ -81,8 +119,12 @@ export function LegionMathSection(props: LegionMathSectionProps) {
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // On mount: hydrate from localStorage if present (overrides server-supplied
-  // initials so a returning visitor sees their tweaks).
+  // initials so a returning visitor sees their tweaks). The key includes
+  // `generated_at` so a regen produces a fresh slot — any prior keys for
+  // this token (older generations) are pruned before hydrate to keep
+  // localStorage from accumulating dead entries.
   useEffect(() => {
+    pruneStaleStorageKeys(props.reportToken, storageKey);
     try {
       const raw = window.localStorage.getItem(storageKey);
       if (raw) {
@@ -100,7 +142,7 @@ export function LegionMathSection(props: LegionMathSectionProps) {
       /* ignore corrupted storage */
     }
     setHydrated(true);
-  }, [storageKey]);
+  }, [storageKey, props.reportToken]);
 
   // Persist on change (debounced 200ms) — only after first hydration so we
   // don't overwrite saved state with the server's defaults.

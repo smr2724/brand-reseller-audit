@@ -109,6 +109,7 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
           <>
             <LegionMathSection
               reportToken={reportToken}
+              reportGeneratedAt={narrative.generated_at ?? null}
               initialRevenue={initialRevenue}
               initialAssumptions={initialAssumptions}
               revenueSource={revenueSource}
