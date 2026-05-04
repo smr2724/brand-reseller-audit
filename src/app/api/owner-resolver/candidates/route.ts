@@ -66,10 +66,11 @@ export async function GET(req: Request) {
     const { data: cands } = await admin
       .from("owner_candidates")
       .select(
-        "id, brand_id, resolution_run_id, candidate_company_name, candidate_domain, candidate_source, evidence_text, evidence_url, match_reason, trademark_serial_number, trademark_status, trademark_registration_date, trademark_owner_address, goods_services_text, heuristic_score, heuristic_label, is_selected_owner, needs_manual_review, selected_at, created_at",
+        "id, brand_id, resolution_run_id, candidate_company_name, candidate_domain, candidate_source, evidence_text, evidence_url, match_reason, trademark_serial_number, trademark_status, trademark_registration_date, trademark_owner_address, goods_services_text, heuristic_score, heuristic_label, is_selected_owner, needs_manual_review, selected_at, created_at, apollo_organization_id, apollo_organization_name, apollo_domain, apollo_employee_count, apollo_total_contacts, apollo_hq_city, apollo_hq_country, apollo_industry, extractor_confidence, extractor_reasoning, evidence_urls",
       )
       .eq("resolution_run_id", (latestRun as { id: string }).id)
-      .order("heuristic_score", { ascending: false })
+      .order("apollo_total_contacts", { ascending: false, nullsFirst: false })
+      .order("extractor_confidence", { ascending: false, nullsFirst: false })
       .order("created_at", { ascending: false });
     candidates = cands ?? [];
   }

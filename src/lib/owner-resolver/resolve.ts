@@ -1,27 +1,40 @@
 /**
- * Phase 33 — Brand Owner Resolver orchestrator.
+ * Phase 33 / 34 — Brand Owner Resolver orchestrator.
  *
- * Pipeline:
- *   1. CAS-claim the brand: UPDATE brands SET state='running' WHERE
- *      state IN ('pending','candidates_ready','failed','selected'). If 0
- *      rows hit, another runner won — bail out (B5).
- *   2. Insert an `owner_resolution_runs` row (status=running).
- *   3. Run USPTO + web-search adapters in parallel; both soft-fail.
- *   4. Score candidates with the deterministic heuristic.
- *   5. Bulk insert `owner_candidates` — surface failure to caller (B7).
- *   6. Update brand.owner_resolution_state to `candidates_ready` (or
- *      `failed`).
- *   7. Update the run row with final counts and status.
+ * Phase 33 pipeline:
+ *   1. CAS-claim the brand.
+ *   2. Insert an owner_resolution_runs row (status=running).
+ *   3. Run USPTO + web-search adapters in parallel (soft-fail).
+ *   4. Score candidates with the deterministic heuristic (kept for logging /
+ *      sanity checks only — not persisted in Phase 34).
+ *
+ * Phase 34 additions:
+ *   5. Feed all raw hits to the OpenAI reasoning extractor (gpt-5-mini) to
+ *      get up to 3 canonical owner candidates with confidence + reasoning.
+ *   6. For each canonical candidate, look it up in Apollo (org search) and
+ *      count contacts. Dedupe Apollo orgs across candidates.
+ *   7. Insert one row per Apollo org found. For canonical candidates with
+ *      no Apollo match, insert one apollo_no_match row.
+ *   8. If extractor returns 0 candidates, mark the run failed.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { searchUsptoTrademarks } from "./uspto";
 import { searchWebForOwners } from "./web-search";
 import { scoreCandidates } from "./heuristic-scoring";
+import {
+  extractOwnerCandidates,
+  buildExtractorHitsFromCandidates,
+  type ExtractedCandidate,
+} from "./extractor-openai";
+import {
+  createApolloClient,
+  type ApolloClient,
+  type ApolloOrganization,
+} from "./apollo-client";
 import type {
   BrandContext,
   OwnerResolutionTrigger,
   RawOwnerCandidate,
-  ScoredOwnerCandidate,
 } from "./types";
 
 export interface ResolveBrandOwnerOptions {
@@ -29,6 +42,10 @@ export interface ResolveBrandOwnerOptions {
   /** Override adapters — used by tests. */
   usptoFn?: typeof searchUsptoTrademarks;
   webSearchFn?: typeof searchWebForOwners;
+  /** Override the extractor — used by tests. */
+  extractorFn?: typeof extractOwnerCandidates;
+  /** Override the Apollo client factory — used by tests. */
+  apolloClient?: ApolloClient | null;
   /** Bypass CAS guard — used by tests. */
   skipCasGuard?: boolean;
 }
@@ -40,6 +57,8 @@ export interface ResolveBrandOwnerResult {
   top_score: number | null;
   state: "candidates_ready" | "failed" | "skipped";
   error?: string;
+  apollo_match_count?: number;
+  apollo_no_match_count?: number;
 }
 
 const TOP_PRODUCT_TITLE_LIMIT = 20;
@@ -94,7 +113,7 @@ async function loadProductTitles(
   return titles;
 }
 
-function dedupeCandidates(
+function dedupeRawCandidates(
   candidates: ReadonlyArray<RawOwnerCandidate>,
 ): RawOwnerCandidate[] {
   const seen = new Map<string, RawOwnerCandidate>();
@@ -117,49 +136,181 @@ function dedupeCandidates(
   return Array.from(seen.values());
 }
 
-interface PersistedCandidate {
+interface PersistedApolloMatchRow {
   brand_id: string;
   resolution_run_id: string;
   candidate_company_name: string;
   candidate_domain: string | null;
-  candidate_source: string;
+  candidate_source: "apollo" | "apollo_no_match";
   evidence_text: string | null;
   evidence_url: string | null;
   match_reason: string | null;
-  trademark_serial_number: string | null;
-  trademark_status: string | null;
-  trademark_registration_date: string | null;
-  trademark_owner_address: string | null;
-  goods_services_text: string | null;
+  trademark_serial_number: null;
+  trademark_status: null;
+  trademark_registration_date: null;
+  trademark_owner_address: null;
+  goods_services_text: null;
   heuristic_score: number;
   heuristic_label: string;
   needs_manual_review: boolean;
   raw_payload: unknown;
+  apollo_organization_id: string | null;
+  apollo_organization_name: string | null;
+  apollo_domain: string | null;
+  apollo_employee_count: number | null;
+  apollo_total_contacts: number | null;
+  apollo_hq_city: string | null;
+  apollo_hq_country: string | null;
+  apollo_industry: string | null;
+  extractor_confidence: number | null;
+  extractor_reasoning: string | null;
+  evidence_urls: string[] | null;
 }
 
-function toPersisted(
-  c: ScoredOwnerCandidate,
+function buildApolloRow(
   brandId: string,
   runId: string,
-): PersistedCandidate {
+  extracted: ExtractedCandidate,
+  org: ApolloOrganization,
+  totalContacts: number | null,
+): PersistedApolloMatchRow {
   return {
     brand_id: brandId,
     resolution_run_id: runId,
-    candidate_company_name: c.candidate_company_name,
-    candidate_domain: c.candidate_domain,
-    candidate_source: c.candidate_source,
-    evidence_text: c.evidence_text,
-    evidence_url: c.evidence_url,
-    match_reason: c.match_reason,
-    trademark_serial_number: c.trademark_serial_number,
-    trademark_status: c.trademark_status,
-    trademark_registration_date: c.trademark_registration_date,
-    trademark_owner_address: c.trademark_owner_address,
-    goods_services_text: c.goods_services_text,
-    heuristic_score: c.heuristic_score,
-    heuristic_label: c.heuristic_label,
-    needs_manual_review: c.needs_manual_review,
-    raw_payload: c.raw_payload ?? null,
+    candidate_company_name: org.name,
+    candidate_domain: org.primary_domain,
+    candidate_source: "apollo",
+    evidence_text: extracted.reasoning || null,
+    evidence_url: extracted.evidence_urls[0] ?? null,
+    match_reason: `Apollo match for "${extracted.canonical_company_name}"`,
+    trademark_serial_number: null,
+    trademark_status: null,
+    trademark_registration_date: null,
+    trademark_owner_address: null,
+    goods_services_text: null,
+    heuristic_score: 0,
+    heuristic_label: "unscored",
+    needs_manual_review: false,
+    raw_payload: { extracted, apollo: org },
+    apollo_organization_id: org.id,
+    apollo_organization_name: org.name,
+    apollo_domain: org.primary_domain,
+    apollo_employee_count: org.estimated_num_employees,
+    apollo_total_contacts: totalContacts,
+    apollo_hq_city: org.organization_city,
+    apollo_hq_country: org.organization_country,
+    apollo_industry: org.industry,
+    extractor_confidence: extracted.confidence,
+    extractor_reasoning: extracted.reasoning || null,
+    evidence_urls: extracted.evidence_urls,
+  };
+}
+
+function buildNoMatchRow(
+  brandId: string,
+  runId: string,
+  extracted: ExtractedCandidate,
+): PersistedApolloMatchRow {
+  return {
+    brand_id: brandId,
+    resolution_run_id: runId,
+    candidate_company_name: extracted.canonical_company_name,
+    candidate_domain: extracted.domain,
+    candidate_source: "apollo_no_match",
+    evidence_text: extracted.reasoning || null,
+    evidence_url: extracted.evidence_urls[0] ?? null,
+    match_reason: "No Apollo match — extracted from raw hits",
+    trademark_serial_number: null,
+    trademark_status: null,
+    trademark_registration_date: null,
+    trademark_owner_address: null,
+    goods_services_text: null,
+    heuristic_score: 0,
+    heuristic_label: "unscored",
+    needs_manual_review: true,
+    raw_payload: { extracted },
+    apollo_organization_id: null,
+    apollo_organization_name: null,
+    apollo_domain: null,
+    apollo_employee_count: null,
+    apollo_total_contacts: null,
+    apollo_hq_city: null,
+    apollo_hq_country: null,
+    apollo_industry: null,
+    extractor_confidence: extracted.confidence,
+    extractor_reasoning: extracted.reasoning || null,
+    evidence_urls: extracted.evidence_urls,
+  };
+}
+
+interface ApolloPipelineResult {
+  rows: PersistedApolloMatchRow[];
+  matchCount: number;
+  noMatchCount: number;
+  apolloRaw: Record<string, unknown>;
+}
+
+/**
+ * Run extractor + Apollo enrichment pipeline. Returns the rows to persist
+ * (Apollo-matched + apollo_no_match) and a raw payload for the run row.
+ */
+export async function runApolloPipeline(
+  brandId: string,
+  runId: string,
+  extracted: ReadonlyArray<ExtractedCandidate>,
+  apollo: ApolloClient | null,
+): Promise<ApolloPipelineResult> {
+  const rows: PersistedApolloMatchRow[] = [];
+  const seenApolloIds = new Set<string>();
+  let matchCount = 0;
+  let noMatchCount = 0;
+
+  if (!apollo) {
+    // No Apollo key — every extracted candidate becomes a no-match row.
+    for (const ext of extracted) {
+      rows.push(buildNoMatchRow(brandId, runId, ext));
+      noMatchCount += 1;
+    }
+    return {
+      rows,
+      matchCount,
+      noMatchCount,
+      apolloRaw: { error: "APOLLO_API_KEY not configured" },
+    };
+  }
+
+  for (const ext of extracted) {
+    const orgs = await apollo.searchOrganizations(
+      ext.canonical_company_name,
+      ext.domain,
+    );
+    if (orgs.length === 0) {
+      rows.push(buildNoMatchRow(brandId, runId, ext));
+      noMatchCount += 1;
+      continue;
+    }
+    let appendedAnyForExt = false;
+    for (const org of orgs) {
+      if (seenApolloIds.has(org.id)) continue;
+      seenApolloIds.add(org.id);
+      const total = await apollo.countContacts(org.id);
+      rows.push(buildApolloRow(brandId, runId, ext, org, total));
+      matchCount += 1;
+      appendedAnyForExt = true;
+    }
+    if (!appendedAnyForExt) {
+      // All Apollo hits already deduped against another extracted candidate;
+      // record the extracted name as no_match so the user still sees it.
+      rows.push(buildNoMatchRow(brandId, runId, ext));
+      noMatchCount += 1;
+    }
+  }
+
+  return {
+    rows,
+    matchCount,
+    noMatchCount,
+    apolloRaw: apollo.rawSearches(),
   };
 }
 
@@ -174,6 +325,7 @@ export async function resolveBrandOwner(
 ): Promise<ResolveBrandOwnerResult> {
   const usptoFn = opts.usptoFn ?? searchUsptoTrademarks;
   const webSearchFn = opts.webSearchFn ?? searchWebForOwners;
+  const extractorFn = opts.extractorFn ?? extractOwnerCandidates;
 
   // 1. Atomic CAS claim — bail out if another runner already owns the brand.
   let claimed: ClaimedBrand | null;
@@ -255,29 +407,59 @@ export async function resolveBrandOwner(
     safeWebSearch(brandContext.brand_name, webSearchFn),
   ]);
 
-  // 4. Dedupe + score.
-  const merged = dedupeCandidates([
+  // 4. Heuristic scoring on raw hits — kept for logs / debugging only.
+  // Phase 34: we do NOT persist these heuristic rows; the rows we insert
+  // are produced by the extractor + Apollo pipeline below.
+  const merged = dedupeRawCandidates([
     ...usptoResult.candidates,
     ...webResult.candidates,
   ]);
   const scored = scoreCandidates(merged, brandContext);
+  if (scored.length > 0) {
+    const heuristicTopScore = scored.reduce(
+      (m, c) => (c.heuristic_score > m ? c.heuristic_score : m),
+      scored[0]!.heuristic_score,
+    );
+    console.log(
+      `[owner-resolver] brand=${brandId} run=${runId} heuristic sanity check: ${scored.length} raw candidates, top score=${heuristicTopScore}`,
+    );
+  }
 
-  // 5. Bulk insert candidates. Surface PG errors to brand state (B7).
+  // 5. Run extractor over the merged raw hits.
+  const extractorHits = buildExtractorHitsFromCandidates(merged);
+  const extractorResult = await safeExtractor(
+    brandContext.brand_name,
+    brandContext.category,
+    extractorHits,
+    extractorFn,
+  );
+
+  // 6. Apollo pipeline: org search + people-count for each extracted name.
+  const apollo =
+    opts.apolloClient !== undefined
+      ? opts.apolloClient
+      : createApolloClient();
+  const pipeline = await runApolloPipeline(
+    brandId,
+    runId,
+    extractorResult.candidates,
+    apollo,
+  );
+
+  // 7. Bulk insert candidates. Surface PG errors to brand state (B7).
   let insertedCount = 0;
   let persistError: string | null = null;
-  if (scored.length > 0) {
-    const rows = scored.map((c) => toPersisted(c, brandId, runId));
+  if (pipeline.rows.length > 0) {
     try {
       const { error: insErr, count } = await admin
         .from("owner_candidates")
-        .insert(rows, { count: "exact" });
+        .insert(pipeline.rows, { count: "exact" });
       if (insErr) {
         persistError = `Failed to persist candidates: ${insErr.message}`;
       } else {
-        insertedCount = count ?? rows.length;
-        // If the count came back smaller than expected, that's still a partial failure.
-        if (insertedCount < rows.length) {
-          persistError = `Persisted ${insertedCount}/${rows.length} candidates — ${rows.length - insertedCount} failed`;
+        insertedCount = count ?? pipeline.rows.length;
+        if (insertedCount < pipeline.rows.length) {
+          persistError = `Persisted ${insertedCount}/${pipeline.rows.length} candidates — ${pipeline.rows.length - insertedCount} failed`;
         }
       }
     } catch (e) {
@@ -285,22 +467,32 @@ export async function resolveBrandOwner(
     }
   }
 
-  // 6. Determine final state.
+  // 8. Determine final state.
   const bothFailed = usptoResult.error != null && webResult.error != null;
+  const noExtractedCandidates =
+    extractorResult.candidates.length === 0 && pipeline.rows.length === 0;
   let finalState: "candidates_ready" | "failed";
   let errorMessage: string | null = null;
   if (persistError) {
     finalState = "failed";
     errorMessage = truncate(persistError, 1000);
-  } else if (bothFailed && insertedCount === 0) {
+  } else if (bothFailed && insertedCount === 0 && noExtractedCandidates) {
     finalState = "failed";
-    errorMessage = [usptoResult.error, webResult.error].filter(Boolean).join("; ");
+    errorMessage = [usptoResult.error, webResult.error]
+      .filter(Boolean)
+      .join("; ");
+  } else if (noExtractedCandidates) {
+    finalState = "failed";
+    errorMessage =
+      extractorResult.error != null
+        ? `extractor failed: ${extractorResult.error}`
+        : "extractor produced no candidates above confidence threshold";
   } else {
     finalState = "candidates_ready";
     errorMessage = null;
   }
 
-  // 7. Persist run row.
+  // 9. Persist run row.
   await admin
     .from("owner_resolution_runs")
     .update({
@@ -327,12 +519,7 @@ export async function resolveBrandOwner(
     })
     .eq("id", brandId);
 
-  const topScore = scored.length > 0
-    ? scored.reduce((m, c) => (c.heuristic_score > m ? c.heuristic_score : m), scored[0]!.heuristic_score)
-    : null;
-
   if (persistError) {
-    // Re-throw the persist error so callers (cron / admin endpoint) see it.
     throw new Error(persistError);
   }
 
@@ -340,9 +527,11 @@ export async function resolveBrandOwner(
     ok: finalState === "candidates_ready",
     run_id: runId,
     candidates_count: insertedCount,
-    top_score: topScore,
+    top_score: null,
     state: finalState,
     error: errorMessage ?? undefined,
+    apollo_match_count: pipeline.matchCount,
+    apollo_no_match_count: pipeline.noMatchCount,
   };
 }
 
@@ -359,6 +548,12 @@ interface WebSafeResult {
   raw: unknown;
   queries: string[];
   results_count: number;
+  error: string | null;
+}
+
+interface ExtractorSafeResult {
+  candidates: ExtractedCandidate[];
+  raw: unknown;
   error: string | null;
 }
 
@@ -405,6 +600,28 @@ async function safeWebSearch(
       raw: null,
       queries: [],
       results_count: 0,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+async function safeExtractor(
+  brandName: string,
+  category: string | null,
+  hits: Parameters<typeof extractOwnerCandidates>[2],
+  fn: typeof extractOwnerCandidates,
+): Promise<ExtractorSafeResult> {
+  try {
+    const r = await fn(brandName, category, hits);
+    return {
+      candidates: r.candidates,
+      raw: r.raw,
+      error: r.error,
+    };
+  } catch (e) {
+    return {
+      candidates: [],
+      raw: null,
       error: e instanceof Error ? e.message : String(e),
     };
   }

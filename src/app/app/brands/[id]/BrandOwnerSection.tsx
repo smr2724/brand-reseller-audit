@@ -1,18 +1,12 @@
 "use client";
 
 /**
- * Phase 33.1 — Brand Owner Resolver section, rendered at the top of the
- * user-facing brand page (/app/brands/[id]).
+ * Phase 33.1 / 34 — Brand Owner Resolver section, rendered at the top of
+ * the user-facing brand page (/app/brands/[id]).
  *
- * State-driven UI:
- *   pending          → "Find brand owner" CTA
- *   running          → spinner + polling /candidates every 3s, hard cap 90s
- *   candidates_ready → multi-select table, owner-type, save/reject, notes
- *   selected         → resolved-owner result card + re-run button
- *   failed           → error message + try-again button
- *
- * Auth: all API calls go through the user's Supabase session (cookies);
- * brand ownership is enforced server-side by the API routes.
+ * Phase 34: candidates are Apollo-matched (or apollo_no_match) — the user
+ * picks an actual Apollo organization with a contact count, not a raw
+ * search hit. The old 13-row web-search list is hidden.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -65,6 +59,18 @@ export interface BrandOwnerCandidate {
   needs_manual_review: boolean;
   selected_at: string | null;
   created_at: string;
+  // Phase 34 — Apollo + extractor fields.
+  apollo_organization_id?: string | null;
+  apollo_organization_name?: string | null;
+  apollo_domain?: string | null;
+  apollo_employee_count?: number | null;
+  apollo_total_contacts?: number | null;
+  apollo_hq_city?: string | null;
+  apollo_hq_country?: string | null;
+  apollo_industry?: string | null;
+  extractor_confidence?: number | null;
+  extractor_reasoning?: string | null;
+  evidence_urls?: string[] | null;
 }
 
 const OWNER_TYPES = [
@@ -80,21 +86,6 @@ const OWNER_TYPES = [
 const POLL_MS = 3000;
 const MAX_POLLS = 30;
 
-function labelBadgeClass(label: string): string {
-  switch (label) {
-    case "very_high":
-      return "bg-[#102a14] text-[#4ade80] border-[#1e4a28]";
-    case "high":
-      return "bg-[#0e2236] text-[#7dd3fc] border-[#1e3a55]";
-    case "medium":
-      return "bg-[#2a2410] text-[#facc15] border-[#4a3e1e]";
-    case "needs_review":
-      return "bg-[#2a1415] text-[#f87171] border-[#4a1e21]";
-    default:
-      return "bg-[var(--bg-3)] text-[var(--text-muted)] border-[var(--border-soft)]";
-  }
-}
-
 function fmtTime(iso: string | null): string {
   if (!iso) return "—";
   try {
@@ -109,6 +100,19 @@ function secondsSince(iso: string | null): number {
   const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return 0;
   return Math.max(0, Math.floor((Date.now() - t) / 1000));
+}
+
+function formatNumber(n: number | null | undefined): string {
+  if (n == null) return "—";
+  if (!Number.isFinite(n)) return "—";
+  return n.toLocaleString("en-US");
+}
+
+function formatLocation(c: BrandOwnerCandidate): string | null {
+  const city = c.apollo_hq_city ?? null;
+  const country = c.apollo_hq_country ?? null;
+  if (city && country) return `${city}, ${country}`;
+  return city ?? country ?? null;
 }
 
 export default function BrandOwnerSection({
@@ -143,7 +147,6 @@ export default function BrandOwnerSection({
   );
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  // Sync local state when SSR refresh hands us new props.
   useEffect(() => {
     setBrand(initialBrand);
     setRun(initialRun);
@@ -157,7 +160,6 @@ export default function BrandOwnerSection({
 
   const pollCountRef = useRef(0);
 
-  // Polling effect: fires while state === 'running'.
   useEffect(() => {
     if (brand.owner_resolution_state !== "running") {
       pollCountRef.current = 0;
@@ -210,13 +212,30 @@ export default function BrandOwnerSection({
     };
   }, [brand.id, brand.owner_resolution_state, router]);
 
-  const sortedCandidates = useMemo(() => {
-    return [...candidates].sort((a, b) => {
-      if (b.heuristic_score !== a.heuristic_score) {
-        return b.heuristic_score - a.heuristic_score;
-      }
-      return a.created_at < b.created_at ? 1 : -1;
+  // Phase 34 — only show Apollo / apollo_no_match candidates. Older raw
+  // candidates from a pre-Phase-34 run still render at the bottom for
+  // back-compat, but we collapse them.
+  const { apolloMatches, noMatches, legacyHits } = useMemo(() => {
+    const apolloMatches: BrandOwnerCandidate[] = [];
+    const noMatches: BrandOwnerCandidate[] = [];
+    const legacyHits: BrandOwnerCandidate[] = [];
+    for (const c of candidates) {
+      if (c.candidate_source === "apollo") apolloMatches.push(c);
+      else if (c.candidate_source === "apollo_no_match") noMatches.push(c);
+      else legacyHits.push(c);
+    }
+    apolloMatches.sort((a, b) => {
+      const ac = a.apollo_total_contacts ?? -1;
+      const bc = b.apollo_total_contacts ?? -1;
+      if (bc !== ac) return bc - ac;
+      const af = a.extractor_confidence ?? 0;
+      const bf = b.extractor_confidence ?? 0;
+      return bf - af;
     });
+    noMatches.sort(
+      (a, b) => (b.extractor_confidence ?? 0) - (a.extractor_confidence ?? 0),
+    );
+    return { apolloMatches, noMatches, legacyHits };
   }, [candidates]);
 
   const callApi = useCallback(
@@ -289,12 +308,16 @@ export default function BrandOwnerSection({
       brand_id: brand.id,
     });
     if (result) {
+      const matches = Number(result.apollo_match_count ?? 0);
+      const noMatch = Number(result.apollo_no_match_count ?? 0);
+      const haveCounts = result.apollo_match_count != null;
       setStatusMsg(
-        `Resolver run complete — ${String(result.candidates_count ?? 0)} candidates inserted`,
+        haveCounts
+          ? `Resolver run complete — ${matches} Apollo matches, ${noMatch} no-match`
+          : `Resolver run complete — ${String(result.candidates_count ?? 0)} candidates inserted`,
       );
       router.refresh();
     } else {
-      // trigger failed — refresh so we re-read whatever real state is in DB.
       router.refresh();
     }
   }, [brand.id, callApi, optimisticToRunning, router]);
@@ -414,7 +437,9 @@ export default function BrandOwnerSection({
 
       {state === "candidates_ready" && (
         <CandidatesView
-          candidates={sortedCandidates}
+          apolloMatches={apolloMatches}
+          noMatches={noMatches}
+          legacyHits={legacyHits}
           selectedIds={selectedIds}
           ownerType={ownerType}
           notes={notes}
@@ -497,7 +522,8 @@ function RunningView({
       <span className="inline-block w-3 h-3 rounded-full border-2 border-[#bcd0ee] border-t-transparent animate-spin" />
       <div className="flex-1 min-w-[200px]">
         <div className="text-sm font-medium">
-          Searching trademark records and the web for the company behind this brand…
+          Searching trademark records and the web, then reasoning through the
+          owning company and looking it up in Apollo…
         </div>
         <div className="text-xs text-[var(--text-muted)] mt-1">
           Started {elapsed}s ago.
@@ -519,8 +545,207 @@ function RunningView({
   );
 }
 
+function ApolloCard({
+  c,
+  picked,
+  expanded,
+  onToggleSelected,
+  onToggleExpanded,
+}: {
+  c: BrandOwnerCandidate;
+  picked: boolean;
+  expanded: boolean;
+  onToggleSelected: (id: string) => void;
+  onToggleExpanded: (id: string) => void;
+}) {
+  const sublineParts: string[] = [];
+  if (c.apollo_industry) sublineParts.push(c.apollo_industry);
+  const loc = formatLocation(c);
+  if (loc) sublineParts.push(loc);
+  if (c.apollo_employee_count != null) {
+    sublineParts.push(`${formatNumber(c.apollo_employee_count)} employees`);
+  }
+  return (
+    <div
+      className={`rounded border p-3 mb-2 ${
+        c.is_selected_owner ? "border-l-4 border-l-[#4ade80]" : ""
+      }`}
+      style={{
+        background: "var(--bg-2)",
+        borderColor: "var(--border-soft)",
+      }}
+    >
+      <div className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          checked={picked}
+          onChange={() => onToggleSelected(c.id)}
+          className="mt-1"
+        />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="font-semibold text-base">
+              {c.apollo_organization_name ?? c.candidate_company_name}
+            </span>
+            {c.apollo_domain && (
+              <a
+                href={`https://${c.apollo_domain}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-[#7dd3fc] hover:underline"
+              >
+                {c.apollo_domain}
+              </a>
+            )}
+          </div>
+          {sublineParts.length > 0 && (
+            <div className="text-xs text-[var(--text-muted)] mt-1">
+              {sublineParts.join(" · ")}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => onToggleExpanded(c.id)}
+            className="text-xs text-[#7dd3fc] hover:underline mt-2"
+          >
+            {expanded ? "Hide why this match" : "Why this match"}
+          </button>
+          {expanded && (
+            <div className="mt-2 text-xs">
+              {c.extractor_reasoning && (
+                <div className="text-[var(--text-muted)] whitespace-pre-wrap">
+                  {c.extractor_reasoning}
+                </div>
+              )}
+              {c.extractor_confidence != null && (
+                <div className="text-[var(--text-muted)] mt-1">
+                  Confidence: {(c.extractor_confidence * 100).toFixed(0)}%
+                </div>
+              )}
+              {Array.isArray(c.evidence_urls) && c.evidence_urls.length > 0 && (
+                <ul className="list-disc pl-5 mt-1">
+                  {c.evidence_urls.slice(0, 5).map((u) => (
+                    <li key={u}>
+                      <a
+                        href={u}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[#7dd3fc] hover:underline break-all"
+                      >
+                        {u}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="text-right shrink-0">
+          <div
+            className="inline-flex items-center px-2 py-1 rounded border text-xs font-medium"
+            style={{
+              background: "#102a14",
+              borderColor: "#1e4a28",
+              color: "#4ade80",
+            }}
+          >
+            {formatNumber(c.apollo_total_contacts)} contacts
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NoMatchCard({
+  c,
+  picked,
+  expanded,
+  onToggleSelected,
+  onToggleExpanded,
+}: {
+  c: BrandOwnerCandidate;
+  picked: boolean;
+  expanded: boolean;
+  onToggleSelected: (id: string) => void;
+  onToggleExpanded: (id: string) => void;
+}) {
+  return (
+    <div
+      className={`rounded border p-3 mb-2 ${
+        c.is_selected_owner ? "border-l-4 border-l-[#4ade80]" : ""
+      }`}
+      style={{
+        background: "var(--bg-3)",
+        borderColor: "var(--border-soft)",
+        opacity: 0.85,
+      }}
+    >
+      <div className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          checked={picked}
+          onChange={() => onToggleSelected(c.id)}
+          className="mt-1 opacity-70"
+        />
+        <div className="flex-1 min-w-0">
+          <div className="italic text-[var(--text-muted)] font-medium">
+            {c.candidate_company_name}
+            {c.candidate_domain && (
+              <span className="ml-2 text-xs not-italic">
+                <a
+                  href={`https://${c.candidate_domain}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[#7dd3fc] hover:underline"
+                >
+                  {c.candidate_domain}
+                </a>
+              </span>
+            )}
+          </div>
+          <div className="text-xs text-[var(--text-muted)] mt-1">
+            No Apollo match
+            {c.extractor_reasoning ? ` — ${c.extractor_reasoning}` : ""}
+          </div>
+          {Array.isArray(c.evidence_urls) && c.evidence_urls.length > 0 && (
+            <button
+              type="button"
+              onClick={() => onToggleExpanded(c.id)}
+              className="text-xs text-[#7dd3fc] hover:underline mt-2"
+            >
+              {expanded ? "Hide evidence" : "Show evidence"}
+            </button>
+          )}
+          {expanded &&
+            Array.isArray(c.evidence_urls) &&
+            c.evidence_urls.length > 0 && (
+              <ul className="list-disc pl-5 mt-1 text-xs">
+                {c.evidence_urls.slice(0, 5).map((u) => (
+                  <li key={u}>
+                    <a
+                      href={u}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[#7dd3fc] hover:underline break-all"
+                    >
+                      {u}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CandidatesView({
-  candidates,
+  apolloMatches,
+  noMatches,
+  legacyHits,
   selectedIds,
   ownerType,
   notes,
@@ -536,7 +761,9 @@ function CandidatesView({
   onRerun,
   triggerBusy,
 }: {
-  candidates: BrandOwnerCandidate[];
+  apolloMatches: BrandOwnerCandidate[];
+  noMatches: BrandOwnerCandidate[];
+  legacyHits: BrandOwnerCandidate[];
   selectedIds: Set<string>;
   ownerType: string;
   notes: string;
@@ -553,138 +780,56 @@ function CandidatesView({
   triggerBusy: boolean;
 }) {
   const selectedCount = selectedIds.size;
+  const totalShown = apolloMatches.length + noMatches.length;
+
   return (
     <div>
-      {candidates.length === 0 ? (
+      {totalShown === 0 && legacyHits.length === 0 ? (
         <div className="text-sm text-[var(--text-muted)] py-4">
           The resolver finished but no candidates were inserted. You can re-run
           it or mark this brand as needing manual research.
         </div>
       ) : (
-        <div className="overflow-x-auto rounded border border-[var(--border-soft)]">
-          <table className="min-w-full text-sm">
-            <thead>
-              <tr className="text-left text-[var(--text-muted)] border-b border-[var(--border-soft)] text-xs uppercase tracking-wide">
-                <th className="px-3 py-2 w-8">Pick</th>
-                <th className="px-3 py-2">Candidate</th>
-                <th className="px-3 py-2">Source</th>
-                <th className="px-3 py-2">Score</th>
-                <th className="px-3 py-2">TM status</th>
-                <th className="px-3 py-2">Evidence</th>
-              </tr>
-            </thead>
-            <tbody>
-              {candidates.map((c) => {
-                const isPicked = selectedIds.has(c.id);
-                const wasSelected = c.is_selected_owner;
-                return (
-                  <tr
-                    key={c.id}
-                    className={`border-b border-[var(--border-soft)] ${
-                      wasSelected ? "border-l-4 border-l-[#4ade80]" : ""
-                    }`}
-                  >
-                    <td className="px-3 py-2 align-top">
-                      <input
-                        type="checkbox"
-                        checked={isPicked}
-                        onChange={() => onToggleSelected(c.id)}
-                      />
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <div className="font-medium">
-                        {c.candidate_company_name}
-                      </div>
-                      {c.candidate_domain ? (
-                        <a
-                          href={`https://${c.candidate_domain}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-xs text-[#7dd3fc] hover:underline"
-                        >
-                          {c.candidate_domain}
-                        </a>
-                      ) : (
-                        <div className="text-xs text-[var(--text-muted)]">
-                          (no domain)
-                        </div>
-                      )}
-                      {c.match_reason && (
-                        <div className="text-xs text-[var(--text-muted)] mt-1">
-                          {c.match_reason}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs border border-[var(--border-soft)] bg-[var(--bg-2)]">
-                        {c.candidate_source}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <div className="flex flex-col gap-1">
-                        <span className="font-medium">{c.heuristic_score}</span>
-                        <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs border ${labelBadgeClass(c.heuristic_label)}`}
-                        >
-                          {c.heuristic_label}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 align-top text-xs">
-                      {c.trademark_status ? (
-                        <>
-                          <div>{c.trademark_status}</div>
-                          {c.trademark_serial_number && (
-                            <div className="text-[var(--text-muted)]">
-                              SN {c.trademark_serial_number}
-                            </div>
-                          )}
-                          {c.trademark_registration_date && (
-                            <div className="text-[var(--text-muted)]">
-                              Reg. {c.trademark_registration_date}
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <span className="text-[var(--text-muted)]">—</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 align-top text-xs max-w-[420px]">
-                      {c.evidence_text && (
-                        <button
-                          type="button"
-                          onClick={() => onToggleExpanded(c.id)}
-                          className="text-left"
-                        >
-                          {expanded.has(c.id) ? (
-                            <span>{c.evidence_text}</span>
-                          ) : (
-                            <span>
-                              {c.evidence_text.slice(0, 120)}
-                              {c.evidence_text.length > 120 ? "…" : ""}
-                            </span>
-                          )}
-                        </button>
-                      )}
-                      {c.evidence_url && (
-                        <div className="mt-1">
-                          <a
-                            href={c.evidence_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-[#7dd3fc] hover:underline"
-                          >
-                            source ↗
-                          </a>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <>
+          {apolloMatches.length > 0 && (
+            <div className="mb-4">
+              <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-2">
+                Apollo matches ({apolloMatches.length})
+              </div>
+              {apolloMatches.map((c) => (
+                <ApolloCard
+                  key={c.id}
+                  c={c}
+                  picked={selectedIds.has(c.id)}
+                  expanded={expanded.has(c.id)}
+                  onToggleSelected={onToggleSelected}
+                  onToggleExpanded={onToggleExpanded}
+                />
+              ))}
+            </div>
+          )}
+
+          {noMatches.length > 0 && (
+            <div className="mb-4">
+              <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-2">
+                No Apollo match ({noMatches.length})
+              </div>
+              {noMatches.map((c) => (
+                <NoMatchCard
+                  key={c.id}
+                  c={c}
+                  picked={selectedIds.has(c.id)}
+                  expanded={expanded.has(c.id)}
+                  onToggleSelected={onToggleSelected}
+                  onToggleExpanded={onToggleExpanded}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Legacy raw hits from pre-Phase-34 runs are intentionally hidden;
+              they live in the database but are noise compared to Apollo. */}
+        </>
       )}
 
       <div className="mt-4">
