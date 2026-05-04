@@ -184,7 +184,9 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
   } else if (revenueEstimate?.total_ttm_revenue != null) {
     trailing12 = revenueEstimate.total_ttm_revenue;
     revenueKind = "estimate";
-    revenueSource = revenueEstimate.source_note ?? "Keepa BSR + price · 365-day avg";
+    revenueSource =
+      revenueEstimate.source_note ??
+      "Keepa BSR + buy-box price · variation-aware (review-velocity weighted) · summed across full brand catalog";
   } else {
     // Phase 25 — Bug C fallback. When SP-API isn't wired, no upload
     // exists, AND the rank-based estimator returns null (every ASIN

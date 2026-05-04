@@ -249,6 +249,85 @@ export async function getBrandEnrichmentBundle(
   };
 }
 
+/**
+ * Phase 33.2 — Full brand_asins set for the revenue path.
+ *
+ * `getBrandEnrichmentBundle()` caps `keepa.asins` at 50 ordered by
+ * `offers_count desc`, which is fine for the seller table and CX
+ * scorecard renders but silently truncates the brand's deep catalog
+ * (precisely the long tail where it still wins the buy box and
+ * `offers_count` is low). Post-Phase-33.1 a brand like Terra Pure has
+ * 291 ASINs — the 50-row slice produces ~$1.3M annualized vs. ~$4.25M
+ * for the full set.
+ *
+ * This helper returns ALL persisted `brand_asins` for the brand with
+ * NO `.limit(...)` and NO `order(...)`. Phase 32.2 already guarantees
+ * `attributed_monthly_units` and `buy_box_price` on each row reflect
+ * the same attribution math the report would apply, so the caller can
+ * sum directly without a second Keepa /product round-trip.
+ */
+export interface BrandAsinForRevenueRow {
+  asin: string;
+  title: string | null;
+  buy_box_seller: string | null;
+  buy_box_price: number | null;
+  offers_count: number | null;
+  fba_offers_count: number | null;
+  is_brand_controlled: boolean | null;
+  attributed_monthly_units: number | null;
+  raw_monthly_units: number | null;
+  parent_asin: string | null;
+  variation_group_size: number | null;
+  buy_box_change_count_90d: number | null;
+}
+
+export async function getBrandAsinsForRevenue(
+  supabase: SupabaseClient<any, any, any>,
+  brandId: string,
+): Promise<BrandAsinForRevenueRow[]> {
+  const { data, error } = await supabase
+    .from("brand_asins")
+    .select(
+      "asin, title, buy_box_seller, buy_box_price, offers_count, fba_offers_count, is_brand_controlled, attributed_monthly_units, raw_monthly_units, parent_asin, variation_group_size, buy_box_change_count_90d",
+    )
+    .eq("brand_id", brandId);
+  if (error) {
+    // Some columns (raw_monthly_units, parent_asin, variation_group_size,
+    // buy_box_change_count_90d) were added by later migrations. Fall back
+    // to the minimal set so pre-migration environments can still render
+    // a revenue number — the missing columns are nice-to-have for logging
+    // / methodology disclosure but don't affect the core sum.
+    if (
+      /column .* does not exist|raw_monthly_units|parent_asin|variation_group_size|buy_box_change_count_90d|attributed_monthly_units/i.test(
+        error.message ?? "",
+      )
+    ) {
+      const legacy = await supabase
+        .from("brand_asins")
+        .select(
+          "asin, title, buy_box_seller, buy_box_price, offers_count, fba_offers_count, is_brand_controlled",
+        )
+        .eq("brand_id", brandId);
+      return (legacy.data ?? []).map((r: any) => ({
+        asin: r.asin,
+        title: r.title ?? null,
+        buy_box_seller: r.buy_box_seller ?? null,
+        buy_box_price: r.buy_box_price ?? null,
+        offers_count: r.offers_count ?? null,
+        fba_offers_count: r.fba_offers_count ?? null,
+        is_brand_controlled: r.is_brand_controlled ?? null,
+        attributed_monthly_units: null,
+        raw_monthly_units: null,
+        parent_asin: null,
+        variation_group_size: null,
+        buy_box_change_count_90d: null,
+      }));
+    }
+    throw error;
+  }
+  return (data ?? []) as BrandAsinForRevenueRow[];
+}
+
 /** Convenience for callers that already have just the bundle and want the
  * data_sources jsonb to persist on a `reports` row. */
 export function buildDataSourcesProvenance(

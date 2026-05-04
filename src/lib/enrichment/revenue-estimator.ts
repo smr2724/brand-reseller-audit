@@ -417,3 +417,56 @@ export function estimateBrandTtmRevenue(
     has_variation_attribution: hasVariation,
   };
 }
+
+/**
+ * Phase 33.2 — pre-attributed input shape for the persisted-rows path.
+ *
+ * The writer (`enrichBrandWithKeepa`) already runs the variation-aware
+ * attribution and persists the result on `brand_asins`. The report path
+ * can sum directly from those columns without a second Keepa /product
+ * round-trip. This function re-uses `estimateBrandTtmRevenue` under the
+ * hood (so all the per-ASIN bookkeeping, the per_asin array shape, and
+ * the `total_ttm_revenue` semantics are identical) — it just translates
+ * the persisted-row shape to `RevenueEstimateInput` and overrides the
+ * source/methodology strings to reflect the new path.
+ *
+ * Each input row carries the attributed monthly units and current buy
+ * box price as already persisted on `brand_asins`. Sales rank is omitted
+ * — when `attributed_monthly_units` is set, the underlying estimator
+ * honors the override regardless of rank (the rank-null branch covers
+ * this), and we don't want to introduce a second source of truth here.
+ */
+export interface PersistedRevenueRow {
+  asin: string;
+  attributed_monthly_units: number | null;
+  buy_box_price: number | null;
+  variation_group_size?: number | null;
+  is_brand_controlled?: boolean | null;
+}
+
+export function estimateBrandTtmRevenueFromPersisted(
+  rows: PersistedRevenueRow[],
+): RevenueEstimate {
+  const inputs: RevenueEstimateInput[] = rows.map((r) => ({
+    asin: r.asin,
+    sales_rank_avg365: null,
+    sales_rank_current: null,
+    buy_box_avg365: null,
+    buy_box_current: null,
+    buy_box_now: r.buy_box_price ?? null,
+    product_group: null,
+    root_category: null,
+    category_path: null,
+    attributed_monthly_units: r.attributed_monthly_units ?? null,
+    variation_group_size: r.variation_group_size ?? 1,
+  }));
+  const base = estimateBrandTtmRevenue(inputs);
+  return {
+    ...base,
+    source_note:
+      "Keepa BSR + buy-box price · variation-aware (review-velocity weighted) · summed across full brand catalog",
+    methodology_footnote:
+      "Directional estimate from Keepa BSR + buy-box price, with variation-aware attribution (review-velocity weighting across parent groups). Summed across the full brand catalog persisted on brand_asins. Replace with seller's actual TTM during diligence.",
+    has_variation_attribution: true,
+  };
+}
