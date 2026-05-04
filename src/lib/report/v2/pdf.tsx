@@ -190,7 +190,7 @@ function ResellerRealityPage({ narrative }: { narrative: NarrativeV2 }) {
           {r.top_sellers.slice(0, 10).map((s) => (
             <View key={`${s.seller_name}-${s.rank}`} style={styles.bar}>
               <Text style={styles.barRank}>{s.rank}.</Text>
-              <Text style={styles.barName}>{s.seller_name.slice(0, 30)}</Text>
+              <Text style={styles.barName}>{(s.seller_name ?? "Unknown 3P seller").slice(0, 30)}</Text>
               <View style={styles.barTrack}>
                 <View
                   style={[styles.barFill, { width: `${Math.max(2, Math.round(((s.share_pct ?? 0) / max) * 100))}%` }]}

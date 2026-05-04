@@ -43,7 +43,13 @@ export interface KeepaAsinRow {
 }
 
 export interface KeepaSellerRow {
-  seller_name: string;
+  /**
+   * Hotfix — May 2026: was `string`. Now nullable so we can persist NULL
+   * when Keepa's /seller endpoint can't resolve a storefront name (instead
+   * of falling back to the raw seller_id, which made the renderer show
+   * "Unknown 3P seller (ID: A1BKR1TFBMOG3V)" everywhere).
+   */
+  seller_name: string | null;
   seller_id: string | null;
   share_pct: number | null;
   asins_won: number | null;

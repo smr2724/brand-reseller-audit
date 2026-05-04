@@ -85,7 +85,10 @@ export interface NarrativeCover {
 
 export interface ResellerRow {
   rank: number;
-  seller_name: string;
+  /** Hotfix May 2026 — nullable. NULL means Keepa couldn't resolve a
+   * storefront name for this seller; the renderer surfaces it as
+   * "Unknown 3P seller (ID: …)". */
+  seller_name: string | null;
   share_pct: number | null;
   asins_won: number | null;
   is_fba: boolean | null;

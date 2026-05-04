@@ -233,12 +233,18 @@ export async function enrichBrandWithKeepa(
     const preResolved = Array.from(sellerMap.values()).map((s) => {
       const resolved = s.seller_id ? resolvedInfo[s.seller_id] : null;
       const resolvedName = resolved?.name?.trim() || null;
-      const finalName =
+      // Hotfix — May 2026: when Keepa's /seller endpoint can't resolve a
+      // storefront name, persist NULL instead of falling back to the raw
+      // seller_id. The renderer (`friendlySellerName`) already shows
+      // "Unknown 3P seller (ID: …)" for IDs masquerading as names — but
+      // by storing NULL we let the classifier skip these rows cleanly
+      // and the renderer fall through to its NULL branch.
+      const finalName: string | null =
         resolvedName
           ? resolvedName
           : s.seller_name && !isAmazonSellerId(s.seller_name)
           ? s.seller_name
-          : s.seller_id ?? s.seller_name;
+          : null;
       const country = resolved?.country ?? s.seller_country ?? null;
       return {
         seller_name: finalName,
