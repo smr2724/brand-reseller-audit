@@ -340,6 +340,9 @@ export async function enrichBrandWithKeepa(
         // / 12-pack siblings carry hundreds. The brief allows this
         // fallback explicitly.
         recent_review_count: p.review_count ?? null,
+        // Phase 32 — sharper attribution signal: Buy Box winner churn
+        // in the last 90 days. Combined with reviews via blend weights.
+        buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
       };
     });
     const attribution = indexAttributionByAsin(
@@ -370,11 +373,12 @@ export async function enrichBrandWithKeepa(
         fba_offers_count: p.fba_offers_count ?? 0,
         is_brand_controlled: isBrand,
         last_checked_at: new Date().toISOString(),
-        // Phase 31 — variation attribution.
+        // Phase 31/32 — variation attribution.
         parent_asin: att?.parent_asin ?? p.parent_asin ?? null,
         variation_group_size: att?.variation_group_size ?? 1,
         variation_weight: att?.variation_weight ?? 1,
         recent_review_count: p.review_count ?? null,
+        buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
         raw_monthly_units: att?.raw_monthly_units ?? null,
         attributed_monthly_units: att?.attributed_monthly_units ?? null,
       };
@@ -389,7 +393,7 @@ export async function enrichBrandWithKeepa(
         // variation-attribution columns so older environments don't
         // block the whole enrichment run on a missing column.
         const msg = upErr.message ?? "";
-        const looksLikeMissingColumn = /column .* does not exist|parent_asin|variation_group_size|variation_weight|recent_review_count|raw_monthly_units|attributed_monthly_units/i.test(msg);
+        const looksLikeMissingColumn = /column .* does not exist|parent_asin|variation_group_size|variation_weight|recent_review_count|buy_box_change_count_90d|raw_monthly_units|attributed_monthly_units/i.test(msg);
         if (looksLikeMissingColumn) {
           console.warn(
             `[keepa-brand] brand_asins upsert with variation columns failed (${msg}); retrying without them.`,
@@ -399,6 +403,7 @@ export async function enrichBrandWithKeepa(
             variation_group_size: _gs,
             variation_weight: _w,
             recent_review_count: _rr,
+            buy_box_change_count_90d: _bb,
             raw_monthly_units: _rm,
             attributed_monthly_units: _am,
             ...rest

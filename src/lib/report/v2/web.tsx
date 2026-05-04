@@ -575,11 +575,13 @@ function VariationMethodologyPanel() {
         (e.g. a 4-pack and a 12-pack of the same product). Amazon's sales rank
         is often shared across variations, which causes raw third-party sales
         estimators to over-count sales on inactive variations. We attribute
-        group-level sales to each variation in proportion to its share of
-        recent customer reviews — variations with little or no recent review
-        activity receive little or no attributed sales. <strong>These per-ASIN
-        sales numbers are estimates derived from Keepa rank data plus Amazon
-        review velocity weighting, not direct sales reporting.</strong>
+        group-level sales to each variation using a combined signal: <strong>
+        recent review activity (last 90 days)</strong> plus <strong>Buy Box win
+        frequency (how often each variation actually held the Buy Box recently)
+        </strong>. Variations with no recent buyer activity — for example,
+        dormant bulk-pack listings — correctly receive minimal attributed
+        sales. <strong>These per-ASIN sales numbers are estimates derived from
+        Keepa rank, review, and Buy Box data, not direct sales reporting.</strong>
       </p>
     </aside>
   );
@@ -605,7 +607,7 @@ function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
           {isVariation && (
             <span
               className="rv2-rev-badge rv2-rev-badge-variation"
-              title={`This ASIN is one of ${groupSize} variations sharing a parent listing. Sales are attributed across siblings by recent review activity.`}
+              title={`This ASIN is one of ${groupSize} variations sharing a parent listing. Sales are attributed across siblings by recent review activity and Buy Box win frequency.`}
             >
               Variation · 1 of {groupSize}
             </span>
