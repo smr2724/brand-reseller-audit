@@ -464,7 +464,13 @@ function assertNear(actual: number, expected: number, tol: number, msg: string) 
 }
 
 // --------------------------------------------------------------------
-// Test 12 — Both reviews and Buy Box null/zero → equal weighting.
+// Test 12 — Phase 32.1: when ONE sibling has explicit BB=0 and the
+// others are null, the zero-signal rule treats the null siblings as
+// "no recent sales" and zeroes them. The explicit-zero sibling is the
+// lone data-bearing member; with both signals at 0 inside the
+// comparison set, equal weighting across the comparison set assigns
+// it full weight (1.0). The null siblings each get 0.
+// (Pre-32.1 behavior was 1/3 each — that's the case we're fixing.)
 // --------------------------------------------------------------------
 {
   const out = attributeVariationSales([
@@ -490,20 +496,19 @@ function assertNear(actual: number, expected: number, tol: number, msg: string) 
       buy_box_change_count_90d: null,
     },
   ]);
-  for (const r of out) {
-    assertNear(
-      r.variation_weight,
-      1 / 3,
-      0.001,
-      `${r.asin} both-null fallback: equal weight 1/3`,
-    );
-  }
+  const a = out.find((r) => r.asin === "BOTH000001")!;
+  const b = out.find((r) => r.asin === "BOTH000002")!;
+  const c = out.find((r) => r.asin === "BOTH000003")!;
+  assertNear(a.variation_weight, 0, 0.001, "mixed-zero: null-BB sibling A → 0");
+  assertNear(b.variation_weight, 1, 0.001, "mixed-zero: explicit BB=0 sibling B → full weight (sole data-bearing)");
+  assertNear(c.variation_weight, 0, 0.001, "mixed-zero: null-BB sibling C → 0");
 }
 
 // --------------------------------------------------------------------
-// Test 13 — Mixed null Buy Box: some children have data, others don't.
-// Null children must contribute 0 to the Buy Box share but still get
-// their review share.
+// Test 13 — Phase 32.1 zero-signal rule. Mixed null Buy Box: some
+// children have data, others don't. Null-BB siblings must collapse to
+// weight 0 (zero-sales signal); the freed weight redistributes
+// proportionally across the data-bearing siblings.
 // --------------------------------------------------------------------
 {
   const out = attributeVariationSales([
@@ -529,7 +534,8 @@ function assertNear(actual: number, expected: number, tol: number, msg: string) 
       recent_review_count: 50,
       buy_box_change_count_90d: 10,
     },
-    // 2 children without Buy Box data — null treated as 0 contribution.
+    // 2 children without Buy Box data — Phase 32.1 treats null-BB
+    // amongst data-bearing siblings as zero-sales signal: weight 0.
     {
       asin: "MIX0000004",
       parent_asin: "MIXPARENT0",
@@ -545,25 +551,25 @@ function assertNear(actual: number, expected: number, tol: number, msg: string) 
       buy_box_change_count_90d: null,
     },
   ]);
-  // All review counts equal → review_share = 1/5 each.
-  // Buy Box: total = 60. Shares: 20/60, 30/60, 10/60, 0, 0.
-  // Combined: 0.4 × 0.2 + 0.6 × share_buybox.
+  // Comparison set (data-bearing siblings only): review_sum=150, BB_sum=60.
+  // Each has equal review_share = 50/150 = 1/3.
+  //   m1: 0.4×(1/3) + 0.6×(20/60) = 0.1333 + 0.20 = 0.3333
+  //   m2: 0.4×(1/3) + 0.6×(30/60) = 0.1333 + 0.30 = 0.4333
+  //   m3: 0.4×(1/3) + 0.6×(10/60) = 0.1333 + 0.10 = 0.2333
+  //   sum = 1.0 (already normalized — equal review_shares means review
+  //   contribution sums to 0.4 and BB to 0.6).
   const m1 = out.find((r) => r.asin === "MIX0000001")!;
   const m2 = out.find((r) => r.asin === "MIX0000002")!;
   const m3 = out.find((r) => r.asin === "MIX0000003")!;
   const m4 = out.find((r) => r.asin === "MIX0000004")!;
   const m5 = out.find((r) => r.asin === "MIX0000005")!;
-  // m1: 0.4×0.2 + 0.6×(20/60) = 0.08 + 0.20 = 0.28
-  assertNear(m1.variation_weight, 0.28, 0.001, "MIX1 weight = 0.28 (combined)");
-  // m2: 0.4×0.2 + 0.6×(30/60) = 0.08 + 0.30 = 0.38
-  assertNear(m2.variation_weight, 0.38, 0.001, "MIX2 weight = 0.38 (combined)");
-  // m3: 0.4×0.2 + 0.6×(10/60) = 0.08 + 0.10 = 0.18
-  assertNear(m3.variation_weight, 0.18, 0.001, "MIX3 weight = 0.18 (combined)");
-  // m4, m5: 0.4×0.2 + 0.6×0 = 0.08 each (null Buy Box → 0 contribution)
-  assertNear(m4.variation_weight, 0.08, 0.001, "MIX4 weight = 0.08 (null BB → 0 share)");
-  assertNear(m5.variation_weight, 0.08, 0.001, "MIX5 weight = 0.08 (null BB → 0 share)");
+  assertNear(m1.variation_weight, 1 / 3, 0.001, "MIX1 weight ≈ 0.333 (data-bearing)");
+  assertNear(m2.variation_weight, 0.4333, 0.001, "MIX2 weight ≈ 0.433 (data-bearing)");
+  assertNear(m3.variation_weight, 0.2333, 0.001, "MIX3 weight ≈ 0.233 (data-bearing)");
+  assertNear(m4.variation_weight, 0, 0.001, "MIX4 weight = 0 (null BB while siblings have BB)");
+  assertNear(m5.variation_weight, 0, 0.001, "MIX5 weight = 0 (null BB while siblings have BB)");
   const sum = out.reduce((a, r) => a + r.variation_weight, 0);
-  assertNear(sum, 1, 0.001, "mixed-null: weights still sum to 1");
+  assertNear(sum, 1, 0.001, "phase-32.1: weights still sum to 1 after redistribution");
 }
 
 // --------------------------------------------------------------------
@@ -595,6 +601,185 @@ function assertNear(actual: number, expected: number, tol: number, msg: string) 
       `${r.asin} passthrough preserved`,
     );
   }
+}
+
+// --------------------------------------------------------------------
+// Phase 32.1 — additional regression coverage for the zero-signal rule.
+// --------------------------------------------------------------------
+
+// --------------------------------------------------------------------
+// Test 15 — H2O Therapy real-world failure case. Two pallet ASINs have
+// review history (~70 reviews each) but null Buy Box history; the
+// 300-ct case has BB churn=8, the 20-ct box has BB churn=2. Under
+// Phase 32 the pallets still received ~10% weight each via review-only
+// fallback. Phase 32.1 must collapse pallet weights to 0 and shift the
+// freed weight onto the case + box proportional to their combined
+// share. The 300-ct case (the brand owner's "actually sells") should
+// take most of the weight.
+// --------------------------------------------------------------------
+{
+  const out = attributeVariationSales([
+    // Parent stub — null reviews, null BB. Under Phase 32.1 the parent
+    // stub is also a null-BB sibling (BB null while case/box have data),
+    // so it ALSO collapses to weight 0. That's correct: a stub with no
+    // sales activity should not eat any of the freed pallet weight.
+    {
+      asin: "B0CD86TMHP",
+      parent_asin: "B0CD86TMHP",
+      raw_monthly_units: 14,
+      recent_review_count: null,
+      buy_box_change_count_90d: null,
+    },
+    // Pallet $4,414 — 70 reviews, null BB → zero-signal
+    {
+      asin: "B0CNS6GYVK",
+      parent_asin: "B0CD86TMHP",
+      raw_monthly_units: 14,
+      recent_review_count: 70,
+      buy_box_change_count_90d: null,
+    },
+    // Pallet $2,559 — 70 reviews, null BB → zero-signal
+    {
+      asin: "B0CNS5ZDGW",
+      parent_asin: "B0CD86TMHP",
+      raw_monthly_units: 14,
+      recent_review_count: 70,
+      buy_box_change_count_90d: null,
+    },
+    // 300-ct case $135 — 88 reviews, 8 BB changes (data-bearing)
+    {
+      asin: "B07C84R13Z",
+      parent_asin: "B0CD86TMHP",
+      raw_monthly_units: 14,
+      recent_review_count: 88,
+      buy_box_change_count_90d: 8,
+    },
+    // 20-ct box $25 — 88 reviews, 2 BB changes (data-bearing)
+    {
+      asin: "B07BOX2025",
+      parent_asin: "B0CD86TMHP",
+      raw_monthly_units: 14,
+      recent_review_count: 88,
+      buy_box_change_count_90d: 2,
+    },
+  ]);
+  const stub = out.find((r) => r.asin === "B0CD86TMHP")!;
+  const p1 = out.find((r) => r.asin === "B0CNS6GYVK")!;
+  const p2 = out.find((r) => r.asin === "B0CNS5ZDGW")!;
+  const cs = out.find((r) => r.asin === "B07C84R13Z")!;
+  const bx = out.find((r) => r.asin === "B07BOX2025")!;
+
+  // The two pallets and the parent stub all have null BB while case+box
+  // have BB data → all three collapse to weight 0.
+  assertNear(stub.variation_weight, 0, 0.001, "H2O parent stub weight = 0");
+  assertNear(p1.variation_weight, 0, 0.001, "H2O pallet1 (B0CNS6GYVK) weight = 0");
+  assertNear(p2.variation_weight, 0, 0.001, "H2O pallet2 (B0CNS5ZDGW) weight = 0");
+
+  // Case + box absorb the freed weight. With raw weights (review_sum
+  // across data-bearing = 88+88 = 176; BB sum = 10):
+  //   case raw = 0.4×(88/176) + 0.6×(8/10) = 0.20 + 0.48 = 0.68
+  //   box  raw = 0.4×(88/176) + 0.6×(2/10) = 0.20 + 0.12 = 0.32
+  //   sum = 1.00 (already normalized) → no rescaling needed.
+  assertNear(cs.variation_weight, 0.68, 0.001, "H2O case (B07C84R13Z) absorbs majority weight ≈ 0.68");
+  assertNear(bx.variation_weight, 0.32, 0.001, "H2O box (B07BOX2025) takes the remainder ≈ 0.32");
+
+  // Acceptance: pallet attributed monthly is < 0.5/mo (down from
+  // Phase 32's ~1.33/mo). With weight 0 and group_max 14, attributed = 0.
+  assert(
+    (p1.attributed_monthly_units ?? 0) < 0.5,
+    `H2O pallet1 attributed < 0.5/mo (got ${(p1.attributed_monthly_units ?? 0).toFixed(2)})`,
+  );
+  assert(
+    (p2.attributed_monthly_units ?? 0) < 0.5,
+    `H2O pallet2 attributed < 0.5/mo (got ${(p2.attributed_monthly_units ?? 0).toFixed(2)})`,
+  );
+
+  // Sanity: weights sum to 1 across the group.
+  const sum = out.reduce((a, r) => a + r.variation_weight, 0);
+  assertNear(sum, 1, 0.001, "H2O Therapy fixture: weights sum to 1");
+}
+
+// --------------------------------------------------------------------
+// Test 16 — All-null BB across the group. Without any sibling carrying
+// BB data, the zero-signal rule does not fire (we have no evidence of
+// zero activity). Behavior must match Phase 32: review-only weighting.
+// --------------------------------------------------------------------
+{
+  const out = attributeVariationSales([
+    {
+      asin: "ALLNULL001",
+      parent_asin: "ALLNULLPRT",
+      raw_monthly_units: 100,
+      recent_review_count: 80,
+      buy_box_change_count_90d: null,
+    },
+    {
+      asin: "ALLNULL002",
+      parent_asin: "ALLNULLPRT",
+      raw_monthly_units: 100,
+      recent_review_count: 60,
+      buy_box_change_count_90d: null,
+    },
+    {
+      asin: "ALLNULL003",
+      parent_asin: "ALLNULLPRT",
+      raw_monthly_units: 100,
+      recent_review_count: 40,
+      buy_box_change_count_90d: null,
+    },
+    {
+      asin: "ALLNULL004",
+      parent_asin: "ALLNULLPRT",
+      raw_monthly_units: 100,
+      recent_review_count: 20,
+      buy_box_change_count_90d: null,
+    },
+  ]);
+  // Review sum = 200. Phase 32 review-only fallback shares: 80/200, 60/200, 40/200, 20/200.
+  const a = out.find((r) => r.asin === "ALLNULL001")!;
+  const b = out.find((r) => r.asin === "ALLNULL002")!;
+  const c = out.find((r) => r.asin === "ALLNULL003")!;
+  const d = out.find((r) => r.asin === "ALLNULL004")!;
+  assertNear(a.variation_weight, 80 / 200, 0.001, "all-null: A weight = 0.4 (review-only)");
+  assertNear(b.variation_weight, 60 / 200, 0.001, "all-null: B weight = 0.3 (review-only)");
+  assertNear(c.variation_weight, 40 / 200, 0.001, "all-null: C weight = 0.2 (review-only)");
+  assertNear(d.variation_weight, 20 / 200, 0.001, "all-null: D weight = 0.1 (review-only)");
+  const sum = out.reduce((a2, r) => a2 + r.variation_weight, 0);
+  assertNear(sum, 1, 0.001, "all-null: weights sum to 1 (review-only fallback)");
+}
+
+// --------------------------------------------------------------------
+// Test 17 — Explicit zero BB. A sibling with buy_box_change_count_90d=0
+// (explicit, NOT null) is a valid data point: it means "we measured BB
+// activity and there was none". It must NOT be zeroed by the
+// Phase 32.1 zero-signal rule. The combined formula treats it as 0
+// contribution to the BB share but still counts its review share.
+// --------------------------------------------------------------------
+{
+  const out = attributeVariationSales([
+    {
+      asin: "EXPLZERO01",
+      parent_asin: "EXPLZEROPR",
+      raw_monthly_units: 100,
+      recent_review_count: 50,
+      buy_box_change_count_90d: 0, // explicit zero — NOT zero-signal
+    },
+    {
+      asin: "EXPLZERO02",
+      parent_asin: "EXPLZEROPR",
+      raw_monthly_units: 100,
+      recent_review_count: 50,
+      buy_box_change_count_90d: 10,
+    },
+  ]);
+  const z = out.find((r) => r.asin === "EXPLZERO01")!;
+  const a = out.find((r) => r.asin === "EXPLZERO02")!;
+  // Review_sum=100, share=0.5 each. BB_sum=10, shares 0/10 and 10/10.
+  // Combined: z = 0.4×0.5 + 0.6×0 = 0.20
+  //           a = 0.4×0.5 + 0.6×1 = 0.80
+  // No nulls in the group → no renormalization, weights already = 1.
+  assertNear(z.variation_weight, 0.20, 0.001, "explicit-zero: BB=0 weight = 0.20 (Phase 32 unchanged)");
+  assertNear(a.variation_weight, 0.80, 0.001, "explicit-zero: BB=10 weight = 0.80 (Phase 32 unchanged)");
 }
 
 // --------------------------------------------------------------------

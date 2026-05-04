@@ -1,5 +1,5 @@
 /**
- * Phase 31/32 — Variation-aware sales attribution.
+ * Phase 31/32/32.1 — Variation-aware sales attribution.
  *
  * Amazon shares sales rank across child variations of a parent listing
  * (e.g. a 4-pack, a 12-pack, a "case", and a pallet sharing one parent).
@@ -31,6 +31,22 @@
  * — we re-normalize internally so the configured ratio still applies
  * even if a deployment overrides one.
  *
+ * Phase 32.1 — absent-Buy-Box-as-zero-signal.
+ *   When at least one sibling in the group has a non-null Buy Box
+ *   history value (`buy_box_change_count_90d` is a number, including
+ *   0), any sibling whose value is **null** is interpreted as having
+ *   no recent sales activity at all — not as missing data. That
+ *   sibling's variation_weight collapses to 0 and the freed weight
+ *   redistributes to the siblings that DO have BB data, in proportion
+ *   to their combined review + Buy Box shares.
+ *   Rationale: real-world failure case (H2O Therapy pallets) had
+ *   review counts comparable to the active siblings but no Buy Box
+ *   churn at all over 90 days. Treating null-BB-amongst-data-bearing-
+ *   siblings as "missing signal" still left the pallets with their
+ *   review-only slice (≈10% each). The brand owner confirmed the
+ *   correct interpretation: a child with no BB winner changes while
+ *   its siblings DO have BB activity has effectively sold nothing.
+ *
  * Methodology (deliberately simple, easy to defend):
  *   1. Group children by parentAsin within the brand. A "variation group"
  *      is the set of ASINs sharing one parentAsin. Singletons (no
@@ -41,13 +57,15 @@
  *      that one shared number.
  *   3. weight_i = combined review + Buy Box share (formula above).
  *      Fallbacks (in order):
- *        a. Σ buy_box_changes = 0 across the group → review-only weighting
- *           (Phase 31 behavior). Reviews are still better than nothing.
+ *        a. No sibling in the group has BB data (all null) → review-only
+ *           weighting (Phase 31 behavior). With nothing to compare
+ *           against, we have no evidence of zero activity.
  *        b. Σ recent_reviews = 0 across the group → Buy Box-only
  *           weighting.
  *        c. Both zero → equal weighting (1/N each).
- *      Null per-child values are treated as 0 contribution to that
- *      signal's share.
+ *      Phase 32.1 zero-signal rule: when at least one sibling has BB
+ *      data, null-BB siblings receive weight 0 (excluded from the
+ *      blended formula entirely).
  *   4. attributed_monthly_units = group_monthly_units × weight_i.
  *
  * The output replaces the raw `monthly_units` input to the revenue
@@ -173,29 +191,75 @@ export function attributeVariationSales(
       0,
     );
 
-    const reviewSum = members.reduce(
+    // Phase 32.1 — distinguish "Buy Box value is null/undefined" (no
+    // signal recorded) from "Buy Box value is 0" (explicit zero churn,
+    // which IS a valid data point). We can only invoke the zero-signal
+    // rule when at least one sibling has a non-null BB value to compare
+    // against.
+    const groupHasAnyBuybox = members.some(
+      (m) =>
+        m.buy_box_change_count_90d !== null &&
+        m.buy_box_change_count_90d !== undefined &&
+        Number.isFinite(m.buy_box_change_count_90d as number),
+    );
+
+    // Phase 32.1: when the group has at least one BB data point and at
+    // least one null-BB sibling, the null-BB siblings are interpreted
+    // as "zero recent sales" and excluded from the weighting math
+    // entirely (variation_weight = 0). The remaining "data-bearing"
+    // siblings carry 100% of the group's attributed volume between
+    // them, with shares computed from THEIR review and BB sums (the
+    // zero-signal siblings' reviews are not counted in the denominator
+    // — they're not part of the comparison set anymore).
+    const zeroSignalAsins = new Set<string>();
+    if (groupHasAnyBuybox) {
+      for (const m of members) {
+        const bbIsNull =
+          m.buy_box_change_count_90d === null ||
+          m.buy_box_change_count_90d === undefined ||
+          !Number.isFinite(m.buy_box_change_count_90d as number);
+        if (bbIsNull) zeroSignalAsins.add(m.asin);
+      }
+    }
+
+    // Sums computed across the comparison set: when the zero-signal
+    // rule fires, we exclude null-BB siblings; otherwise this is the
+    // full group (Phase 32 behavior).
+    const comparisonMembers = zeroSignalAsins.size > 0
+      ? members.filter((m) => !zeroSignalAsins.has(m.asin))
+      : members;
+
+    const reviewSum = comparisonMembers.reduce(
       (acc, m) => acc + clampNonNegative(m.recent_review_count),
       0,
     );
-    const buyboxSum = members.reduce(
+    const buyboxSum = comparisonMembers.reduce(
       (acc, m) => acc + clampNonNegative(m.buy_box_change_count_90d),
       0,
     );
     const equalWeight = 1 / size;
+    const equalDataBearingWeight = comparisonMembers.length > 0
+      ? 1 / comparisonMembers.length
+      : 0;
 
     // Decide which signal(s) drive the weights for this group.
     //   Both > 0 → blended (default 0.4 review + 0.6 Buy Box).
     //   Only reviews > 0 → review-only (Phase 31 behavior, the brief's
     //                       "no Buy Box data anywhere in the group" fallback).
     //   Only Buy Box > 0 → Buy Box-only.
-    //   Both 0 → equal weighting.
+    //   Both 0 → equal weighting (across the comparison set when
+    //            zero-signal fired, otherwise across the whole group).
     const useReviews = reviewSum > 0;
     const useBuybox = buyboxSum > 0;
 
     if (!useReviews && !useBuybox) {
-      // Edge case (c): both signals empty across the group.
+      // Edge case (c): both signals empty across the comparison set.
+      // Distribute equal weight across the comparison set; zero-signal
+      // siblings still get 0.
       for (const m of members) {
-        const w = equalWeight;
+        const w = zeroSignalAsins.has(m.asin)
+          ? 0
+          : (zeroSignalAsins.size > 0 ? equalDataBearingWeight : equalWeight);
         out.push({
           asin: m.asin,
           parent_asin: m.parent_asin ?? null,
@@ -209,9 +273,12 @@ export function attributeVariationSales(
     }
 
     // When only one signal is available, log a warning so ops can spot
-    // brands stuck in the fallback. The actual math is just review_share
-    // or buybox_share by itself.
-    if (useReviews && !useBuybox) {
+    // brands stuck in the fallback. Note: groupHasAnyBuybox=false is
+    // the genuine "no BB anywhere" case worth surfacing; when the
+    // zero-signal rule fired we *do* have BB data — useBuybox=false
+    // there would mean every data-bearing sibling had BB=0, which is
+    // valid data, not a fallback.
+    if (useReviews && !useBuybox && !groupHasAnyBuybox) {
       const parentKey = members[0].parent_asin ?? "(null)";
       console.warn(
         `[variation-attribution] group ${parentKey}: no Buy Box data across ${size} siblings — falling back to review-only weighting.`,
@@ -225,6 +292,18 @@ export function attributeVariationSales(
     }
 
     for (const m of members) {
+      if (zeroSignalAsins.has(m.asin)) {
+        out.push({
+          asin: m.asin,
+          parent_asin: m.parent_asin ?? null,
+          variation_group_size: size,
+          variation_weight: 0,
+          raw_monthly_units: m.raw_monthly_units ?? null,
+          attributed_monthly_units: 0,
+        });
+        continue;
+      }
+
       const r = clampNonNegative(m.recent_review_count);
       const b = clampNonNegative(m.buy_box_change_count_90d);
       const reviewShare = useReviews ? r / reviewSum : 0;
