@@ -2,9 +2,16 @@
  * Phase 33 — Web-search adapter.
  *
  * Harvests candidate owner companies + domains from web searches against
- * a brand name. Uses Perplexity Search API if `PERPLEXITY_API_KEY` is set,
- * else Brave Search API if `BRAVE_SEARCH_API_KEY` is set. If neither is
- * available, returns an empty result with a clear `error` value so the
+ * a brand name. Provider selection (in priority order):
+ *   1. OpenAI Responses API + `web_search` tool (`OPENAI_API_KEY`) — primary.
+ *   2. Perplexity Search API (`PERPLEXITY_API_KEY`) — fallback.
+ *   3. Brave Search API (`BRAVE_SEARCH_API_KEY`) — fallback.
+ *
+ * The adapter walks the priority list and uses the first provider whose
+ * key is set. `WEB_SEARCH_PROVIDER=openai|perplexity|brave` can pin a
+ * specific provider when multiple keys are configured.
+ *
+ * If none of the keys are set, a structured failure is returned so the
  * orchestrator can fall back to a USPTO-only run.
  *
  * All non-business sites (marketplaces, social, encyclopedias) are denied
@@ -13,22 +20,27 @@
  */
 import type { RawOwnerCandidate } from "./types";
 import { rateLimit } from "./rate-limit";
+import { searchOpenAI } from "./web-search-openai";
+import type {
+  ProviderResult,
+  WebSearchResultItem,
+} from "./web-search-types";
+
+export type { WebSearchResultItem } from "./web-search-types";
+
+export type WebSearchProvider = "openai" | "perplexity" | "brave";
 
 export interface WebSearchOptions {
   fetchImpl?: typeof fetch;
+  openaiApiKey?: string | null;
   perplexityApiKey?: string | null;
   braveApiKey?: string | null;
+  /** Pin a specific provider — overrides default priority order. */
+  provider?: WebSearchProvider | null;
   /** Override the per-query candidate cap (default 15). */
   maxPerQuery?: number;
   /** Override the total candidate cap (default 30). */
   maxTotal?: number;
-}
-
-export interface WebSearchResultItem {
-  title: string | null;
-  url: string;
-  snippet: string | null;
-  query: string;
 }
 
 export interface WebSearchAdapterResult {
@@ -37,6 +49,8 @@ export interface WebSearchAdapterResult {
   raw: unknown;
   error: string | null;
   results_count: number;
+  /** Provider that was actually used (or null when none was configured). */
+  provider_used?: WebSearchProvider | null;
 }
 
 const DEFAULT_MAX_PER_QUERY = 15;
@@ -184,12 +198,6 @@ export function buildQueries(brandName: string): string[] {
   ];
 }
 
-interface ProviderResult {
-  items: WebSearchResultItem[];
-  raw: unknown;
-  error: string | null;
-}
-
 async function searchPerplexity(
   query: string,
   apiKey: string,
@@ -318,6 +326,51 @@ async function searchBraveImpl(
   }
 }
 
+interface SelectedProvider {
+  name: WebSearchProvider;
+  run: (query: string) => Promise<ProviderResult>;
+}
+
+function pickProvider(
+  opts: WebSearchOptions,
+  openaiKey: string | null,
+  perplexityKey: string | null,
+  braveKey: string | null,
+  fetchImpl: typeof fetch,
+): SelectedProvider | null {
+  const explicit =
+    opts.provider ??
+    (process.env.WEB_SEARCH_PROVIDER as WebSearchProvider | undefined) ??
+    null;
+  const order: WebSearchProvider[] = explicit
+    ? [explicit, "openai", "perplexity", "brave"]
+    : ["openai", "perplexity", "brave"];
+  const seen = new Set<WebSearchProvider>();
+  for (const p of order) {
+    if (seen.has(p)) continue;
+    seen.add(p);
+    if (p === "openai" && openaiKey) {
+      return {
+        name: "openai",
+        run: (q) => searchOpenAI(q, openaiKey, fetchImpl),
+      };
+    }
+    if (p === "perplexity" && perplexityKey) {
+      return {
+        name: "perplexity",
+        run: (q) => searchPerplexity(q, perplexityKey, fetchImpl),
+      };
+    }
+    if (p === "brave" && braveKey) {
+      return {
+        name: "brave",
+        run: (q) => searchBrave(q, braveKey, fetchImpl),
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * Run all queries for `brandName`, harvest candidates, dedupe by
  * registrable domain (case-insensitive), and return up to
@@ -328,6 +381,7 @@ export async function searchWebForOwners(
   opts: WebSearchOptions = {},
 ): Promise<WebSearchAdapterResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const openaiKey = opts.openaiApiKey ?? process.env.OPENAI_API_KEY ?? null;
   const perplexityKey =
     opts.perplexityApiKey ?? process.env.PERPLEXITY_API_KEY ?? null;
   const braveKey = opts.braveApiKey ?? process.env.BRAVE_SEARCH_API_KEY ?? null;
@@ -335,26 +389,34 @@ export async function searchWebForOwners(
   const maxTotal = opts.maxTotal ?? DEFAULT_MAX_TOTAL;
   const queries = buildQueries(brandName);
 
-  if (!perplexityKey && !braveKey) {
+  const provider = pickProvider(
+    opts,
+    openaiKey,
+    perplexityKey,
+    braveKey,
+    fetchImpl,
+  );
+  if (!provider) {
     return {
       queries,
       candidates: [],
       raw: null,
       error:
-        "no web-search API key configured (PERPLEXITY_API_KEY or BRAVE_SEARCH_API_KEY)",
+        "no web-search API key configured (OPENAI_API_KEY, PERPLEXITY_API_KEY, or BRAVE_SEARCH_API_KEY)",
       results_count: 0,
+      provider_used: null,
     };
   }
 
   const rawByQuery: Record<string, unknown> = {};
   let allItems: WebSearchResultItem[] = [];
+  const errors: string[] = [];
   for (const q of queries) {
-    const provider = perplexityKey
-      ? await searchPerplexity(q, perplexityKey, fetchImpl)
-      : await searchBrave(q, braveKey as string, fetchImpl);
-    rawByQuery[q] = provider.raw;
-    if (provider.items.length > 0) {
-      allItems = allItems.concat(provider.items.slice(0, maxPerQuery));
+    const result = await provider.run(q);
+    rawByQuery[q] = result.raw;
+    if (result.error) errors.push(result.error);
+    if (result.items.length > 0) {
+      allItems = allItems.concat(result.items.slice(0, maxPerQuery));
     }
   }
 
@@ -374,7 +436,7 @@ export async function searchWebForOwners(
     const domain = registrableDomain(it.url);
     if (!domain || isDeniedDomain(domain)) continue;
     const company = inferCompanyName(it.title, domain) ?? domain;
-    const key = `${company.toLowerCase()} ${domain.toLowerCase()}`;
+    const key = `${company.toLowerCase()} ${domain.toLowerCase()}`;
     if (dedup.has(key)) continue;
     const queriesForDomain = Array.from(
       domainQueryHits.get(domain) ?? new Set<string>(),
@@ -397,12 +459,18 @@ export async function searchWebForOwners(
     if (dedup.size >= maxTotal) break;
   }
 
+  // Surface a soft error if every query failed AND we got nothing —
+  // otherwise treat partial success as success.
+  const surfacedError =
+    allItems.length === 0 && errors.length > 0 ? errors[0]! : null;
+
   return {
     queries,
     candidates: Array.from(dedup.values()),
     raw: rawByQuery,
-    error: null,
+    error: surfacedError,
     results_count: allItems.length,
+    provider_used: provider.name,
   };
 }
 

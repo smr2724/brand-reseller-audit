@@ -26,6 +26,8 @@ export interface UsptoFetchOptions {
   rateLimitDelayMs?: number;
   /** Skip the rate-limit delay entirely (used by tests). */
   skipRateLimit?: boolean;
+  /** Disable retry-with-backoff on transient failures (used by tests). */
+  skipRetries?: boolean;
 }
 
 export interface UsptoSearchResult {
@@ -39,6 +41,15 @@ export interface UsptoSearchResult {
 const DEFAULT_BASE_URL = "https://uspto.report/api/v1/trademark/search";
 const DEFAULT_RATE_LIMIT_DELAY_MS = 1000;
 const MAX_CANDIDATES = 10;
+
+// Some uspto.report origins reject default Node / undici user agents with
+// 403 Forbidden. Send a realistic UA + Accept header so the request looks
+// like a normal client. Retry once on 403/429 with backoff in case the
+// reject is rate-limit driven from the Vercel egress IP.
+const USPTO_USER_AGENT =
+  "Mozilla/5.0 (compatible; BrandResellerAudit/1.0; +https://brand-reseller-audit.vercel.app)";
+const USPTO_RETRY_STATUSES = new Set<number>([403, 429, 502, 503, 504]);
+const USPTO_RETRY_DELAYS_MS = [500, 1500];
 
 // M4 fix: strict allow-list of LIVE-equivalent USPTO statuses. "PUBLISHED
 // FOR OPPOSITION" is an in-process application that the public can
@@ -221,19 +232,46 @@ export async function searchUsptoTrademarks(
 
   const doFetch = async (): Promise<UsptoSearchResult> => {
     let raw: unknown = null;
-    let res: Response;
-    try {
-      res = await fetchImpl(url, {
-        method: "GET",
-        headers: { Accept: "application/json" },
-        cache: "no-store",
-      } as RequestInit);
-    } catch (e) {
+    let res: Response | null = null;
+    let lastError: string | null = null;
+
+    // Try once + up to N retries on transient rejections (403/429/5xx).
+    // 403 is included because uspto.report's CDN sometimes rejects the
+    // first request from a cold Vercel egress IP and lets the retry through.
+    const attempts = opts.skipRetries ? 1 : USPTO_RETRY_DELAYS_MS.length + 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        res = await fetchImpl(url, {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            "User-Agent": USPTO_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+          cache: "no-store",
+        } as RequestInit);
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+        res = null;
+      }
+
+      if (res && res.ok) break;
+      if (res) {
+        lastError = `uspto search ${res.status} ${res.statusText}`;
+        if (!USPTO_RETRY_STATUSES.has(res.status)) break;
+      }
+      const delay = USPTO_RETRY_DELAYS_MS[attempt];
+      if (delay !== undefined) {
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+
+    if (!res) {
       return {
         query,
         candidates: [],
         raw: null,
-        error: e instanceof Error ? e.message : String(e),
+        error: lastError ?? "uspto search failed",
         results_count: 0,
       };
     }

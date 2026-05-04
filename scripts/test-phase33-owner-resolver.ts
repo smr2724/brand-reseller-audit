@@ -210,14 +210,120 @@ async function main() {
     assert(q.every((x) => x.includes("Terra Pure")), "all include brand name");
   }
 
-  // searchWebForOwners — graceful no-key
+  // searchWebForOwners — graceful no-key (all three providers null)
   {
     const r = await searchWebForOwners("Terra Pure", {
+      openaiApiKey: null,
       perplexityApiKey: null,
       braveApiKey: null,
     });
     assert(r.candidates.length === 0, "no candidates without keys");
     assert(r.error !== null, "error message present");
+    assert(
+      typeof r.error === "string" && r.error.includes("OPENAI_API_KEY"),
+      "error mentions OPENAI_API_KEY",
+    );
+  }
+
+  // searchWebForOwners — OpenAI Responses API happy path with mocked output
+  {
+    const openaiPayload = {
+      output: [
+        {
+          type: "message",
+          content: [
+            {
+              type: "output_text",
+              text:
+                "Terra Pure is manufactured by Acme Holdings — see https://www.acme.com/about for details.",
+              annotations: [
+                {
+                  type: "url_citation",
+                  url: "https://www.acme.com/about",
+                  title: "About Acme Holdings",
+                  start_index: 47,
+                  end_index: 78,
+                },
+                {
+                  type: "url_citation",
+                  url: "https://www.amazon.com/dp/B000",
+                  title: "Buy Terra Pure",
+                  start_index: 0,
+                  end_index: 10,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const fakeOk = (() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: () => Promise.resolve(openaiPayload),
+      } as unknown as Response)) as unknown as typeof fetch;
+    const r = await searchWebForOwners("Terra Pure", {
+      openaiApiKey: "sk-test",
+      perplexityApiKey: null,
+      braveApiKey: null,
+      fetchImpl: fakeOk,
+    });
+    assert(r.error === null, "openai adapter no error");
+    assert(r.provider_used === "openai", "openai provider used");
+    const domains = r.candidates.map((c) => c.candidate_domain);
+    assert(domains.includes("acme.com"), "openai surfaces acme.com from url_citation");
+    assert(!domains.includes("amazon.com"), "openai amazon.com filtered by deny list");
+  }
+
+  // searchWebForOwners — OpenAI 4xx surfaces as soft error, no throw
+  {
+    const fake403 = (() =>
+      Promise.resolve({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        text: () => Promise.resolve("forbidden"),
+        json: () => Promise.resolve({}),
+      } as unknown as Response)) as unknown as typeof fetch;
+    const r = await searchWebForOwners("Terra Pure", {
+      openaiApiKey: "sk-test",
+      perplexityApiKey: null,
+      braveApiKey: null,
+      fetchImpl: fake403,
+    });
+    assert(
+      r.error !== null && r.error.includes("403"),
+      `openai 403 surfaced as error (got ${r.error})`,
+    );
+    assert(r.candidates.length === 0, "no candidates on 403");
+  }
+
+  // WEB_SEARCH_PROVIDER override pins choice when multiple keys exist
+  {
+    const calls: string[] = [];
+    const fakeFetch = ((url: string) => {
+      calls.push(url);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as Response);
+    }) as unknown as typeof fetch;
+    const r = await searchWebForOwners("Terra Pure", {
+      openaiApiKey: "sk-test",
+      perplexityApiKey: "pp-test",
+      braveApiKey: "br-test",
+      provider: "perplexity",
+      fetchImpl: fakeFetch,
+    });
+    assert(r.provider_used === "perplexity", "explicit provider override pins perplexity");
+    assert(
+      calls.every((u) => u.includes("perplexity.ai")),
+      "only perplexity endpoint hit",
+    );
   }
 
   // searchWebForOwners — happy path with mocked Perplexity
