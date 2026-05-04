@@ -171,6 +171,16 @@ export interface KeepaProductDetails {
   parent_asin?: string | null;
   /** Child ASINs returned by Keepa's `variationCSV` / `variations[]`. */
   variation_asins?: string[];
+  /**
+   * Phase 32 — count of distinct Buy Box winner changes in the last 90
+   * days. Derived from `csv[32]` (Buy Box seller-id history) when
+   * available, falling back to `csv[18]` (Buy Box shipping-price
+   * history). `null` when neither series is present (most often: a
+   * listing with no recent offers / no winner). A sharper signal than
+   * review velocity for "what actually sold recently" — a dormant
+   * pallet has zero changes while an active 4-pack flips frequently.
+   */
+  buy_box_change_count_90d?: number | null;
   raw?: any;
 }
 
@@ -338,6 +348,73 @@ export async function searchProductsByBrand(brandName: string, maxResults = 20):
   const tokensConsumed = Number(json?.tokensConsumed ?? 1);
   TOKEN_CACHE = { t: Date.now(), v: { tokens_left: tokensLeft, refill_in_ms: Number(json?.refillIn ?? 0), refill_rate: Number(json?.refillRate ?? 0) } };
   return { asins: asinList, tokens_used: tokensConsumed, tokens_left: tokensLeft };
+}
+
+/**
+ * Phase 32 — count distinct Buy Box winner changes in the last 90 days.
+ *
+ * Keepa CSV time-series are `[keepaMinute, value, keepaMinute, value, ...]`
+ * (Keepa minutes since epoch + offset 21564000). We prefer csv[32]
+ * (Buy Box seller-id history): each entry is the winning seller ID at
+ * that minute. A "change" is any sample whose seller-id differs from
+ * the previous sample's seller-id within the 90-day window. When csv[32]
+ * is absent, we fall back to csv[18] (Buy Box shipping-price history)
+ * and count distinct price values — noisier (price oscillates without
+ * a winner change) but still correlates with active offer churn. When
+ * neither series exists or is empty, we return null so the attribution
+ * layer can fall back to review-only weighting.
+ *
+ * We avoid bumping `offers` from 20 → 30: the csv-based history is
+ * what we actually need (the live offer snapshot is unrelated), and 20
+ * already covers >90% of small/mid brand listings.
+ */
+function buyBoxChangeCount90d_(p: any): number | null {
+  const csv: any[] = Array.isArray(p?.csv) ? p.csv : [];
+  // Keepa minute = unix-minutes - 21564000. 90 days = 129600 unix-minutes.
+  const nowKeepa = Math.floor(Date.now() / 60_000) - 21564000;
+  const cutoff = nowKeepa - 90 * 24 * 60;
+
+  function countDistinctTransitions(series: any): number | null {
+    if (!Array.isArray(series) || series.length < 4) return null;
+    let prev: string | number | null = null;
+    let count = 0;
+    let saw = false;
+    for (let i = 0; i + 1 < series.length; i += 2) {
+      const t = series[i];
+      const v = series[i + 1];
+      if (typeof t !== "number") continue;
+      if (t < cutoff) {
+        // Track the most recent pre-window value so the first in-window
+        // sample only counts as a change if it differs from it.
+        if (v !== -1) prev = v;
+        continue;
+      }
+      if (v === -1) {
+        // -1 = no winner. Treat as its own state so a listing flipping
+        // in/out of "no offers" still registers churn.
+        if (prev !== "__none__") {
+          if (saw) count += 1;
+          prev = "__none__";
+        }
+        saw = true;
+        continue;
+      }
+      if (prev !== v) {
+        if (saw) count += 1;
+        prev = v;
+      }
+      saw = true;
+    }
+    return saw ? count : null;
+  }
+
+  // csv[32] = Buy Box seller-id history (preferred). csv[18] = Buy Box
+  // shipping-price history (fallback).
+  const sellerSeries = csv[32];
+  const sellerCount = countDistinctTransitions(sellerSeries);
+  if (sellerCount !== null) return sellerCount;
+  const priceSeries = csv[18];
+  return countDistinctTransitions(priceSeries);
 }
 
 function extractOffers(p: any): { offers: KeepaOffer[]; buyBoxSellerId?: string } {
@@ -518,6 +595,11 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
           ? parentAsinRaw.trim().toUpperCase()
           : null;
 
+      // Phase 32 — Buy Box win frequency over the last 90 days. Sharper
+      // attribution signal than review velocity for variation siblings:
+      // dormant pallet listings register 0 changes, active 4-packs many.
+      const buyBoxChangeCount90d = buyBoxChangeCount90d_(p);
+
       const categoryTree = Array.isArray(p?.categoryTree)
         ? p.categoryTree
             .map((c: any) =>
@@ -558,6 +640,7 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
         has_a_plus: hasAPlus,
         parent_asin: parentAsin,
         variation_asins: variationAsins,
+        buy_box_change_count_90d: buyBoxChangeCount90d,
         raw: { tokensLeft, lastPriceChange: p?.lastPriceChange },
       };
       PRODUCT_CACHE.set(asin, { t: Date.now(), v: details });

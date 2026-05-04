@@ -326,11 +326,13 @@ function CxAuditPage({ narrative }: { narrative: NarrativeV2 }) {
             Amazon&apos;s sales rank is often shared across variations, which
             causes raw third-party sales estimators to over-count sales on
             inactive variations. We attribute group-level sales to each
-            variation in proportion to its share of recent customer
-            reviews — variations with little or no recent review activity
-            receive little or no attributed sales. These per-ASIN sales
-            numbers are estimates derived from Keepa rank data plus
-            Amazon review velocity weighting, not direct sales reporting.
+            variation using a combined signal: recent review activity
+            (last 90 days) plus Buy Box win frequency (how often each
+            variation actually held the Buy Box recently). Variations with
+            no recent buyer activity — for example, dormant bulk-pack
+            listings — correctly receive minimal attributed sales. These
+            per-ASIN sales numbers are estimates derived from Keepa rank,
+            review, and Buy Box data, not direct sales reporting.
           </Text>
         </View>
       )}

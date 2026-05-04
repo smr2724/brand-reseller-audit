@@ -137,7 +137,9 @@ export async function POST(req: Request) {
     );
   }
 
-  // Compute attribution.
+  // Compute attribution. Phase 32 adds Buy Box win-frequency as the
+  // sharper second signal — combined with reviews via the env-tunable
+  // VARIATION_REVIEW_WEIGHT / VARIATION_BUYBOX_WEIGHT blend.
   const attributionInputs = products.map((p) => {
     const rank = p.sales_rank_avg365 ?? p.sales_rank_current ?? null;
     const categoryPath = p.category_tree?.map((c) => c.name).join(" > ") ?? null;
@@ -147,6 +149,7 @@ export async function POST(req: Request) {
       parent_asin: p.parent_asin ?? null,
       raw_monthly_units: raw,
       recent_review_count: p.review_count ?? null,
+      buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
     };
   });
   const attribution = indexAttributionByAsin(
@@ -167,6 +170,7 @@ export async function POST(req: Request) {
         variation_group_size: att.variation_group_size ?? 1,
         variation_weight: att.variation_weight ?? 1,
         recent_review_count: p.review_count ?? null,
+        buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
         raw_monthly_units: att.raw_monthly_units ?? null,
         attributed_monthly_units: att.attributed_monthly_units ?? null,
       })
@@ -231,7 +235,7 @@ export async function GET(req: Request) {
   const { data, error } = await admin
     .from("brand_asins")
     .select(
-      "asin, parent_asin, variation_group_size, variation_weight, recent_review_count, raw_monthly_units, attributed_monthly_units, buy_box_price",
+      "asin, parent_asin, variation_group_size, variation_weight, recent_review_count, buy_box_change_count_90d, raw_monthly_units, attributed_monthly_units, buy_box_price",
     )
     .eq("brand_id", brandId);
   if (error) {
