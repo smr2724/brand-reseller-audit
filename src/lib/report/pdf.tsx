@@ -353,7 +353,7 @@ function ChannelHealthPage({ bundle }: { bundle: BrandEnrichmentBundle | null })
                       borderBottomColor: PALETTE.softRule,
                     }}
                   >
-                    <Text style={{ fontSize: 10.5 }}>{s.seller_name}</Text>
+                    <Text style={{ fontSize: 10.5 }}>{s.seller_name ?? "Unknown 3P seller"}</Text>
                     <Text style={{ fontSize: 10.5, color: PALETTE.muted }}>
                       {pctFmt(s.share_pct ?? null)} · {s.asins_won ?? 0} ASINs
                     </Text>
@@ -377,7 +377,7 @@ function SellerShareChart({
   sellers,
   brandName,
 }: {
-  sellers: { seller_name: string; share_pct: number | null }[];
+  sellers: { seller_name: string | null; share_pct: number | null }[];
   brandName: string;
 }) {
   const W = 460;

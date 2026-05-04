@@ -71,7 +71,9 @@ export interface SellerClassification {
 
 export interface ClassifyOptions {
   brand_name: string;
-  seller_name: string;
+  /** Nullable since the May 2026 hotfix — unresolved Keepa storefronts
+   * persist as NULL instead of the raw seller_id. */
+  seller_name: string | null;
   /** Short-circuit signal: Amazon retail (`ATVPDKIKX0DER`) is its own
    * thing — never classify as brand-controlled. */
   seller_id?: string | null;
@@ -316,7 +318,7 @@ async function llmTiebreaker(
  */
 export function classifySellerSync(opts: {
   brand_name: string;
-  seller_name: string;
+  seller_name: string | null;
   seller_id?: string | null;
 }): SellerClassification {
   const { brand_name, seller_name, seller_id } = opts;
@@ -400,7 +402,7 @@ export function classifySellerSync(opts: {
  * attached.
  */
 export async function classifySellers<
-  T extends { seller_name: string; seller_id?: string | null },
+  T extends { seller_name: string | null; seller_id?: string | null },
 >(
   brand_name: string,
   sellers: T[],

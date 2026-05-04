@@ -801,17 +801,24 @@ export async function backfillSellerClassification(
       seller_id: s.seller_id,
     });
     // Match on (brand_id, seller_name) — the same key the inserter uses.
-    // We update only rows where the columns are still null so we don't
-    // clobber a later, more-confident verdict that already landed.
-    const { error } = await admin
+    // Hotfix May 2026: rows whose seller_name is now NULL can't be matched
+    // by name; fall back to seller_id when present.
+    let q = admin
       .from("brand_sellers")
       .update({
         is_brand_controlled: verdict.is_brand_controlled,
         classification_reason: verdict.reason.slice(0, 500),
       })
-      .eq("brand_id", brandId)
-      .eq("seller_name", s.seller_name)
-      .is("is_brand_controlled", null);
+      .eq("brand_id", brandId);
+    if (s.seller_name == null) {
+      if (!s.seller_id) continue;
+      q = q.eq("seller_id", s.seller_id).is("seller_name", null);
+    } else {
+      q = q.eq("seller_name", s.seller_name);
+    }
+    // We update only rows where the columns are still null so we don't
+    // clobber a later, more-confident verdict that already landed.
+    const { error } = await q.is("is_brand_controlled", null);
     if (error) {
       const msg = error.message ?? "";
       if (/column .* does not exist|is_brand_controlled|classification_reason/i.test(msg)) {
