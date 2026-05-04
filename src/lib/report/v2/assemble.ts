@@ -186,7 +186,7 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     revenueKind = "estimate";
     revenueSource =
       revenueEstimate.source_note ??
-      "Keepa BSR + buy-box price · variation-aware (review-velocity weighted) · summed across full brand catalog";
+      "Keepa monthlySold (when published) + BSR fallback · buy-box price · variation-aware · summed across full brand catalog";
   } else {
     // Phase 25 — Bug C fallback. When SP-API isn't wired, no upload
     // exists, AND the rank-based estimator returns null (every ASIN

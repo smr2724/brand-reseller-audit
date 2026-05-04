@@ -464,9 +464,9 @@ export function estimateBrandTtmRevenueFromPersisted(
   return {
     ...base,
     source_note:
-      "Keepa BSR + buy-box price · variation-aware (review-velocity weighted) · summed across full brand catalog",
+      "Keepa monthlySold (when published) + BSR fallback · buy-box price · variation-aware · summed across full brand catalog",
     methodology_footnote:
-      "Directional estimate from Keepa BSR + buy-box price, with variation-aware attribution (review-velocity weighting across parent groups). Summed across the full brand catalog persisted on brand_asins. Replace with seller's actual TTM during diligence.",
+      "Directional estimate. Per-ASIN units use Amazon's published \"X+ bought in past month\" badge (Keepa monthlySold) when available, else a BSR-curve fallback; variation-aware attribution across parent groups; summed across the full brand catalog persisted on brand_asins. Replace with seller's actual TTM during diligence.",
     has_variation_attribution: true,
   };
 }
