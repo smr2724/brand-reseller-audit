@@ -323,8 +323,26 @@ export async function keepaProductSearch(
 }
 
 /**
+ * Phase 33 — hard ceiling on `/query` page iterations per brand. 5 pages
+ * × perPage 100 = 500 ASINs. Override via env for one-off heavy brands;
+ * the default keeps a single brand from draining Keepa's ~3,900-token
+ * bucket on its own (Yeti's 8,486 ASINs would otherwise eat the lot).
+ */
+export const KEEPA_MAX_PAGES_PER_BRAND = (() => {
+  const raw = Number(process.env.KEEPA_MAX_PAGES_PER_BRAND ?? "5");
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 5;
+})();
+
+/**
  * Search Keepa for top ASINs under a brand name.
  * Uses /query?type=product so we can filter by brand.
+ *
+ * Phase 33 — paginates internally. Phase 11 only fetched page 0 (max 50–100
+ * ASINs), silently dropping the long tail of large catalogs (Terra Pure
+ * 663 → 44, Yeti 8,486 → 20). Now iterates up to
+ * KEEPA_MAX_PAGES_PER_BRAND pages of 100 ASINs each, breaking when Keepa
+ * is exhausted, the caller's `maxResults` is reached, or the Phase 30
+ * token-budget floor would be crossed mid-fetch.
  */
 export async function searchProductsByBrand(brandName: string, maxResults = 20): Promise<KeepaBrandSearchResult> {
   const key = process.env.KEEPA_API_KEY;
@@ -334,20 +352,71 @@ export async function searchProductsByBrand(brandName: string, maxResults = 20):
 
   await ensureTokens(5);
 
-  // Keepa /query: search products by brand string. Keepa returns asinList ordered by sales rank by default.
-  const selection = JSON.stringify({
-    brand: [cleaned],
-    sort: [["current_SALES", "asc"]],
-    // Keepa /query requires perPage ≥ 50; we slice down to maxResults below.
-    perPage: Math.min(100, Math.max(50, maxResults)),
-    page: 0,
-  });
-  const { json } = await keepaFetch("/query", { selection });
-  const asinList: string[] = Array.isArray(json?.asinList) ? json.asinList.slice(0, maxResults) : [];
-  const tokensLeft = Number(json?.tokensLeft ?? 0);
-  const tokensConsumed = Number(json?.tokensConsumed ?? 1);
-  TOKEN_CACHE = { t: Date.now(), v: { tokens_left: tokensLeft, refill_in_ms: Number(json?.refillIn ?? 0), refill_rate: Number(json?.refillRate ?? 0) } };
-  return { asins: asinList, tokens_used: tokensConsumed, tokens_left: tokensLeft };
+  // Phase 33 — Lazy import to keep the module-level dependency graph the
+  // same; recover-stuck-brands also imports keepa, so an eager top-level
+  // import would be circular.
+  const { TOKEN_BUDGET_FLOOR } = await import("@/lib/brand/recover-stuck-brands");
+
+  const perPage = 100;
+  const accumulated: string[] = [];
+  let tokensConsumed = 0;
+  let tokensLeft = 0;
+  let totalProducts: number | null = null;
+  let pagesFetched = 0;
+
+  for (let page = 0; page < KEEPA_MAX_PAGES_PER_BRAND; page++) {
+    if (page > 0) {
+      // Preserve the Phase 30 invariant during long fetches: bail before
+      // burning more tokens if the bucket has slipped under the floor.
+      const status = await getKeepaTokenStatus(false);
+      if (status.tokens_left < TOKEN_BUDGET_FLOOR) {
+        console.log(
+          `[phase33] token budget floor reached mid-fetch for "${cleaned}" — tokens_left=${status.tokens_left}, page=${page}, accumulated=${accumulated.length}`,
+        );
+        break;
+      }
+    }
+
+    const selection = JSON.stringify({
+      brand: [cleaned],
+      sort: [["current_SALES", "asc"]],
+      perPage,
+      page,
+    });
+    const { json } = await keepaFetch("/query", { selection });
+    pagesFetched += 1;
+
+    tokensLeft = Number(json?.tokensLeft ?? tokensLeft);
+    tokensConsumed += Number(json?.tokensConsumed ?? 1);
+    TOKEN_CACHE = {
+      t: Date.now(),
+      v: {
+        tokens_left: tokensLeft,
+        refill_in_ms: Number(json?.refillIn ?? 0),
+        refill_rate: Number(json?.refillRate ?? 0),
+      },
+    };
+
+    const pageAsins: string[] = Array.isArray(json?.asinList) ? json.asinList : [];
+    if (totalProducts === null && Number.isFinite(json?.totalProducts)) {
+      totalProducts = Number(json.totalProducts);
+    }
+    accumulated.push(...pageAsins);
+
+    if (pageAsins.length < perPage) break; // Keepa exhausted
+    if (totalProducts !== null && accumulated.length >= totalProducts) break;
+    if (accumulated.length >= maxResults) break;
+  }
+
+  console.log(
+    `[phase33] keepa brand search "${cleaned}" — pages_fetched=${pagesFetched}, accumulated=${accumulated.length}, keepa_total_products=${totalProducts ?? "unknown"}, maxResults=${maxResults}, tokens_used=${tokensConsumed}, tokens_left=${tokensLeft}`,
+  );
+
+  return {
+    asins: accumulated.slice(0, maxResults),
+    tokens_used: tokensConsumed,
+    tokens_left: tokensLeft,
+  };
 }
 
 /**
