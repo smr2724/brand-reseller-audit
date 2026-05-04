@@ -237,8 +237,9 @@ function makeSupabaseStub(rows: FakeRow[]) {
     estimate.source_note.includes("full brand catalog"),
   );
   assert(
-    "source_note still credits Keepa BSR",
-    estimate.source_note.includes("Keepa BSR"),
+    "source_note still credits Keepa (monthlySold or BSR fallback)",
+    estimate.source_note.includes("Keepa") &&
+      (estimate.source_note.includes("BSR") || estimate.source_note.includes("monthlySold")),
   );
 
   // --- Test 6: zero/null rows handled gracefully ---

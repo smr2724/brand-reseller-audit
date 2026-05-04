@@ -327,10 +327,43 @@ export async function enrichBrandWithKeepa(
     // sharing a parent listing with active 4-pack/12-pack siblings
     // collapse to ~0 attributed units, and the brand's TTM sum stops
     // double-counting.
+    // Phase 34 — Amazon's published "X+ bought in past month" badge
+    // (Keepa `monthlySold`) takes precedence over the BSR-curve estimate
+    // when present. The curve still acts as a defensive floor via
+    // `Math.max` in case Amazon temporarily strips the badge from a
+    // high-velocity ASIN. Per-row `units_source` is captured for
+    // diagnostics / log-line summaries.
+    type UnitsSource =
+      | "keepa_monthly_sold"
+      | "bsr_curve"
+      | "keepa_monthly_sold_floored"
+      | "none";
+    const unitsSourceByAsin = new Map<string, UnitsSource>();
+    let withMonthlySoldCount = 0;
+    let monthlySoldTotal = 0;
+    let curveTotal = 0;
     const attributionInputs = products.map((p) => {
       const rank = p.sales_rank_avg365 ?? p.sales_rank_current ?? null;
       const categoryPath = p.category_tree?.map((c) => c.name).join(" > ") ?? null;
-      const raw = rankToMonthlyUnits(rank, p.product_group ?? null, categoryPath);
+      const fromKeepa = p.monthly_sold ?? null;
+      const fromCurve = rankToMonthlyUnits(rank, p.product_group ?? null, categoryPath);
+      const raw =
+        fromKeepa != null ? Math.max(fromKeepa, fromCurve ?? 0) : fromCurve;
+      let source: UnitsSource;
+      if (fromKeepa != null) {
+        withMonthlySoldCount += 1;
+        monthlySoldTotal += fromKeepa;
+        source =
+          fromCurve != null && fromCurve > fromKeepa
+            ? "keepa_monthly_sold_floored"
+            : "keepa_monthly_sold";
+      } else if (fromCurve != null) {
+        source = "bsr_curve";
+      } else {
+        source = "none";
+      }
+      if (fromCurve != null) curveTotal += fromCurve;
+      unitsSourceByAsin.set(p.asin, source);
       return {
         asin: p.asin,
         parent_asin: p.parent_asin ?? null,
@@ -348,6 +381,23 @@ export async function enrichBrandWithKeepa(
     });
     const attribution = indexAttributionByAsin(
       attributeVariationSales(attributionInputs),
+    );
+
+    // Phase 34 — diagnostic summary: how many ASINs received a Keepa
+    // `monthlySold` value, and how the totals stack up vs the curve-only
+    // estimate. Intentionally pre-attribution so it reflects the raw
+    // signal Keepa published (not the post-variation-weighting result).
+    const blendedTotal = attributionInputs.reduce(
+      (a, r) => a + (r.raw_monthly_units ?? 0),
+      0,
+    );
+    console.log(
+      `[phase34] units derivation — brand="${brand_name}", ` +
+        `asins_total=${products.length}, ` +
+        `with_monthly_sold=${withMonthlySoldCount}, ` +
+        `monthly_sold_total_units=${monthlySoldTotal}, ` +
+        `curve_total_units=${curveTotal}, ` +
+        `blended_total_units=${blendedTotal}`,
     );
 
     // Upsert brand_asins. is_brand_controlled is derived from the
@@ -382,6 +432,8 @@ export async function enrichBrandWithKeepa(
         buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
         raw_monthly_units: att?.raw_monthly_units ?? null,
         attributed_monthly_units: att?.attributed_monthly_units ?? null,
+        // Phase 34 — Amazon-published monthly_sold badge (or null).
+        keepa_monthly_sold: p.monthly_sold ?? null,
       };
     });
 
@@ -394,7 +446,7 @@ export async function enrichBrandWithKeepa(
         // variation-attribution columns so older environments don't
         // block the whole enrichment run on a missing column.
         const msg = upErr.message ?? "";
-        const looksLikeMissingColumn = /column .* does not exist|parent_asin|variation_group_size|variation_weight|recent_review_count|buy_box_change_count_90d|raw_monthly_units|attributed_monthly_units/i.test(msg);
+        const looksLikeMissingColumn = /column .* does not exist|parent_asin|variation_group_size|variation_weight|recent_review_count|buy_box_change_count_90d|raw_monthly_units|attributed_monthly_units|keepa_monthly_sold/i.test(msg);
         if (looksLikeMissingColumn) {
           console.warn(
             `[keepa-brand] brand_asins upsert with variation columns failed (${msg}); retrying without them.`,
@@ -407,6 +459,7 @@ export async function enrichBrandWithKeepa(
             buy_box_change_count_90d: _bb,
             raw_monthly_units: _rm,
             attributed_monthly_units: _am,
+            keepa_monthly_sold: _km,
             ...rest
           }) => rest);
           const { error: retryErr } = await supabase

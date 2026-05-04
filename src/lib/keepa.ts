@@ -181,6 +181,14 @@ export interface KeepaProductDetails {
    * pallet has zero changes while an active 4-pack flips frequently.
    */
   buy_box_change_count_90d?: number | null;
+  /**
+   * Phase 34 — Amazon's "X+ bought in past month" floor as published
+   * by Keepa via `monthlySold`. Treated as a tiered floor (50, 100,
+   * 200, 500, 1000, 2000, 5000+). 0 / null / undefined / missing all
+   * map to null (Amazon hides the badge below 50). When present, used
+   * in preference to the BSR-curve estimate.
+   */
+  monthly_sold?: number | null;
   raw?: any;
 }
 
@@ -682,6 +690,17 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
       // dormant pallet listings register 0 changes, active 4-packs many.
       const buyBoxChangeCount90d = buyBoxChangeCount90d_(p);
 
+      // Phase 34 — Amazon-published "X+ bought in past month" badge.
+      // Tiered floor (50/100/200/500/1000/2000/5000+); 0 means Amazon
+      // hides the badge so we treat it as null.
+      const monthlySoldRaw = (p as any)?.monthlySold;
+      const monthlySold: number | null =
+        typeof monthlySoldRaw === "number" &&
+        Number.isFinite(monthlySoldRaw) &&
+        monthlySoldRaw > 0
+          ? Math.trunc(monthlySoldRaw)
+          : null;
+
       const categoryTree = Array.isArray(p?.categoryTree)
         ? p.categoryTree
             .map((c: any) =>
@@ -723,6 +742,7 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
         parent_asin: parentAsin,
         variation_asins: variationAsins,
         buy_box_change_count_90d: buyBoxChangeCount90d,
+        monthly_sold: monthlySold,
         raw: { tokensLeft, lastPriceChange: p?.lastPriceChange },
       };
       PRODUCT_CACHE.set(asin, { t: Date.now(), v: details });
