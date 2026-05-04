@@ -21,8 +21,13 @@ import { enrichBrandWithDataForSeo } from "@/lib/enrichment/dataforseo";
 import { fetchBrandKeywords, fetchBrandSerp } from "@/lib/enrichment/dataforseo";
 import {
   estimateBrandTtmRevenue,
+  rankToMonthlyUnits,
   type RevenueEstimate,
 } from "@/lib/enrichment/revenue-estimator";
+import {
+  attributeVariationSales,
+  indexAttributionByAsin,
+} from "@/lib/enrichment/variation-attribution";
 import {
   pullTrailing12FromSpApi,
   type SpApiTrailingResult,
@@ -246,18 +251,49 @@ export async function runV2Enrichment(
         { asin_count: asins.length },
       );
       asinDetails = products.map(toAsinDetail);
-      revenueEstimate = estimateBrandTtmRevenue(
-        products.map((p) => ({
+      // Phase 31 — variation-aware attribution. Group child ASINs by
+      // parentAsin, take group-max as monthly volume, distribute by
+      // recent review activity. Inactive variations (pallets, dead
+      // SKUs) collapse to ~0 attributed units, which kills the
+      // hundreds-of-thousands of phantom revenue per pallet ASIN that
+      // the H2O Therapy report exposed.
+      const attributionInputs = products.map((p) => {
+        const rank = p.sales_rank_avg365 ?? p.sales_rank_current ?? null;
+        const categoryPath =
+          p.category_tree?.map((c) => c.name).join(" > ") ?? null;
+        const raw = rankToMonthlyUnits(
+          rank,
+          p.product_group ?? null,
+          categoryPath,
+        );
+        return {
           asin: p.asin,
-          sales_rank_avg365: p.sales_rank_avg365 ?? null,
-          sales_rank_current: p.sales_rank_current ?? null,
-          buy_box_avg365: p.buy_box_avg365 ?? null,
-          buy_box_current: p.buy_box_current ?? null,
-          buy_box_now: p.buy_box_price ?? null,
-          product_group: p.product_group ?? null,
-          root_category: p.root_category ?? null,
-          category_path: p.category_tree?.map((c) => c.name).join(" > ") ?? null,
-        })),
+          parent_asin: p.parent_asin ?? null,
+          raw_monthly_units: raw,
+          recent_review_count: p.review_count ?? null,
+        };
+      });
+      const attribution = indexAttributionByAsin(
+        attributeVariationSales(attributionInputs),
+      );
+      revenueEstimate = estimateBrandTtmRevenue(
+        products.map((p) => {
+          const att = attribution.get(p.asin) ?? null;
+          return {
+            asin: p.asin,
+            sales_rank_avg365: p.sales_rank_avg365 ?? null,
+            sales_rank_current: p.sales_rank_current ?? null,
+            buy_box_avg365: p.buy_box_avg365 ?? null,
+            buy_box_current: p.buy_box_current ?? null,
+            buy_box_now: p.buy_box_price ?? null,
+            product_group: p.product_group ?? null,
+            root_category: p.root_category ?? null,
+            category_path:
+              p.category_tree?.map((c) => c.name).join(" > ") ?? null,
+            attributed_monthly_units: att?.attributed_monthly_units ?? null,
+            variation_group_size: att?.variation_group_size ?? 1,
+          };
+        }),
       );
       const inferred = inferProductCategoryHints(products, brand.name);
       productCategoryHints = inferred.seeds;

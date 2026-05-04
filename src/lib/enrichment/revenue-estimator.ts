@@ -32,6 +32,24 @@ export interface RevenueEstimateInput {
   product_group: string | null;
   root_category: number | null;
   category_path: string | null;
+  /**
+   * Phase 31 — variation-aware override. When provided, the estimator
+   * uses this number directly as the per-ASIN monthly units (post the
+   * group-max + review-velocity attribution) instead of re-deriving
+   * from sales rank. This is how the report stops double-counting
+   * variation siblings: a pallet ASIN whose sibling 4-pack drives all
+   * the sales now lands at ~0 attributed units regardless of the
+   * shared sales rank Keepa returns. Null means "fall through to the
+   * legacy rank → units lookup". Zero is honored (intentional: a
+   * variation that's been attributed nothing must produce $0 revenue).
+   */
+  attributed_monthly_units?: number | null;
+  /**
+   * Phase 31 — group size from variation attribution. Surfaced on the
+   * per-ASIN result so the renderer can show a "Variation (1 of N)"
+   * badge and the methodology disclosure subsection.
+   */
+  variation_group_size?: number | null;
 }
 
 export interface RevenueEstimatePerAsin {
@@ -43,6 +61,14 @@ export interface RevenueEstimatePerAsin {
   monthly_units: number | null;
   ttm_revenue: number | null;
   excluded_reason: string | null;
+  /** Phase 31 — true when this ASIN belongs to a variation group of
+   * size ≥ 2 and the monthly_units number reflects the post-attribution
+   * value (group-max × review-velocity weight) rather than the raw
+   * rank-derived estimate. Renderer uses this to surface the badge. */
+  variation_attributed?: boolean;
+  /** Phase 31 — number of siblings in the parent group, including self.
+   * 1 for singletons. */
+  variation_group_size?: number | null;
 }
 
 export interface RevenueEstimate {
@@ -53,6 +79,11 @@ export interface RevenueEstimate {
   excluded: { asin: string; reason: string }[];
   source_note: string;
   methodology_footnote: string;
+  /** Phase 31 — true when at least one ASIN belongs to a variation
+   * group of size ≥ 2 and the brand-level revenue therefore reflects
+   * variation-aware attribution. Drives the methodology disclosure
+   * subsection in the report renderer. */
+  has_variation_attribution?: boolean;
 }
 
 // =============================================================
@@ -208,6 +239,25 @@ function tableFor(tier: VelocityTier): Bucket[] {
   return TABLE_MEDIUM;
 }
 
+/**
+ * Phase 31 — exposed to the enrichment writer so it can compute the same
+ * pre-attribution monthly-units number we'd otherwise re-derive inside
+ * `estimateBrandTtmRevenue`. The variation-attribution step then takes
+ * `max(raw_monthly_units across siblings)` × per-child review weight to
+ * produce the post-attribution number that's persisted on brand_asins
+ * and consumed by the report.
+ */
+export function rankToMonthlyUnits(
+  rank: number | null | undefined,
+  productGroup: string | null | undefined,
+  categoryPath: string | null | undefined,
+): number | null {
+  if (rank == null || !Number.isFinite(rank) || rank <= 0) return null;
+  const tier = pickVelocityTier(productGroup, categoryPath);
+  const table = tableFor(tier);
+  return unitsForRank(rank, table);
+}
+
 function unitsForRank(rank: number, table: Bucket[]): number | null {
   if (!Number.isFinite(rank) || rank <= 0) return null;
   for (const b of table) {
@@ -242,8 +292,36 @@ export function estimateBrandTtmRevenue(
   for (const a of asins) {
     const rank = a.sales_rank_avg365 ?? a.sales_rank_current;
     const price = a.buy_box_avg365 ?? a.buy_box_current ?? a.buy_box_now;
+    const groupSize = a.variation_group_size ?? 1;
+    const isVariation = (groupSize ?? 1) >= 2;
+    const hasAttributionOverride =
+      a.attributed_monthly_units != null &&
+      Number.isFinite(a.attributed_monthly_units);
 
     if (!rank || rank <= 0) {
+      // For variation siblings with an attribution override, the rank
+      // is irrelevant — group volume is already pinned to the active
+      // sibling's rank-derived number. We can still produce a per-ASIN
+      // revenue line ($0 for inactive variations) instead of excluding.
+      if (hasAttributionOverride && price && price > 0) {
+        const monthly = a.attributed_monthly_units as number;
+        const ttm = Math.round(monthly * 12 * price);
+        total += ttm;
+        inSum += 1;
+        per_asin.push({
+          asin: a.asin,
+          sales_rank: null,
+          buy_box_price: price,
+          category_bucket: "variation",
+          velocity_tier: null,
+          monthly_units: monthly,
+          ttm_revenue: ttm,
+          excluded_reason: null,
+          variation_attributed: isVariation,
+          variation_group_size: groupSize,
+        });
+        continue;
+      }
       excluded.push({ asin: a.asin, reason: "missing salesRank" });
       per_asin.push({
         asin: a.asin,
@@ -254,6 +332,8 @@ export function estimateBrandTtmRevenue(
         monthly_units: null,
         ttm_revenue: null,
         excluded_reason: "missing salesRank",
+        variation_attributed: isVariation,
+        variation_group_size: groupSize,
       });
       continue;
     }
@@ -268,13 +348,21 @@ export function estimateBrandTtmRevenue(
         monthly_units: null,
         ttm_revenue: null,
         excluded_reason: "missing buy-box price",
+        variation_attributed: isVariation,
+        variation_group_size: groupSize,
       });
       continue;
     }
 
     const tier = pickVelocityTier(a.product_group, a.category_path);
     const table = tableFor(tier);
-    const monthly = unitsForRank(rank, table);
+    // Phase 31 — when variation attribution has supplied an override,
+    // honor it (including 0 — an inactive pallet variation MUST produce
+    // $0 revenue regardless of its shared sales rank). Otherwise fall
+    // through to the legacy rank → units lookup.
+    const monthly = hasAttributionOverride
+      ? (a.attributed_monthly_units as number)
+      : unitsForRank(rank, table);
     if (monthly == null) {
       excluded.push({ asin: a.asin, reason: "rank above table cap" });
       per_asin.push({
@@ -286,6 +374,8 @@ export function estimateBrandTtmRevenue(
         monthly_units: null,
         ttm_revenue: null,
         excluded_reason: "rank above table cap",
+        variation_attributed: isVariation,
+        variation_group_size: groupSize,
       });
       continue;
     }
@@ -302,10 +392,15 @@ export function estimateBrandTtmRevenue(
       monthly_units: monthly,
       ttm_revenue: ttm,
       excluded_reason: null,
+      variation_attributed: isVariation && hasAttributionOverride,
+      variation_group_size: groupSize,
     });
   }
 
   const haveEnough = inSum >= MIN_ASINS_FOR_ESTIMATE;
+  const hasVariation = per_asin.some(
+    (r) => (r.variation_group_size ?? 1) >= 2,
+  );
 
   return {
     total_ttm_revenue: haveEnough ? total : null,
@@ -313,8 +408,12 @@ export function estimateBrandTtmRevenue(
     asins_excluded: excluded.length,
     per_asin,
     excluded,
-    source_note: "Keepa BSR + price · 365-day avg",
-    methodology_footnote:
-      "Directional estimate from Keepa BSR + buy-box price. Replace with seller's actual TTM during diligence.",
+    source_note: hasVariation
+      ? "Keepa BSR + price · 365-day avg · variation-aware (review-velocity weighted)"
+      : "Keepa BSR + price · 365-day avg",
+    methodology_footnote: hasVariation
+      ? "Directional estimate from Keepa BSR + buy-box price, with variation-aware attribution (review-velocity weighting across parent groups). Replace with seller's actual TTM during diligence."
+      : "Directional estimate from Keepa BSR + buy-box price. Replace with seller's actual TTM during diligence.",
+    has_variation_attribution: hasVariation,
   };
 }

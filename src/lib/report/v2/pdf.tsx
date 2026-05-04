@@ -316,6 +316,24 @@ function CxAuditPage({ narrative }: { narrative: NarrativeV2 }) {
           ))}
         </View>
       )}
+      {(cx.variation_disclosure?.has_variations === true ||
+        cx.asin_scores.some((a) => (a.variation_group_size ?? 1) >= 2)) && (
+        <View style={[styles.card, { marginTop: 10 }]}>
+          <Text style={styles.h3}>Methodology · Variation handling</Text>
+          <Text style={[styles.small, { lineHeight: 1.5 }]}>
+            Some ASINs in this brand share a parent listing with sibling
+            variations (e.g. a 4-pack and a 12-pack of the same product).
+            Amazon&apos;s sales rank is often shared across variations, which
+            causes raw third-party sales estimators to over-count sales on
+            inactive variations. We attribute group-level sales to each
+            variation in proportion to its share of recent customer
+            reviews — variations with little or no recent review activity
+            receive little or no attributed sales. These per-ASIN sales
+            numbers are estimates derived from Keepa rank data plus
+            Amazon review velocity weighting, not direct sales reporting.
+          </Text>
+        </View>
+      )}
       <PageFooter label="CX Audit" />
     </Page>
   );

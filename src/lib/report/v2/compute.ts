@@ -270,10 +270,22 @@ export function computeCxAuditBase(
         ttm_revenue: ttmRevenue,
         ttm_units: ttmUnits,
         buy_box_price: priceForCard,
+        // Phase 31 — surface variation grouping so the renderer can
+        // show a "Variation (1 of N)" badge on cards whose revenue is
+        // the post-attribution number.
+        variation_group_size: rev?.variation_group_size ?? 1,
       };
     })
     .sort((a, b) => (b.ttm_revenue ?? -1) - (a.ttm_revenue ?? -1))
     .slice(0, 10);
+
+  // Phase 31 — methodology disclosure flag. We compute it across the
+  // FULL per-ASIN list (not just the top-10 cards) so a brand whose
+  // variation group lives in the long tail still gets the explanatory
+  // footnote.
+  const hasVariations = (revenueEstimate?.per_asin ?? []).some(
+    (r) => (r.variation_group_size ?? 1) >= 2,
+  );
 
   const top_keywords = (dfs?.top_keywords ?? []).slice(0, 12).map((k) => ({
     keyword: k.keyword,
@@ -285,6 +297,9 @@ export function computeCxAuditBase(
     branded_trend_pct: dfs?.branded_trend_pct ?? null,
     top_keywords,
     asin_scores,
+    variation_disclosure: hasVariations
+      ? { has_variations: true, copy: null }
+      : null,
   };
 }
 

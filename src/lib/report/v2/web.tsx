@@ -504,13 +504,24 @@ function SectionTopProducts({ narrative }: { narrative: NarrativeV2 }) {
     .slice()
     .sort((a, b) => (b.ttm_revenue ?? -1) - (a.ttm_revenue ?? -1))
     .slice(0, 10);
+  // Phase 31 — fall back on per-card group size when the narrative
+  // doesn't carry the dedicated `variation_disclosure` flag (legacy
+  // narrative_json from before this phase shipped). Either signal
+  // surfaces the methodology subsection.
+  const hasVariations =
+    cx.variation_disclosure?.has_variations === true ||
+    sorted.some((a) => (a.variation_group_size ?? 1) >= 2);
 
   return (
     <section id="s-products" className="rv2-section rv2-section-alt">
       <SectionHead
         eyebrow="Top Products & Listing Health"
         title="Where the demand sits — and what each listing looks like"
-        source="Keepa /product · BSR + price · 365-day avg"
+        source={
+          hasVariations
+            ? "Keepa /product · BSR + price · 365-day avg · variation-aware"
+            : "Keepa /product · BSR + price · 365-day avg"
+        }
       />
 
       {sorted.length > 0 ? (
@@ -536,10 +547,41 @@ function SectionTopProducts({ narrative }: { narrative: NarrativeV2 }) {
         </div>
       )}
 
+      {hasVariations && <VariationMethodologyPanel />}
+
       <p className="rv2-muted-small">
         Per-ASIN revenue and units are directional estimates from Keepa BSR + buy-box price (365-day avg). Replace with seller's actual TTM during diligence.
       </p>
     </section>
+  );
+}
+
+/**
+ * Phase 31 — methodology disclosure. Renders only when the brand has
+ * at least one parent variation group (size ≥ 2). The user explicitly
+ * requested that reports including ASINs from variation groups
+ * notate (1) the presence of variations and (2) the methodology used,
+ * so the reader knows the per-ASIN numbers are estimates and how they
+ * were derived.
+ */
+function VariationMethodologyPanel() {
+  return (
+    <aside className="rv2-method-panel" aria-labelledby="rv2-method-title">
+      <div id="rv2-method-title" className="rv2-method-kicker">
+        Methodology · Variation handling
+      </div>
+      <p className="rv2-method-body">
+        Some ASINs in this brand share a parent listing with sibling variations
+        (e.g. a 4-pack and a 12-pack of the same product). Amazon's sales rank
+        is often shared across variations, which causes raw third-party sales
+        estimators to over-count sales on inactive variations. We attribute
+        group-level sales to each variation in proportion to its share of
+        recent customer reviews — variations with little or no recent review
+        activity receive little or no attributed sales. <strong>These per-ASIN
+        sales numbers are estimates derived from Keepa rank data plus Amazon
+        review velocity weighting, not direct sales reporting.</strong>
+      </p>
+    </aside>
   );
 }
 
@@ -553,12 +595,24 @@ function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
   if (score.has_a_plus != null) facts.push({ label: "A+", value: score.has_a_plus ? "Yes" : "No" });
   if (score.has_video != null)
     facts.push({ label: "Video", value: score.has_video ? "Yes" : "No" });
+  const groupSize = score.variation_group_size ?? 1;
+  const isVariation = groupSize >= 2;
   return (
     <div className="rv2-asincard">
       <div className="rv2-asincard-top">
         <span className="rv2-asin">{score.asin}</span>
-        <span className="rv2-rev-badge rv2-rev-badge-est" title="Directional estimate from Keepa BSR + buy-box price">
-          Estimate
+        <span className="rv2-asincard-badges">
+          {isVariation && (
+            <span
+              className="rv2-rev-badge rv2-rev-badge-variation"
+              title={`This ASIN is one of ${groupSize} variations sharing a parent listing. Sales are attributed across siblings by recent review activity.`}
+            >
+              Variation · 1 of {groupSize}
+            </span>
+          )}
+          <span className="rv2-rev-badge rv2-rev-badge-est" title="Directional estimate from Keepa BSR + buy-box price">
+            Estimate
+          </span>
         </span>
       </div>
       {score.title && <div className="rv2-asincard-title">{score.title}</div>}
@@ -1400,6 +1454,35 @@ function V2Styles() {
         background: rgba(108,185,138,0.15); color: var(--green);
         border: 1px solid rgba(108,185,138,0.4);
       }
+      .rv2-rev-badge-variation {
+        background: rgba(135,160,210,0.14); color: #a8c0ea;
+        border: 1px solid rgba(135,160,210,0.36);
+      }
+      .rv2-asincard-badges {
+        display: inline-flex; flex-wrap: wrap; gap: 4px;
+        justify-content: flex-end;
+      }
+
+      /* Phase 31 — methodology disclosure for variation attribution */
+      .rv2-method-panel {
+        margin-top: 24px;
+        padding: 14px 18px;
+        border-left: 3px solid var(--gold);
+        background: rgba(201,169,106,0.05);
+        border-radius: 0 8px 8px 0;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+      .rv2-method-kicker {
+        font-size: 10px; color: var(--gold);
+        text-transform: uppercase; letter-spacing: 0.12em; font-weight: 700;
+        margin-bottom: 6px;
+      }
+      .rv2-method-body {
+        color: var(--text);
+        margin: 0;
+      }
+      .rv2-method-body strong { color: var(--gold-soft); font-weight: 600; }
 
       /* Five-step plan */
       .rv2-fivestep {
@@ -1539,9 +1622,12 @@ function V2Styles() {
           color: #555 !important;
         }
         .rv2-bigstat, .rv2-fact, .rv2-asincard, .rv2-plan-col, .rv2-step, .rv2-bars,
-        .rv2-checklist, .rv2-bbpanel, .rv2-callouts, .rv2-prose-callout, .rv2-rcg-callout, .rv2-bio {
+        .rv2-checklist, .rv2-bbpanel, .rv2-callouts, .rv2-prose-callout, .rv2-rcg-callout, .rv2-bio,
+        .rv2-method-panel {
           background: #fafafa !important; border-color: #ddd !important;
         }
+        .rv2-method-body { color: #111 !important; }
+        .rv2-method-kicker { color: #8a6d2e !important; }
         .rv2-bar-fill { background: #c9a96a !important; }
         .rv2-bbpanel-brand { background: #c9a96a !important; }
         .rv2-bbpanel-reseller { background: #d6d3cb !important; }
