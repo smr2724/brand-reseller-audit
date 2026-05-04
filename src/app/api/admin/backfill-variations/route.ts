@@ -185,7 +185,7 @@ export async function POST(req: Request) {
 
   // Summary stats for the caller / parent agent.
   const groupSizes = new Map<string, number>();
-  for (const r of attribution.values()) {
+  for (const r of Array.from(attribution.values())) {
     if (r.variation_group_size >= 2 && r.parent_asin) {
       groupSizes.set(r.parent_asin, r.variation_group_size);
     }

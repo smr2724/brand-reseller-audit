@@ -84,7 +84,7 @@ export function attributeVariationSales(
 
   const out: VariationAttributionResult[] = [];
 
-  for (const [, members] of groups) {
+  for (const members of Array.from(groups.values())) {
     const size = members.length;
 
     // Singleton: identity transform — passthrough so callers can persist
