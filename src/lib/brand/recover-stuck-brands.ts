@@ -15,6 +15,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 import { getKeepaTokenStatus } from "@/lib/keepa";
+import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
 
 export interface StuckBrand {
   id: string;
@@ -101,6 +102,8 @@ export async function recoverStuckBrand(
       };
     }
     await setBrandState(admin, brand.id, "enriched");
+    // Phase 33 — fire owner resolver as a non-blocking follow-up.
+    maybeTriggerOwnerResolution(brand.id);
     return {
       brand_id: brand.id,
       status: "recovered",
