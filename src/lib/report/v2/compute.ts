@@ -241,8 +241,9 @@ export function computeCxAuditBase(
 
       const rev = perAsinRev.get(a.asin) ?? null;
       let ttmRevenue: number | null = rev?.ttm_revenue ?? null;
+      let monthlyUnits: number | null = rev?.monthly_units ?? null;
       let ttmUnits: number | null =
-        rev?.monthly_units != null ? rev.monthly_units * 12 : null;
+        monthlyUnits != null ? monthlyUnits * 12 : null;
       const priceForCard = rev?.buy_box_price ?? a.buy_box_price ?? null;
       // Phase 27 — Bug 2 fix. When the brand-level revenue is the
       // price-only fallback, populate per-ASIN cards with the SAME
@@ -255,6 +256,7 @@ export function computeCxAuditBase(
       ) {
         const monthly = priceOnlyMonthlyUnits as number;
         ttmRevenue = Math.round(priceForCard * monthly * 12);
+        monthlyUnits = monthly;
         ttmUnits = monthly * 12;
       }
       return {
@@ -269,6 +271,7 @@ export function computeCxAuditBase(
         rating,
         ttm_revenue: ttmRevenue,
         ttm_units: ttmUnits,
+        monthly_units: monthlyUnits,
         buy_box_price: priceForCard,
         // Phase 31 — surface variation grouping so the renderer can
         // show a "Variation (1 of N)" badge on cards whose revenue is

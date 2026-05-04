@@ -377,6 +377,11 @@ export async function enrichBrandWithKeepa(
         // Phase 32 — sharper attribution signal: Buy Box winner churn
         // in the last 90 days. Combined with reviews via blend weights.
         buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
+        // Phase 36 — Amazon's per-ASIN published monthlySold badge.
+        // When non-null, attributeVariationSales bypasses the
+        // re-attribution split for this sibling (Phase 32.1 zero-signal
+        // still wins for parent shells / dormant pallets).
+        keepa_monthly_sold: p.monthly_sold ?? null,
       };
     });
     const attribution = indexAttributionByAsin(

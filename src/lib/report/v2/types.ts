@@ -176,6 +176,11 @@ export interface CxAuditAsinScore {
    * as an amber "Estimate" badge with diligence-replacement footnote. */
   ttm_revenue?: number | null;
   ttm_units?: number | null;
+  /** Phase 36 — monthly units (post-attribution). Cards display
+   * "{monthly}/mo (~{annual}/yr)" so the value matches Amazon's
+   * "X+ bought in past month" badge a prospect cross-checks.
+   * `ttm_units = monthly_units × 12` when both are populated. */
+  monthly_units?: number | null;
   buy_box_price?: number | null;
   /** Phase 31 — number of siblings sharing the same parentAsin in this
    * brand (including self). 1 for singletons; ≥ 2 means this ASIN is

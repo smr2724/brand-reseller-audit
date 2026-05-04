@@ -144,6 +144,30 @@ function volFmt(n: number | null): string {
   return String(n);
 }
 
+/**
+ * Phase 36 — per-ASIN unit display matching Amazon's monthly badge:
+ * "{monthly}/mo (~{annual}/yr)". Falls back to ttm-only when monthly
+ * is missing (legacy narrative_json) and to monthly-only when ttm is
+ * missing.
+ */
+function unitsFmt(
+  monthly: number | null | undefined,
+  ttm: number | null | undefined,
+): string {
+  const hasMonthly = monthly != null && Number.isFinite(monthly);
+  const hasTtm = ttm != null && Number.isFinite(ttm);
+  if (!hasMonthly && !hasTtm) return "—";
+  const monthlyVal = hasMonthly
+    ? (monthly as number)
+    : ((ttm as number) / 12);
+  const annualVal = hasTtm
+    ? (ttm as number)
+    : ((monthly as number) * 12);
+  const monthlyLabel = Math.round(monthlyVal).toLocaleString("en-US");
+  const annualLabel = Math.round(annualVal).toLocaleString("en-US");
+  return `${monthlyLabel}/mo (~${annualLabel}/yr)`;
+}
+
 // =====================================================================
 // Sections
 // =====================================================================
@@ -490,15 +514,29 @@ function CxAuditPage({ narrative }: { narrative: NarrativeV2 }) {
       {cx.asin_scores.length > 0 && (
         <View style={styles.card}>
           <Text style={styles.h3}>Listing health (heuristic)</Text>
-          {cx.asin_scores.map((a) => (
-            <Text key={a.asin} style={[styles.body, { marginBottom: 2 }]}>
-              <Text style={{ color: P.gold, fontFamily: "Helvetica-Bold" }}>{a.asin}</Text>
-              {"  "}
-              <Text style={{ color: P.gold }}>{a.score != null ? `${a.score}/100` : "—"}</Text>
-              {"  "}
-              {a.title?.slice(0, 70) ?? ""}
-            </Text>
-          ))}
+          {cx.asin_scores.map((a) => {
+            const econParts: string[] = [];
+            const units = unitsFmt(a.monthly_units, a.ttm_units);
+            if (units !== "—") econParts.push(units);
+            if (a.buy_box_price != null) econParts.push(`$${a.buy_box_price.toFixed(2)}`);
+            if (a.ttm_revenue != null) econParts.push(`${moneyFmt(a.ttm_revenue)}/yr`);
+            return (
+              <View key={a.asin} style={{ marginBottom: 4 }}>
+                <Text style={styles.body}>
+                  <Text style={{ color: P.gold, fontFamily: "Helvetica-Bold" }}>{a.asin}</Text>
+                  {"  "}
+                  <Text style={{ color: P.gold }}>{a.score != null ? `${a.score}/100` : "—"}</Text>
+                  {"  "}
+                  {a.title?.slice(0, 70) ?? ""}
+                </Text>
+                {econParts.length > 0 && (
+                  <Text style={[styles.small, { color: P.goldSoft }]}>
+                    {econParts.join(" · ")}
+                  </Text>
+                )}
+              </View>
+            );
+          })}
         </View>
       )}
       {cx.whats_broken.length > 0 && (
