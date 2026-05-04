@@ -88,13 +88,14 @@ export async function enrichBrandWithKeepa(
 
   let tokensUsed = 0;
   try {
-    // Pull up to 40 brand parents from Keepa (the previous cap of 20
-    // left mid-tail SKUs on the floor and undercounted revenue for
-    // catalogs with 30+ SKUs). The variation expansion below adds child
-    // ASINs on top, capped at 200 total per brand. We bias toward 40
-    // (not 50/100) to keep the per-audit Keepa token cost bounded —
-    // 40×5 + ~10 children×5 = 250 tokens per brand on a cold cache.
-    const search = await searchProductsByBrand(brand_name, 40);
+    // Phase 33 — request up to 500 brand parents. The Phase 11 cap of 40
+    // silently dropped the long tail of large catalogs (Terra Pure
+    // 663 → 44, Yeti 8,486 → 20, OXO 6,517 → 45). The 500 ceiling is
+    // enforced inside `searchProductsByBrand` via KEEPA_MAX_PAGES_PER_BRAND
+    // (5 pages × perPage 100), with an in-loop token-budget guard so a
+    // single big brand can't drain Keepa's ~3,900-token bucket.
+    // Variation expansion below still bounds children at 200 combined.
+    const search = await searchProductsByBrand(brand_name, 500);
     tokensUsed += search.tokens_used;
     // Keepa's brand search returns parents only. Expand child variations
     // so Beauty/Health/Grocery brands (where 1 parent listing maps to
