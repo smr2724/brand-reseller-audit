@@ -1,7 +1,12 @@
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseServerClient, createSupabaseAdminClient } from "@/lib/supabase/server";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import BrandDetailClient from "./BrandDetailClient";
+import BrandOwnerSection, {
+  type BrandOwnerBrand,
+  type BrandOwnerCandidate,
+  type BrandOwnerRun,
+} from "./BrandOwnerSection";
 import { computeBrandDetailFinancials } from "@/lib/brand-detail/financial-model";
 
 export const dynamic = "force-dynamic";
@@ -36,6 +41,48 @@ export default async function BrandDetail({ params }: { params: { id: string } }
     .limit(1)
     .maybeSingle();
 
+  // Phase 33.1 — load latest resolver run + candidates for the new
+  // Brand Owner section at the top of this page. We use the admin client
+  // because owner_resolution_runs / owner_candidates aren't exposed under
+  // RLS for end users; brand ownership is already enforced above.
+  const adminDb = createSupabaseAdminClient();
+  let ownerRun: BrandOwnerRun | null = null;
+  let ownerCandidates: BrandOwnerCandidate[] = [];
+  if (adminDb) {
+    const { data: runs } = await adminDb
+      .from("owner_resolution_runs")
+      .select(
+        "id, brand_id, triggered_by, started_at, completed_at, status, error_message, uspto_query, uspto_results_count, web_search_queries, web_search_results_count, candidates_inserted",
+      )
+      .eq("brand_id", brand.id)
+      .order("started_at", { ascending: false })
+      .limit(1);
+    ownerRun = ((runs ?? [])[0] ?? null) as BrandOwnerRun | null;
+    if (ownerRun) {
+      const { data: cands } = await adminDb
+        .from("owner_candidates")
+        .select(
+          "id, brand_id, resolution_run_id, candidate_company_name, candidate_domain, candidate_source, evidence_text, evidence_url, match_reason, trademark_serial_number, trademark_status, trademark_registration_date, trademark_owner_address, goods_services_text, heuristic_score, heuristic_label, is_selected_owner, needs_manual_review, selected_at, created_at",
+        )
+        .eq("resolution_run_id", ownerRun.id)
+        .order("heuristic_score", { ascending: false })
+        .order("created_at", { ascending: false });
+      ownerCandidates = (cands ?? []) as BrandOwnerCandidate[];
+    }
+  }
+
+  const ownerBrand: BrandOwnerBrand = {
+    id: brand.id,
+    name: brand.name,
+    owner_resolution_state: brand.owner_resolution_state ?? "pending",
+    owner_resolution_error: brand.owner_resolution_error ?? null,
+    owner_resolved_at: brand.owner_resolved_at ?? null,
+    resolved_owner_company_name: brand.resolved_owner_company_name ?? null,
+    resolved_owner_domain: brand.resolved_owner_domain ?? null,
+    resolved_owner_type: brand.resolved_owner_type ?? null,
+    owner_resolution_notes: brand.owner_resolution_notes ?? null,
+  };
+
   // Phase 26 — auto-populate the FINANCIAL MODEL panel as soon as
   // Keepa enrichment lands. Single source: computeLegionEconomics.
   // Phase 27 — pass brand-controlled share so the panel reads the same
@@ -61,6 +108,11 @@ export default async function BrandDetail({ params }: { params: { id: string } }
           ← All brands
         </Link>
       </div>
+      <BrandOwnerSection
+        brand={ownerBrand}
+        run={ownerRun}
+        candidates={ownerCandidates}
+      />
       <BrandDetailClient
         brand={brand}
         asins={asins ?? []}

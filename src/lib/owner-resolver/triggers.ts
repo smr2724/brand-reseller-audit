@@ -4,8 +4,8 @@
  * Called from enrichment "mark complete" code paths whenever a brand's
  * enrichment_state transitions to 'enriched'. Fires the resolver as a
  * non-blocking follow-up: the enrichment caller never waits on it, and
- * any failure is swallowed (the manual /admin/brands/:id/owner page can
- * always re-run).
+ * any failure is swallowed (the user can always re-run from the Brand
+ * Owner section on /app/brands/:id).
  *
  * Idempotency (B5): the resolver itself does an atomic CAS-claim, so even
  * if multiple call-sites race we only run once.
