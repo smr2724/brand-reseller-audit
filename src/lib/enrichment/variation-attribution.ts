@@ -1,5 +1,5 @@
 /**
- * Phase 31/32/32.1 — Variation-aware sales attribution.
+ * Phase 31/32/32.1/36 — Variation-aware sales attribution.
  *
  * Amazon shares sales rank across child variations of a parent listing
  * (e.g. a 4-pack, a 12-pack, a "case", and a pallet sharing one parent).
@@ -46,6 +46,25 @@
  *   review-only slice (≈10% each). The brand owner confirmed the
  *   correct interpretation: a child with no BB winner changes while
  *   its siblings DO have BB activity has effectively sold nothing.
+ *
+ * Phase 36 — Trust Keepa monthlySold over variation attribution.
+ *   When Keepa publishes a per-ASIN `monthlySold` value (Amazon's
+ *   "X+ bought in past month" badge), that IS the per-ASIN truth —
+ *   Amazon already attributed sales to that specific child variation.
+ *   Running variation re-attribution on top of it inflates some siblings
+ *   above their published badge and deflates others below it (Terra
+ *   Pure: B0998YB54X published 700/mo, our pipeline produced 443.33).
+ *   Phase 36 bypasses re-attribution for badged siblings: when
+ *   `keepa_monthly_sold IS NOT NULL`, attributed_monthly_units is set
+ *   to keepa_monthly_sold directly, weight=1, and the sibling does NOT
+ *   participate in the group's weighted split. Non-badged siblings in
+ *   the same group still split the group_max via review + Buy Box
+ *   weighting (their pool is unchanged — see "simpler safe alternative"
+ *   in the brief: badged ASINs are independent, not subtracted from
+ *   the non-badged pool).
+ *   Phase 32.1 zero-signal still wins: a sibling with a published
+ *   badge but null Buy Box history while siblings have BB data is
+ *   treated as zero (parent shells / dead pallets stay at 0).
  *
  * Methodology (deliberately simple, easy to defend):
  *   1. Group children by parentAsin within the brand. A "variation group"
@@ -121,6 +140,13 @@ export interface VariationAttributionInput {
   /** Phase 32 — count of distinct Buy Box winner changes in the last 90
    * days. Null/zero treated as 0 contribution to the Buy Box share. */
   buy_box_change_count_90d?: number | null;
+  /** Phase 36 — Amazon's per-ASIN published "X+ bought in past month"
+   * badge (Keepa `monthlySold`). When non-null this IS the per-ASIN
+   * truth and the variation re-attribution split is bypassed for this
+   * sibling (subject to Phase 32.1 zero-signal taking priority). Null
+   * means "no badge published — fall through to BSR-curve weighting
+   * with the rest of the variation group". */
+  keepa_monthly_sold?: number | null;
 }
 
 export interface VariationAttributionResult {
@@ -169,15 +195,25 @@ export function attributeVariationSales(
 
     // Singleton: identity transform — passthrough so callers can persist
     // the same shape for every ASIN regardless of group size.
+    // Phase 36 — when Keepa published a per-ASIN monthlySold badge,
+    // that IS the per-ASIN truth even for singletons; otherwise fall
+    // back to the raw rank-derived estimate.
     if (size === 1) {
       const m = members[0];
+      const badge = clampNonNegative(m.keepa_monthly_sold);
+      const hasBadge =
+        m.keepa_monthly_sold != null &&
+        Number.isFinite(m.keepa_monthly_sold as number);
+      const attributed = hasBadge
+        ? badge
+        : (m.raw_monthly_units ?? null);
       out.push({
         asin: m.asin,
         parent_asin: m.parent_asin ?? null,
         variation_group_size: 1,
         variation_weight: 1,
         raw_monthly_units: m.raw_monthly_units ?? null,
-        attributed_monthly_units: m.raw_monthly_units ?? null,
+        attributed_monthly_units: attributed,
       });
       continue;
     }
@@ -185,7 +221,10 @@ export function attributeVariationSales(
     // Group volume = max across siblings (NOT sum — Keepa duplicates the
     // parent-level rank-derived estimate across children, so the
     // parent's true monthly volume is approximately the single shared
-    // number).
+    // number). Phase 36 narrows the max to non-badged comparison
+    // members below; the unconditional max stays here as the fallback
+    // for groups where every sibling is badged or every sibling is a
+    // zero-signal one.
     const groupMax = members.reduce(
       (acc, m) => Math.max(acc, clampNonNegative(m.raw_monthly_units)),
       0,
@@ -222,12 +261,36 @@ export function attributeVariationSales(
       }
     }
 
+    // Phase 36 — siblings with a Keepa-published `monthlySold` badge
+    // are Amazon's truth: bypass variation re-attribution entirely.
+    // They get attributed_monthly_units = keepa_monthly_sold and do
+    // NOT participate in the group's weighted split. The "simpler safe
+    // alternative" from the brief: badged siblings are independent of
+    // the non-badged pool — non-badged siblings still split the full
+    // group_max via review+BB weights. This errs toward trusting
+    // Amazon's published numbers.
+    // Phase 32.1 zero-signal still wins: a badged sibling that is also
+    // a null-BB-amongst-data-bearing-siblings sibling stays at 0.
+    const badgedAsins = new Set<string>();
+    for (const m of members) {
+      if (zeroSignalAsins.has(m.asin)) continue; // 32.1 wins
+      if (
+        m.keepa_monthly_sold != null &&
+        Number.isFinite(m.keepa_monthly_sold as number)
+      ) {
+        badgedAsins.add(m.asin);
+      }
+    }
+
     // Sums computed across the comparison set: when the zero-signal
     // rule fires, we exclude null-BB siblings; otherwise this is the
-    // full group (Phase 32 behavior).
-    const comparisonMembers = zeroSignalAsins.size > 0
-      ? members.filter((m) => !zeroSignalAsins.has(m.asin))
-      : members;
+    // full group (Phase 32 behavior). Phase 36 also excludes badged
+    // siblings from the comparison set because they don't participate
+    // in the weighted split — only non-badged siblings need a share
+    // of the rank-derived group_max.
+    const comparisonMembers = members.filter(
+      (m) => !zeroSignalAsins.has(m.asin) && !badgedAsins.has(m.asin),
+    );
 
     const reviewSum = comparisonMembers.reduce(
       (acc, m) => acc + clampNonNegative(m.recent_review_count),
@@ -255,11 +318,33 @@ export function attributeVariationSales(
     if (!useReviews && !useBuybox) {
       // Edge case (c): both signals empty across the comparison set.
       // Distribute equal weight across the comparison set; zero-signal
-      // siblings still get 0.
+      // and badged siblings are handled separately below.
+      const restrictedComparison =
+        zeroSignalAsins.size > 0 || badgedAsins.size > 0;
       for (const m of members) {
-        const w = zeroSignalAsins.has(m.asin)
-          ? 0
-          : (zeroSignalAsins.size > 0 ? equalDataBearingWeight : equalWeight);
+        if (zeroSignalAsins.has(m.asin)) {
+          out.push({
+            asin: m.asin,
+            parent_asin: m.parent_asin ?? null,
+            variation_group_size: size,
+            variation_weight: 0,
+            raw_monthly_units: m.raw_monthly_units ?? null,
+            attributed_monthly_units: 0,
+          });
+          continue;
+        }
+        if (badgedAsins.has(m.asin)) {
+          out.push({
+            asin: m.asin,
+            parent_asin: m.parent_asin ?? null,
+            variation_group_size: size,
+            variation_weight: 1,
+            raw_monthly_units: m.raw_monthly_units ?? null,
+            attributed_monthly_units: clampNonNegative(m.keepa_monthly_sold),
+          });
+          continue;
+        }
+        const w = restrictedComparison ? equalDataBearingWeight : equalWeight;
         out.push({
           asin: m.asin,
           parent_asin: m.parent_asin ?? null,
@@ -300,6 +385,23 @@ export function attributeVariationSales(
           variation_weight: 0,
           raw_monthly_units: m.raw_monthly_units ?? null,
           attributed_monthly_units: 0,
+        });
+        continue;
+      }
+      if (badgedAsins.has(m.asin)) {
+        // Phase 36 — Amazon's published per-ASIN monthlySold badge wins
+        // over the variation re-attribution split. Weight=1 here is a
+        // marker that the value is independent of the group's pool;
+        // group weights no longer have to sum to 1 when badged
+        // siblings are present (each badged sibling carries its own
+        // self-contained number).
+        out.push({
+          asin: m.asin,
+          parent_asin: m.parent_asin ?? null,
+          variation_group_size: size,
+          variation_weight: 1,
+          raw_monthly_units: m.raw_monthly_units ?? null,
+          attributed_monthly_units: clampNonNegative(m.keepa_monthly_sold),
         });
         continue;
       }

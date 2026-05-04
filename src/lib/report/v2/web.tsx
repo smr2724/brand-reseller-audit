@@ -801,15 +801,15 @@ function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
       {score.title && <div className="rv2-asincard-title">{score.title}</div>}
       <div className="rv2-asincard-econ">
         <div className="rv2-asincard-econ-row">
-          <span className="rv2-asincard-econ-lbl">TTM revenue</span>
+          <span className="rv2-asincard-econ-lbl">Revenue</span>
           <span className="rv2-asincard-econ-val">
-            {score.ttm_revenue != null ? money(score.ttm_revenue) : "— not measured"}
+            {score.ttm_revenue != null ? `${money(score.ttm_revenue)}/yr` : "— not measured"}
           </span>
         </div>
         <div className="rv2-asincard-econ-row">
-          <span className="rv2-asincard-econ-lbl">TTM units</span>
+          <span className="rv2-asincard-econ-lbl">Units sold</span>
           <span className="rv2-asincard-econ-val">
-            {score.ttm_units != null ? Math.round(score.ttm_units).toLocaleString("en-US") : "— not measured"}
+            {formatMonthlyAnnualUnits(score.monthly_units, score.ttm_units)}
           </span>
         </div>
         {score.buy_box_price != null && (
@@ -1207,6 +1207,34 @@ function prettyCountry(c: string | null | undefined): string | null {
 function money(n: number | null | undefined): string {
   if (n == null) return "— not measured";
   return `$${Math.round(Number(n)).toLocaleString("en-US")}`;
+}
+
+/**
+ * Phase 36 — per-ASIN unit display matching Amazon's monthly badge.
+ * Renders "{monthly}/mo (~{annual}/yr)". Falls back to ttm-only when
+ * monthly is missing (legacy narrative_json) and to monthly-only when
+ * ttm is missing. Returns the not-measured placeholder when both null.
+ */
+function formatMonthlyAnnualUnits(
+  monthly: number | null | undefined,
+  ttm: number | null | undefined,
+): string {
+  const hasMonthly = monthly != null && Number.isFinite(monthly);
+  const hasTtm = ttm != null && Number.isFinite(ttm);
+  if (!hasMonthly && !hasTtm) return "— not measured";
+  const monthlyVal = hasMonthly
+    ? monthly!
+    : hasTtm
+      ? (ttm as number) / 12
+      : 0;
+  const annualVal = hasTtm
+    ? (ttm as number)
+    : hasMonthly
+      ? (monthly as number) * 12
+      : 0;
+  const monthlyLabel = Math.round(monthlyVal).toLocaleString("en-US");
+  const annualLabel = Math.round(annualVal).toLocaleString("en-US");
+  return `${monthlyLabel}/mo (~${annualLabel}/yr)`;
 }
 
 function formatShortDate(iso: string | null): string {

@@ -143,13 +143,18 @@ export async function POST(req: Request) {
   const attributionInputs = products.map((p) => {
     const rank = p.sales_rank_avg365 ?? p.sales_rank_current ?? null;
     const categoryPath = p.category_tree?.map((c) => c.name).join(" > ") ?? null;
-    const raw = rankToMonthlyUnits(rank, p.product_group ?? null, categoryPath);
+    const fromCurve = rankToMonthlyUnits(rank, p.product_group ?? null, categoryPath);
+    const fromKeepa = p.monthly_sold ?? null;
+    const raw =
+      fromKeepa != null ? Math.max(fromKeepa, fromCurve ?? 0) : fromCurve;
     return {
       asin: p.asin,
       parent_asin: p.parent_asin ?? null,
       raw_monthly_units: raw,
       recent_review_count: p.review_count ?? null,
       buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
+      // Phase 36 — Amazon-published per-ASIN monthlySold badge.
+      keepa_monthly_sold: p.monthly_sold ?? null,
     };
   });
   const attribution = indexAttributionByAsin(
@@ -173,6 +178,11 @@ export async function POST(req: Request) {
         buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
         raw_monthly_units: att.raw_monthly_units ?? null,
         attributed_monthly_units: att.attributed_monthly_units ?? null,
+        // Phase 36 — keep keepa_monthly_sold in sync with the latest
+        // /product fetch so the report's per-ASIN cards (which read
+        // from this column) display the up-to-date Amazon-published
+        // monthly badge.
+        keepa_monthly_sold: p.monthly_sold ?? null,
       })
       .eq("brand_id", brandId)
       .eq("asin", p.asin);

@@ -822,6 +822,237 @@ function assertNear(actual: number, expected: number, tol: number, msg: string) 
 }
 
 // --------------------------------------------------------------------
+// Phase 36 — Trust Keepa monthlySold over variation re-attribution.
+// --------------------------------------------------------------------
+
+// --------------------------------------------------------------------
+// Test 19 — Keepa-badged sibling. When Amazon publishes a per-ASIN
+// monthlySold value on a child variation, the variation re-attribution
+// split is bypassed for that sibling: attributed_monthly_units must
+// equal keepa_monthly_sold exactly. This is the Terra Pure B0998YB54X
+// reproducer (was 443.33 under Phase 32, must be 700 under Phase 36).
+// --------------------------------------------------------------------
+{
+  const out = attributeVariationSales([
+    {
+      asin: "B0998YB54X",
+      parent_asin: "TERRAPRNT0",
+      raw_monthly_units: 800, // BSR-curve estimate
+      recent_review_count: 120,
+      buy_box_change_count_90d: 30,
+      keepa_monthly_sold: 700, // Amazon-published badge
+    },
+    {
+      asin: "B0998YDQZ5",
+      parent_asin: "TERRAPRNT0",
+      raw_monthly_units: 800,
+      recent_review_count: 100,
+      buy_box_change_count_90d: 25,
+      keepa_monthly_sold: 500,
+    },
+    {
+      asin: "B0998Y4LC9",
+      parent_asin: "TERRAPRNT0",
+      raw_monthly_units: 800,
+      recent_review_count: 80,
+      buy_box_change_count_90d: 20,
+      keepa_monthly_sold: 500,
+    },
+  ]);
+  const a = out.find((r) => r.asin === "B0998YB54X")!;
+  const b = out.find((r) => r.asin === "B0998YDQZ5")!;
+  const c = out.find((r) => r.asin === "B0998Y4LC9")!;
+  assertNear(a.attributed_monthly_units!, 700, 0.001, "Phase36: B0998YB54X badge wins (700, was 443.33)");
+  assertNear(b.attributed_monthly_units!, 500, 0.001, "Phase36: B0998YDQZ5 badge wins (500, was 400)");
+  assertNear(c.attributed_monthly_units!, 500, 0.001, "Phase36: B0998Y4LC9 badge wins (500, was 345.45)");
+  assert(a.variation_weight === 1, "Phase36: badged sibling weight=1 (independent of pool)");
+}
+
+// --------------------------------------------------------------------
+// Test 20 — Mixed parent group. Some siblings have a Keepa badge,
+// others fall back to BSR-curve. Badged siblings get their published
+// values. Non-badged siblings split the group_max via the existing
+// review+BB weights. The pool the non-badged set splits is the full
+// group_max (the "simpler safe alternative" — badged are independent,
+// not subtracted from the pool).
+// --------------------------------------------------------------------
+{
+  const out = attributeVariationSales([
+    {
+      asin: "BADGEDONE0",
+      parent_asin: "MIXEDPRT00",
+      raw_monthly_units: 200,
+      recent_review_count: 100,
+      buy_box_change_count_90d: 20,
+      keepa_monthly_sold: 200, // badge
+    },
+    {
+      asin: "NOBADGEAB0",
+      parent_asin: "MIXEDPRT00",
+      raw_monthly_units: 200, // group_max
+      recent_review_count: 60,
+      buy_box_change_count_90d: 15,
+      keepa_monthly_sold: null, // no badge — must split BSR-curve pool
+    },
+    {
+      asin: "NOBADGECD0",
+      parent_asin: "MIXEDPRT00",
+      raw_monthly_units: 100,
+      recent_review_count: 40,
+      buy_box_change_count_90d: 5,
+      keepa_monthly_sold: null,
+    },
+  ]);
+  const badged = out.find((r) => r.asin === "BADGEDONE0")!;
+  const nb1 = out.find((r) => r.asin === "NOBADGEAB0")!;
+  const nb2 = out.find((r) => r.asin === "NOBADGECD0")!;
+  assertNear(badged.attributed_monthly_units!, 200, 0.001, "Phase36 mixed: badged sibling = 200");
+  assert(badged.variation_weight === 1, "Phase36 mixed: badged sibling weight=1");
+  // Non-badged comparison: review_sum=100, BB_sum=20.
+  //   nb1: 0.4×(60/100) + 0.6×(15/20) = 0.24 + 0.45 = 0.69
+  //   nb2: 0.4×(40/100) + 0.6×(5/20)  = 0.16 + 0.15 = 0.31
+  // Both attributed = group_max(200) × weight.
+  assertNear(nb1.variation_weight, 0.69, 0.001, "Phase36 mixed: non-badged 1 weight 0.69");
+  assertNear(nb2.variation_weight, 0.31, 0.001, "Phase36 mixed: non-badged 2 weight 0.31");
+  assertNear(nb1.attributed_monthly_units!, 138, 0.5, "Phase36 mixed: non-badged 1 ≈ 138/mo");
+  assertNear(nb2.attributed_monthly_units!, 62, 0.5, "Phase36 mixed: non-badged 2 ≈ 62/mo");
+}
+
+// --------------------------------------------------------------------
+// Test 21 — Parent shell with all-zero buy-box history. Phase 32.1
+// zero-signal MUST take priority over keepa_monthly_sold, even when
+// Amazon publishes a badge. This guards the B07PDKG2TL siblings —
+// pallets with null BB while the active sibling has BB data must stay
+// at 0 even if Keepa returns a stray monthlySold value for them.
+// --------------------------------------------------------------------
+{
+  const out = attributeVariationSales([
+    // Active sibling — BB data, badged.
+    {
+      asin: "B07PDKG2TL",
+      parent_asin: "PALLETPRT0",
+      raw_monthly_units: 100,
+      recent_review_count: 200,
+      buy_box_change_count_90d: 30,
+      keepa_monthly_sold: 100,
+    },
+    // Pallet sibling — null BB while sibling has BB → zero-signal.
+    // Even if Keepa returns a (stale) badge for it, Phase 32.1 wins.
+    {
+      asin: "B0CNS4BJMR",
+      parent_asin: "PALLETPRT0",
+      raw_monthly_units: 100,
+      recent_review_count: 50,
+      buy_box_change_count_90d: null,
+      keepa_monthly_sold: 50, // intentionally non-null to test priority
+    },
+    {
+      asin: "B0CNS67V32",
+      parent_asin: "PALLETPRT0",
+      raw_monthly_units: 100,
+      recent_review_count: 30,
+      buy_box_change_count_90d: null,
+      keepa_monthly_sold: null,
+    },
+    {
+      asin: "B0CPTM6MKB",
+      parent_asin: "PALLETPRT0",
+      raw_monthly_units: 100,
+      recent_review_count: 20,
+      buy_box_change_count_90d: null,
+      keepa_monthly_sold: null,
+    },
+  ]);
+  const active = out.find((r) => r.asin === "B07PDKG2TL")!;
+  const p1 = out.find((r) => r.asin === "B0CNS4BJMR")!;
+  const p2 = out.find((r) => r.asin === "B0CNS67V32")!;
+  const p3 = out.find((r) => r.asin === "B0CPTM6MKB")!;
+  assertNear(active.attributed_monthly_units!, 100, 0.001, "Phase36/32.1: active badged sibling = 100");
+  assert(p1.attributed_monthly_units === 0, "Phase36/32.1: pallet1 stays at 0 (zero-signal beats badge)");
+  assert(p2.attributed_monthly_units === 0, "Phase36/32.1: pallet2 stays at 0");
+  assert(p3.attributed_monthly_units === 0, "Phase36/32.1: pallet3 stays at 0");
+}
+
+// --------------------------------------------------------------------
+// Test 22 — Single ASIN, no parent (singleton) with a Keepa badge.
+// Singletons normally pass raw_monthly_units through. Phase 36 makes
+// the badge authoritative for singletons too: when keepa_monthly_sold
+// is non-null, attributed_monthly_units = keepa_monthly_sold.
+// (Terra Pure B07YQDFLVL: singleton, badge=200, must stay 200.)
+// --------------------------------------------------------------------
+{
+  const out = attributeVariationSales([
+    {
+      asin: "B07YQDFLVL",
+      parent_asin: null,
+      raw_monthly_units: 250, // BSR-curve estimate (could differ)
+      recent_review_count: 100,
+      buy_box_change_count_90d: 12,
+      keepa_monthly_sold: 200,
+    },
+    // Control: singleton without a badge — passthrough preserved.
+    {
+      asin: "NOBADGEFLO",
+      parent_asin: null,
+      raw_monthly_units: 75,
+      recent_review_count: 10,
+      buy_box_change_count_90d: 2,
+      keepa_monthly_sold: null,
+    },
+  ]);
+  const badged = out.find((r) => r.asin === "B07YQDFLVL")!;
+  const nobadge = out.find((r) => r.asin === "NOBADGEFLO")!;
+  assert(badged.variation_group_size === 1, "Phase36 singleton: group_size=1");
+  assertNear(badged.attributed_monthly_units!, 200, 0.001, "Phase36 singleton: badge wins (200, not 250)");
+  assert(nobadge.attributed_monthly_units === 75, "Phase36 singleton: no badge → raw passthrough");
+}
+
+// --------------------------------------------------------------------
+// Test 23 — Phase 36 regression: Phase 32/32.1 fixtures (no badges
+// anywhere) must produce IDENTICAL output to before. If
+// keepa_monthly_sold is null for every member, the new code path is
+// inert and the existing review+BB blend is the only logic running.
+// --------------------------------------------------------------------
+{
+  const out = attributeVariationSales([
+    {
+      asin: "PHASE32A00",
+      parent_asin: "PHASE32PRT",
+      raw_monthly_units: 100,
+      recent_review_count: 50,
+      buy_box_change_count_90d: 20,
+      keepa_monthly_sold: null,
+    },
+    {
+      asin: "PHASE32B00",
+      parent_asin: "PHASE32PRT",
+      raw_monthly_units: 100,
+      recent_review_count: 50,
+      buy_box_change_count_90d: 30,
+      keepa_monthly_sold: null,
+    },
+    {
+      asin: "PHASE32C00",
+      parent_asin: "PHASE32PRT",
+      raw_monthly_units: 100,
+      recent_review_count: 50,
+      buy_box_change_count_90d: 10,
+      keepa_monthly_sold: null,
+    },
+  ]);
+  // Same expected weights as Phase 32 fixture (review_sum=150, BB_sum=60):
+  //   a: 0.4×(50/150) + 0.6×(20/60) = 0.1333 + 0.20 = 0.3333
+  //   b: 0.4×(50/150) + 0.6×(30/60) = 0.1333 + 0.30 = 0.4333
+  //   c: 0.4×(50/150) + 0.6×(10/60) = 0.1333 + 0.10 = 0.2333
+  const a = out.find((r) => r.asin === "PHASE32A00")!;
+  const b = out.find((r) => r.asin === "PHASE32B00")!;
+  const c = out.find((r) => r.asin === "PHASE32C00")!;
+  assertNear(a.variation_weight, 1 / 3, 0.001, "Phase36 inert: A weight matches Phase 32");
+  assertNear(b.variation_weight, 0.4333, 0.001, "Phase36 inert: B weight matches Phase 32");
+  assertNear(c.variation_weight, 0.2333, 0.001, "Phase36 inert: C weight matches Phase 32");
+}
+
+// --------------------------------------------------------------------
 // Done.
 // --------------------------------------------------------------------
 if (failures === 0) {
