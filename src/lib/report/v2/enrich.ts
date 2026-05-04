@@ -24,6 +24,7 @@ import {
   estimateBrandTtmRevenueFromPersisted,
   type RevenueEstimate,
 } from "@/lib/enrichment/revenue-estimator";
+import type { NarrativeAuditScope } from "./types";
 import {
   pullTrailing12FromSpApi,
   type SpApiTrailingResult,
@@ -106,6 +107,9 @@ export interface EnrichResult {
   /** Inferred from the most-common product titles — used to seed extra
    * top_keywords beyond the bare brand name. */
   productCategoryHints: string[];
+  /** Phase 35 — audit scope counts derived from persisted brand_asins
+   * rows. Null only when the brand has no persisted rows. */
+  auditScope: NarrativeAuditScope | null;
 }
 
 function isFresh(iso: string | null | undefined, windowMs = FRESH_WINDOW_MS): boolean {
@@ -276,6 +280,7 @@ export async function runV2Enrichment(
   // and writer↔report attribution can no longer drift since they read
   // from the same row.
   let revenueEstimate: RevenueEstimate | null = null;
+  let auditScope: NarrativeAuditScope | null = null;
   try {
     const allRows = await withTiming("enrich/loadBrandAsinsForRevenue", () =>
       getBrandAsinsForRevenue(admin, brand.id),
@@ -290,6 +295,7 @@ export async function runV2Enrichment(
           is_brand_controlled: r.is_brand_controlled,
         })),
       );
+      auditScope = computeAuditScope(allRows);
       const asinsWithUnits = allRows.filter(
         (r) =>
           r.attributed_monthly_units != null &&
@@ -380,6 +386,73 @@ export async function runV2Enrichment(
     revenueEstimate,
     spApiTrailing,
     productCategoryHints,
+    auditScope,
+  };
+}
+
+/**
+ * Phase 35 — derive `narrative_json.audit_scope` counts from persisted
+ * brand_asins rows. The Keepa fetch already filters by rank ceiling
+ * (current_SALES <= 500_000) and OOS (availabilityAmazon >= 0), so the
+ * row set IS the post-filter universe; the rank/OOS exclusion buckets
+ * read 0 unless future migrations surface the pre-filter total. The
+ * "no buy-box history" and "variation inactive sibling" buckets are
+ * derived per-row.
+ */
+function computeAuditScope(
+  rows: Array<{
+    attributed_monthly_units: number | null;
+    raw_monthly_units: number | null;
+    buy_box_change_count_90d: number | null;
+    buy_box_seller: string | null;
+    keepa_monthly_sold: number | null;
+  }>,
+): NarrativeAuditScope {
+  let included = 0;
+  let withKeepaMonthlySold = 0;
+  let noBuyBoxHistory = 0;
+  let variationInactiveSibling = 0;
+
+  for (const r of rows) {
+    const attributed = r.attributed_monthly_units;
+    const raw = r.raw_monthly_units;
+    if (attributed != null && Number.isFinite(attributed) && attributed > 0) {
+      included += 1;
+    }
+    if (
+      r.keepa_monthly_sold != null &&
+      Number.isFinite(r.keepa_monthly_sold) &&
+      r.keepa_monthly_sold > 0
+    ) {
+      withKeepaMonthlySold += 1;
+    }
+    const bbCount = r.buy_box_change_count_90d;
+    const noBbHist =
+      (bbCount == null || bbCount === 0) &&
+      (r.buy_box_seller == null || r.buy_box_seller === "");
+    if (noBbHist) noBuyBoxHistory += 1;
+    if (
+      attributed != null &&
+      Number.isFinite(attributed) &&
+      attributed === 0 &&
+      raw != null &&
+      Number.isFinite(raw) &&
+      raw > 0
+    ) {
+      variationInactiveSibling += 1;
+    }
+  }
+
+  return {
+    asins_found_total: rows.length,
+    asins_included_count: included,
+    asins_with_keepa_monthly_sold: withKeepaMonthlySold,
+    exclusion_breakdown: {
+      rank_too_high: 0,
+      out_of_stock: 0,
+      no_buy_box_history: noBuyBoxHistory,
+      variation_inactive_sibling: variationInactiveSibling,
+    },
   };
 }
 

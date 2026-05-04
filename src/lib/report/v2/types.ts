@@ -65,6 +65,42 @@ export interface NarrativeV2 {
     reseller_dossier: boolean;
     competitor_benchmark: boolean;
   };
+
+  /** Phase 35 — Methodology & Audit Scope section. Populated during
+   * report generation from the persisted `brand_asins` rows. Older
+   * reports omit this; the renderer skips the section when null. */
+  audit_scope?: NarrativeAuditScope | null;
+}
+
+/**
+ * Phase 35 — fields surfaced in the new "Methodology & Audit Scope"
+ * section. Counts are derived from persisted `brand_asins` rows for the
+ * brand at report-generation time.
+ */
+export interface NarrativeAuditScope {
+  /** Total ASINs Keepa returned for this brand (post-Phase-33.1 rank
+   * ceiling + OOS filter). Falls back to `asins_included_count` when
+   * the universe count isn't available. */
+  asins_found_total: number;
+  /** brand_asins rows for this brand_id with attributed_monthly_units > 0. */
+  asins_included_count: number;
+  /** brand_asins rows where keepa_monthly_sold IS NOT NULL (Amazon's
+   * published "100+ bought" badge captured via Keepa). */
+  asins_with_keepa_monthly_sold: number;
+  exclusion_breakdown: {
+    /** Keepa hits where current_SALES > 500_000 — filtered at fetch
+     * time, so usually 0 unless a future migration surfaces them. */
+    rank_too_high: number;
+    /** Keepa hits where availabilityAmazon < 0 — filtered at fetch
+     * time, so usually 0. */
+    out_of_stock: number;
+    /** brand_asins where buy_box_change_count_90d = 0 OR last_buy_box_winner
+     * is null. */
+    no_buy_box_history: number;
+    /** brand_asins where attributed_monthly_units = 0 AND raw_monthly_units > 0
+     * (variation-attribution zeroed them out). */
+    variation_inactive_sibling: number;
+  };
 }
 
 export interface DiyStep {

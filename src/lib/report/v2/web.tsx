@@ -100,6 +100,7 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
         ) : (
           <SectionCover narrative={narrative} brand={brand} callHref={callHref} />
         )}
+        <SectionMethodology narrative={narrative} brand={brand} />
         <SectionResellerReality narrative={narrative} bundle={bundle} />
         <SectionResellerDossier narrative={narrative} />
         <SectionTopProducts narrative={narrative} />
@@ -201,6 +202,7 @@ function SideNav({ isDiy }: { isDiy?: boolean }) {
   const items: [string, string][] = isDiy
     ? [
         ["s-cover", "The good news"],
+        ["s-methodology", "Audit scope"],
         ["s-reseller-reality", "Reseller reality"],
         ["s-dossier", "Reseller dossier"],
         ["s-products", "Top products"],
@@ -209,6 +211,7 @@ function SideNav({ isDiy }: { isDiy?: boolean }) {
       ]
     : [
         ["s-cover", "The opportunity"],
+        ["s-methodology", "Audit scope"],
         ["s-reseller-reality", "Reseller reality"],
         ["s-dossier", "Reseller dossier"],
         ["s-products", "Top products"],
@@ -313,6 +316,182 @@ function BigStat({ label, value, sub }: { label: string; value: string; sub: str
       <div className="rv2-bigstat-num">{value}</div>
       <div className="rv2-bigstat-lbl">{label}</div>
       <div className="rv2-bigstat-sub">{sub}</div>
+    </div>
+  );
+}
+
+// ====================================================================
+// Section 1.5 — Methodology & Audit Scope (Phase 35)
+// ====================================================================
+//
+// Always rendered, right after the cover. Surfaces the universe of
+// ASINs measured, the unit-estimation methodology, and the conservative
+// "100+ bought" badge disclaimer BEFORE the stakeholder sees any
+// dollar numbers. Web mirrors the PDF page byte-for-byte (same
+// wording, same structure) so both surfaces tell the same story.
+// ====================================================================
+
+function SectionMethodology({
+  narrative,
+  brand,
+}: {
+  narrative: NarrativeV2;
+  brand: PublicReportV2Brand;
+}) {
+  const scope = narrative.audit_scope ?? null;
+  const keepaFresh = narrative.data_sources?.keepa_freshness ?? null;
+  const dfsFresh = narrative.data_sources?.dataforseo_freshness ?? null;
+
+  const auditWindow = `Trailing 12 months · ${formatLongDate(keepaFresh)}`;
+  const asinsFound = scope?.asins_found_total ?? null;
+  const asinsIncluded = scope?.asins_included_count ?? null;
+  const withBadge = scope?.asins_with_keepa_monthly_sold ?? 0;
+
+  const exclusions = scope?.exclusion_breakdown ?? {
+    rank_too_high: 0,
+    out_of_stock: 0,
+    no_buy_box_history: 0,
+    variation_inactive_sibling: 0,
+  };
+
+  const exclusionBullets: { key: string; node: React.ReactNode }[] = [];
+  if (exclusions.rank_too_high > 0) {
+    exclusionBullets.push({
+      key: "rank",
+      node: (
+        <>
+          <strong>Rank ceiling:</strong> {exclusions.rank_too_high} ASINs ranked above 500,000 in their category were excluded as low-velocity.
+        </>
+      ),
+    });
+  }
+  if (exclusions.out_of_stock > 0) {
+    exclusionBullets.push({
+      key: "oos",
+      node: (
+        <>
+          <strong>Out of stock:</strong> {exclusions.out_of_stock} ASINs flagged as out of stock by Amazon were excluded.
+        </>
+      ),
+    });
+  }
+  if (exclusions.no_buy_box_history > 0) {
+    exclusionBullets.push({
+      key: "nobb",
+      node: (
+        <>
+          <strong>No buy-box history:</strong> {exclusions.no_buy_box_history} ASINs with no recorded buy-box winner in the trailing 90 days are kept in the catalog count but contribute zero attributed sales (we treat the absence of buy-box activity as evidence the listing did not sell).
+        </>
+      ),
+    });
+  }
+  if (exclusions.variation_inactive_sibling > 0) {
+    exclusionBullets.push({
+      key: "var",
+      node: (
+        <>
+          <strong>Variation siblings:</strong> {exclusions.variation_inactive_sibling} bulk-pack or parent-shell ASINs that share rank with an active sibling and have no independent buy-box wins receive zero attributed units to avoid double-counting.
+        </>
+      ),
+    });
+  }
+
+  return (
+    <section id="s-methodology" className="rv2-section rv2-section-method">
+      <SectionHead eyebrow="Audit Scope" title="Methodology & Audit Scope" />
+
+      <div className="rv2-method-strip">
+        <MethodStat label="Brand" value={brand.name} />
+        <MethodStat
+          label="ASINs found on Amazon"
+          value={asinsFound != null ? asinsFound.toLocaleString("en-US") : "— not measured"}
+        />
+        <MethodStat
+          label="ASINs included in this audit"
+          value={asinsIncluded != null ? asinsIncluded.toLocaleString("en-US") : "— not measured"}
+        />
+        <MethodStat label="Audit window" value={auditWindow} />
+      </div>
+
+      <div className="rv2-method-card">
+        <div className="rv2-method-card-title">Why these ASINs are included</div>
+        {exclusionBullets.length > 0 ? (
+          <ul className="rv2-method-bullets">
+            {exclusionBullets.map((b) => (
+              <li key={b.key}>{b.node}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="rv2-method-card-body">
+            All ASINs Keepa returned for this brand had measurable sales activity in the trailing 90 days, so no listings were excluded from the catalog count.
+          </p>
+        )}
+      </div>
+
+      <div className="rv2-method-card">
+        <div className="rv2-method-card-title">How we estimate units sold</div>
+        <ul className="rv2-method-bullets">
+          <li>
+            <strong>Primary source — Amazon&apos;s published purchase badge.</strong> When Amazon shows a &ldquo;100+ bought in past month&rdquo; or similar badge on the listing, we capture that value via Keepa&apos;s <code>monthlySold</code> field.{" "}
+            <strong>
+              {withBadge} of {asinsIncluded ?? 0} included ASINs have a published badge.
+            </strong>
+          </li>
+          <li>
+            <strong>Fallback — BSR curve.</strong> For ASINs without a published badge, we estimate monthly units from the ASIN&apos;s category sales rank using a published-research BSR-to-units curve.
+          </li>
+          <li>
+            <strong>Variation attribution.</strong> When sibling ASINs share a parent listing&apos;s sales rank, we split the parent&apos;s units across siblings using recent review activity (last 90 days) plus buy-box win frequency. Inactive siblings (pallets, dormant variations) receive zero.
+          </li>
+          <li>
+            <strong>Revenue formula.</strong> <code>attributed monthly units × current buy-box price × 12 = trailing 12-month revenue estimate</code>, summed across every included ASIN.
+          </li>
+        </ul>
+      </div>
+
+      <aside className="rv2-method-disclaimer" aria-labelledby="rv2-method-disc-title">
+        <div id="rv2-method-disc-title" className="rv2-method-disclaimer-title">
+          About the &ldquo;100+ bought&rdquo; badge.
+        </div>
+        <p className="rv2-method-disclaimer-body">
+          Amazon publishes monthly purchase badges in tiers (&ldquo;50+ bought&rdquo;, &ldquo;100+ bought&rdquo;, &ldquo;1,000+ bought&rdquo;). When we see &ldquo;100+ bought,&rdquo; our model records exactly <strong>100</strong> units — even though the true number could be 101, 199, or anything up to the next tier. <strong>We are deliberately conservative.</strong> A brand with many &ldquo;100+&rdquo; or &ldquo;1,000+&rdquo; badged ASINs may have meaningfully higher actual TTM revenue than this report shows. Replace these estimates with the seller&apos;s actual TTM during diligence.
+        </p>
+      </aside>
+
+      <div className="rv2-method-card">
+        <div className="rv2-method-card-title">What this report does not do</div>
+        <ul className="rv2-method-bullets">
+          <li>
+            This report does not adjust for <strong>seasonality</strong> — trailing 12-month revenue is treated as flat across the year.
+          </li>
+          <li>
+            This report does not include <strong>non-Amazon channels</strong> (Walmart, Shopify, wholesale, retail).
+          </li>
+          <li>
+            This report does not detect <strong>brand-name collisions</strong> — if a brand catalog umbrellas multiple sub-brands or a hijacked listing, those ASINs may still appear as included.
+          </li>
+          <li>
+            This report does not include <strong>direct sales reporting</strong> — every per-ASIN unit number is a model estimate.
+          </li>
+        </ul>
+      </div>
+
+      <div className="rv2-method-sources">
+        <span>Keepa snapshot · {formatLongDate(keepaFresh)}</span>
+        <span className="rv2-method-sources-sep">·</span>
+        <span>DataForSEO snapshot · {formatLongDate(dfsFresh)}</span>
+        <span className="rv2-method-sources-sep">·</span>
+        <span>Buy-box history window · 90 days</span>
+      </div>
+    </section>
+  );
+}
+
+function MethodStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rv2-method-stat">
+      <div className="rv2-method-stat-lbl">{label}</div>
+      <div className="rv2-method-stat-val">{value}</div>
     </div>
   );
 }
@@ -1467,6 +1646,115 @@ function V2Styles() {
         justify-content: flex-end;
       }
 
+      /* Phase 35 — Methodology & Audit Scope section */
+      .rv2-section-method { }
+      .rv2-method-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin: 8px 0 24px;
+      }
+      .rv2-method-stat {
+        padding: 14px 16px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.02);
+        min-width: 0;
+      }
+      .rv2-method-stat-lbl {
+        font-size: 10px;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .rv2-method-stat-val {
+        font-size: 16px;
+        color: var(--gold-soft);
+        margin-top: 6px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.25;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .rv2-method-card {
+        margin-top: 14px;
+        padding: 18px 20px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.015);
+      }
+      .rv2-method-card-title {
+        font-weight: 700;
+        color: var(--text);
+        font-size: 14px;
+        margin-bottom: 10px;
+      }
+      .rv2-method-card-body {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.6;
+        color: var(--text);
+      }
+      .rv2-method-bullets {
+        list-style: disc;
+        padding-left: 20px;
+        margin: 0;
+        display: grid;
+        gap: 8px;
+      }
+      .rv2-method-bullets li {
+        font-size: 14px;
+        line-height: 1.6;
+        color: var(--text);
+      }
+      .rv2-method-bullets strong { color: var(--text); }
+      .rv2-method-bullets code {
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        font-size: 12.5px;
+        color: var(--gold-soft);
+        background: rgba(201,169,106,0.08);
+        padding: 1px 6px;
+        border-radius: 4px;
+      }
+      .rv2-method-disclaimer {
+        margin-top: 16px;
+        padding: 16px 20px;
+        border-left: 3px solid var(--gold);
+        background: rgba(201,169,106,0.08);
+        border-radius: 0 8px 8px 0;
+      }
+      .rv2-method-disclaimer-title {
+        font-weight: 700;
+        color: var(--gold-soft);
+        font-size: 14px;
+        margin-bottom: 6px;
+      }
+      .rv2-method-disclaimer-body {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.65;
+        color: var(--text);
+      }
+      .rv2-method-disclaimer-body strong { color: var(--gold-soft); font-weight: 600; }
+      .rv2-method-sources {
+        margin-top: 18px;
+        font-size: 12px;
+        color: var(--text-muted);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: baseline;
+      }
+      .rv2-method-sources-sep { color: var(--border); }
+
+      @media (max-width: 720px) {
+        .rv2-method-strip { grid-template-columns: 1fr 1fr; }
+      }
+      @media (max-width: 480px) {
+        .rv2-method-strip { grid-template-columns: 1fr; }
+      }
+
       /* Phase 31 — methodology disclosure for variation attribution */
       .rv2-method-panel {
         margin-top: 24px;
@@ -1627,9 +1915,13 @@ function V2Styles() {
         }
         .rv2-bigstat, .rv2-fact, .rv2-asincard, .rv2-plan-col, .rv2-step, .rv2-bars,
         .rv2-checklist, .rv2-bbpanel, .rv2-callouts, .rv2-prose-callout, .rv2-rcg-callout, .rv2-bio,
-        .rv2-method-panel {
+        .rv2-method-panel, .rv2-method-stat, .rv2-method-card, .rv2-method-disclaimer {
           background: #fafafa !important; border-color: #ddd !important;
         }
+        .rv2-method-card-title, .rv2-method-card-body, .rv2-method-bullets li,
+        .rv2-method-disclaimer-body { color: #111 !important; }
+        .rv2-method-stat-val, .rv2-method-disclaimer-title { color: #8a6d2e !important; }
+        .rv2-method-stat-lbl, .rv2-method-sources { color: #555 !important; }
         .rv2-method-body { color: #111 !important; }
         .rv2-method-kicker { color: #8a6d2e !important; }
         .rv2-bar-fill { background: #c9a96a !important; }

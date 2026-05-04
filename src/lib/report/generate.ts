@@ -143,6 +143,7 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       revenueEstimate: enrichResult.revenueEstimate,
       spApiTrailing: enrichResult.spApiTrailing,
       productCategoryHints: enrichResult.productCategoryHints,
+      auditScope: enrichResult.auditScope,
     });
     logStep(reportId, currentStep, t);
 
