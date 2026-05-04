@@ -279,6 +279,10 @@ export interface BrandAsinForRevenueRow {
   parent_asin: string | null;
   variation_group_size: number | null;
   buy_box_change_count_90d: number | null;
+  /** Phase 35 — surfaced for the methodology section so we can count
+   * ASINs whose monthly-sold figure came from Amazon's published "100+
+   * bought" badge (via Keepa) vs. BSR-curve fallback. */
+  keepa_monthly_sold: number | null;
 }
 
 export async function getBrandAsinsForRevenue(
@@ -288,17 +292,18 @@ export async function getBrandAsinsForRevenue(
   const { data, error } = await supabase
     .from("brand_asins")
     .select(
-      "asin, title, buy_box_seller, buy_box_price, offers_count, fba_offers_count, is_brand_controlled, attributed_monthly_units, raw_monthly_units, parent_asin, variation_group_size, buy_box_change_count_90d",
+      "asin, title, buy_box_seller, buy_box_price, offers_count, fba_offers_count, is_brand_controlled, attributed_monthly_units, raw_monthly_units, parent_asin, variation_group_size, buy_box_change_count_90d, keepa_monthly_sold",
     )
     .eq("brand_id", brandId);
   if (error) {
     // Some columns (raw_monthly_units, parent_asin, variation_group_size,
-    // buy_box_change_count_90d) were added by later migrations. Fall back
-    // to the minimal set so pre-migration environments can still render
-    // a revenue number — the missing columns are nice-to-have for logging
-    // / methodology disclosure but don't affect the core sum.
+    // buy_box_change_count_90d, keepa_monthly_sold) were added by later
+    // migrations. Fall back to the minimal set so pre-migration
+    // environments can still render a revenue number — the missing
+    // columns are nice-to-have for logging / methodology disclosure but
+    // don't affect the core sum.
     if (
-      /column .* does not exist|raw_monthly_units|parent_asin|variation_group_size|buy_box_change_count_90d|attributed_monthly_units/i.test(
+      /column .* does not exist|raw_monthly_units|parent_asin|variation_group_size|buy_box_change_count_90d|attributed_monthly_units|keepa_monthly_sold/i.test(
         error.message ?? "",
       )
     ) {
@@ -321,6 +326,7 @@ export async function getBrandAsinsForRevenue(
         parent_asin: null,
         variation_group_size: null,
         buy_box_change_count_90d: null,
+        keepa_monthly_sold: null,
       }));
     }
     throw error;

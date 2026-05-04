@@ -34,6 +34,7 @@ import { resolveBrandRevenue } from "@/lib/math/resolve-brand-revenue";
 import {
   DEFAULT_ASSUMPTIONS,
   type DiyStep,
+  type NarrativeAuditScope,
   type NarrativeCompetitorBenchmark,
   type NarrativeCxAudit,
   type NarrativeMath,
@@ -115,6 +116,9 @@ export interface AssembleInput {
    * supersedes both `revenueEstimate` and any imported revenue. */
   spApiTrailing?: SpApiTrailingResult | null;
   productCategoryHints?: string[];
+  /** Phase 35 — counts for the Methodology & Audit Scope section. Null
+   * for legacy callers; the renderer hides the section when missing. */
+  auditScope?: NarrativeAuditScope | null;
 }
 
 export interface AssembleOutput {
@@ -424,6 +428,8 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
       secondary_email: contactEmail,
       secondary_phone: null,
     },
+
+    audit_scope: input.auditScope ?? null,
 
     data_sources: {
       keepa:

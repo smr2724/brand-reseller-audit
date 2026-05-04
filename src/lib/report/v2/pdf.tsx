@@ -175,6 +175,199 @@ function CoverPage({ narrative, brand }: { narrative: NarrativeV2; brand: BrandF
   );
 }
 
+// Phase 35 — Methodology & Audit Scope (PDF page 2). Mirrors the web
+// section (web.tsx → SectionMethodology) byte-for-byte: same wording,
+// same structure. Always rendered, even when narrative.audit_scope is
+// null on legacy reports — counts fall back to "— not measured".
+function MethodologyPage({
+  narrative,
+  brand,
+}: {
+  narrative: NarrativeV2;
+  brand: BrandForReport;
+}) {
+  const scope = narrative.audit_scope ?? null;
+  const keepaFresh = narrative.data_sources?.keepa_freshness ?? null;
+  const dfsFresh = narrative.data_sources?.dataforseo_freshness ?? null;
+
+  const longDate = (iso: string | null): string => {
+    if (!iso) return "— not measured";
+    try {
+      return new Date(iso).toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      });
+    } catch {
+      return "— not measured";
+    }
+  };
+
+  const auditWindow = `Trailing 12 months · ${longDate(keepaFresh)}`;
+  const asinsFound = scope?.asins_found_total ?? null;
+  const asinsIncluded = scope?.asins_included_count ?? null;
+  const withBadge = scope?.asins_with_keepa_monthly_sold ?? 0;
+
+  const exclusions = scope?.exclusion_breakdown ?? {
+    rank_too_high: 0,
+    out_of_stock: 0,
+    no_buy_box_history: 0,
+    variation_inactive_sibling: 0,
+  };
+
+  const exclusionBullets: { key: string; text: React.ReactNode }[] = [];
+  if (exclusions.rank_too_high > 0) {
+    exclusionBullets.push({
+      key: "rank",
+      text: (
+        <>
+          <Text style={{ fontFamily: "Helvetica-Bold" }}>Rank ceiling: </Text>
+          {exclusions.rank_too_high} ASINs ranked above 500,000 in their category were excluded as low-velocity.
+        </>
+      ),
+    });
+  }
+  if (exclusions.out_of_stock > 0) {
+    exclusionBullets.push({
+      key: "oos",
+      text: (
+        <>
+          <Text style={{ fontFamily: "Helvetica-Bold" }}>Out of stock: </Text>
+          {exclusions.out_of_stock} ASINs flagged as out of stock by Amazon were excluded.
+        </>
+      ),
+    });
+  }
+  if (exclusions.no_buy_box_history > 0) {
+    exclusionBullets.push({
+      key: "nobb",
+      text: (
+        <>
+          <Text style={{ fontFamily: "Helvetica-Bold" }}>No buy-box history: </Text>
+          {exclusions.no_buy_box_history} ASINs with no recorded buy-box winner in the trailing 90 days are kept in the catalog count but contribute zero attributed sales (we treat the absence of buy-box activity as evidence the listing did not sell).
+        </>
+      ),
+    });
+  }
+  if (exclusions.variation_inactive_sibling > 0) {
+    exclusionBullets.push({
+      key: "var",
+      text: (
+        <>
+          <Text style={{ fontFamily: "Helvetica-Bold" }}>Variation siblings: </Text>
+          {exclusions.variation_inactive_sibling} bulk-pack or parent-shell ASINs that share rank with an active sibling and have no independent buy-box wins receive zero attributed units to avoid double-counting.
+        </>
+      ),
+    });
+  }
+
+  return (
+    <Page size="LETTER" style={styles.page}>
+      <Text style={styles.eyebrow}>Audit Scope</Text>
+      <Text style={styles.h2}>Methodology & Audit Scope</Text>
+      <View style={[styles.goldRule, { marginTop: 4, marginBottom: 14 }]} />
+
+      {/* 4-cell stat strip */}
+      <View style={styles.kpiRow}>
+        <View style={styles.kpi}>
+          <Text style={styles.kpiNum}>{brand.name}</Text>
+          <Text style={styles.kpiLbl}>Brand</Text>
+        </View>
+        <View style={styles.kpi}>
+          <Text style={styles.kpiNum}>
+            {asinsFound != null ? asinsFound.toLocaleString("en-US") : "— not measured"}
+          </Text>
+          <Text style={styles.kpiLbl}>ASINs found on Amazon</Text>
+        </View>
+        <View style={styles.kpi}>
+          <Text style={styles.kpiNum}>
+            {asinsIncluded != null ? asinsIncluded.toLocaleString("en-US") : "— not measured"}
+          </Text>
+          <Text style={styles.kpiLbl}>ASINs included in this audit</Text>
+        </View>
+        <View style={styles.kpi}>
+          <Text style={[styles.kpiNum, { fontSize: 11 }]}>{auditWindow}</Text>
+          <Text style={styles.kpiLbl}>Audit window</Text>
+        </View>
+      </View>
+
+      {/* Why these ASINs are included */}
+      <View style={styles.card}>
+        <Text style={styles.h3}>Why these ASINs are included</Text>
+        {exclusionBullets.length > 0 ? (
+          exclusionBullets.map((b) => (
+            <Text key={b.key} style={[styles.body, { marginBottom: 4 }]}>• {b.text}</Text>
+          ))
+        ) : (
+          <Text style={[styles.body, { marginBottom: 0 }]}>
+            All ASINs Keepa returned for this brand had measurable sales activity in the trailing 90 days, so no listings were excluded from the catalog count.
+          </Text>
+        )}
+      </View>
+
+      {/* How we estimate units sold */}
+      <View style={styles.card}>
+        <Text style={styles.h3}>How we estimate units sold</Text>
+        <Text style={[styles.body, { marginBottom: 4 }]}>
+          • <Text style={{ fontFamily: "Helvetica-Bold" }}>Primary source — Amazon&apos;s published purchase badge.</Text>{" "}
+          When Amazon shows a &ldquo;100+ bought in past month&rdquo; or similar badge on the listing, we capture that value via Keepa&apos;s monthlySold field.{" "}
+          <Text style={{ fontFamily: "Helvetica-Bold" }}>
+            {withBadge} of {asinsIncluded ?? 0} included ASINs have a published badge.
+          </Text>
+        </Text>
+        <Text style={[styles.body, { marginBottom: 4 }]}>
+          • <Text style={{ fontFamily: "Helvetica-Bold" }}>Fallback — BSR curve.</Text>{" "}
+          For ASINs without a published badge, we estimate monthly units from the ASIN&apos;s category sales rank using a published-research BSR-to-units curve.
+        </Text>
+        <Text style={[styles.body, { marginBottom: 4 }]}>
+          • <Text style={{ fontFamily: "Helvetica-Bold" }}>Variation attribution.</Text>{" "}
+          When sibling ASINs share a parent listing&apos;s sales rank, we split the parent&apos;s units across siblings using recent review activity (last 90 days) plus buy-box win frequency. Inactive siblings (pallets, dormant variations) receive zero.
+        </Text>
+        <Text style={[styles.body, { marginBottom: 0 }]}>
+          • <Text style={{ fontFamily: "Helvetica-Bold" }}>Revenue formula.</Text>{" "}
+          attributed monthly units x current buy-box price x 12 = trailing 12-month revenue estimate, summed across every included ASIN.
+        </Text>
+      </View>
+
+      {/* Conservative-estimate disclaimer */}
+      <View style={[styles.callout, { marginTop: 10 }]}>
+        <Text style={[styles.h3, { marginBottom: 4 }]}>About the &ldquo;100+ bought&rdquo; badge.</Text>
+        <Text style={{ fontSize: 10, lineHeight: 1.5, color: P.ink }}>
+          Amazon publishes monthly purchase badges in tiers (&ldquo;50+ bought&rdquo;, &ldquo;100+ bought&rdquo;, &ldquo;1,000+ bought&rdquo;). When we see &ldquo;100+ bought,&rdquo; our model records exactly{" "}
+          <Text style={{ fontFamily: "Helvetica-Bold" }}>100</Text>{" "}
+          units — even though the true number could be 101, 199, or anything up to the next tier.{" "}
+          <Text style={{ fontFamily: "Helvetica-Bold" }}>We are deliberately conservative.</Text>{" "}
+          A brand with many &ldquo;100+&rdquo; or &ldquo;1,000+&rdquo; badged ASINs may have meaningfully higher actual TTM revenue than this report shows. Replace these estimates with the seller&apos;s actual TTM during diligence.
+        </Text>
+      </View>
+
+      {/* What this report does NOT do */}
+      <View style={styles.card}>
+        <Text style={styles.h3}>What this report does not do</Text>
+        <Text style={[styles.body, { marginBottom: 4 }]}>
+          • This report does not adjust for <Text style={{ fontFamily: "Helvetica-Bold" }}>seasonality</Text> — trailing 12-month revenue is treated as flat across the year.
+        </Text>
+        <Text style={[styles.body, { marginBottom: 4 }]}>
+          • This report does not include <Text style={{ fontFamily: "Helvetica-Bold" }}>non-Amazon channels</Text> (Walmart, Shopify, wholesale, retail).
+        </Text>
+        <Text style={[styles.body, { marginBottom: 4 }]}>
+          • This report does not detect <Text style={{ fontFamily: "Helvetica-Bold" }}>brand-name collisions</Text> — if a brand catalog umbrellas multiple sub-brands or a hijacked listing, those ASINs may still appear as included.
+        </Text>
+        <Text style={[styles.body, { marginBottom: 0 }]}>
+          • This report does not include <Text style={{ fontFamily: "Helvetica-Bold" }}>direct sales reporting</Text> — every per-ASIN unit number is a model estimate.
+        </Text>
+      </View>
+
+      {/* Data-sources strip */}
+      <Text style={[styles.small, { marginTop: 12 }]}>
+        Keepa snapshot · {longDate(keepaFresh)}  ·  DataForSEO snapshot · {longDate(dfsFresh)}  ·  Buy-box history window · 90 days
+      </Text>
+
+      <PageFooter label="Methodology & Audit Scope" />
+    </Page>
+  );
+}
+
 function ResellerRealityPage({ narrative }: { narrative: NarrativeV2 }) {
   const r = narrative.reseller_reality;
   const max = r.top_sellers.reduce((m, s) => Math.max(m, s.share_pct ?? 0), 0) || 1;
@@ -499,6 +692,7 @@ function AuditV2Document({ narrative, brand }: { narrative: NarrativeV2; brand: 
   return (
     <Document>
       <CoverPage narrative={narrative} brand={brand} />
+      <MethodologyPage narrative={narrative} brand={brand} />
       <ResellerRealityPage narrative={narrative} />
       <DossierPage narrative={narrative} />
       <CxAuditPage narrative={narrative} />
