@@ -13,6 +13,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  getBrandAsinsForRevenue,
   getBrandEnrichmentBundle,
   type BrandEnrichmentBundle,
 } from "@/lib/enrichment";
@@ -20,14 +21,9 @@ import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 import { enrichBrandWithDataForSeo } from "@/lib/enrichment/dataforseo";
 import { fetchBrandKeywords, fetchBrandSerp } from "@/lib/enrichment/dataforseo";
 import {
-  estimateBrandTtmRevenue,
-  rankToMonthlyUnits,
+  estimateBrandTtmRevenueFromPersisted,
   type RevenueEstimate,
 } from "@/lib/enrichment/revenue-estimator";
-import {
-  attributeVariationSales,
-  indexAttributionByAsin,
-} from "@/lib/enrichment/variation-attribution";
 import {
   pullTrailing12FromSpApi,
   type SpApiTrailingResult,
@@ -237,9 +233,18 @@ export async function runV2Enrichment(
   // getProductDetails de-dupes against an in-memory 24h cache, and we
   // already paid the tokens during enrichBrandWithKeepa earlier in this
   // request). These power the CX scorecard fields (rating, reviews,
-  // images, A+, video) and the salesRank+price revenue estimator.
+  // images, A+, video) and the category-hint inference for DFS seeding.
+  //
+  // Phase 33.2 — revenue estimation no longer reads from this products
+  // array. The bundle's `keepa.asins` is capped at 50 by
+  // `getBrandEnrichmentBundle` (correctly — it's used to render seller
+  // tables and CX scorecards where 50 rows is sensible), but post-Phase
+  // 33.1 catalogs can be hundreds of ASINs deep, and the long tail
+  // truncated by that cap is exactly where the brand still wins the buy
+  // box. Revenue is now summed from persisted `brand_asins` (full set,
+  // see step 3b below) so coverage matches the ASIN count surfaced
+  // elsewhere in the report.
   let asinDetails: KeepaAsinDetail[] = [];
-  let revenueEstimate: RevenueEstimate | null = null;
   let productCategoryHints: string[] = [];
   let titleVocab: string[] = [];
   try {
@@ -251,65 +256,66 @@ export async function runV2Enrichment(
         { asin_count: asins.length },
       );
       asinDetails = products.map(toAsinDetail);
-      // Phase 31 — variation-aware attribution. Group child ASINs by
-      // parentAsin, take group-max as monthly volume, distribute by
-      // recent review activity. Inactive variations (pallets, dead
-      // SKUs) collapse to ~0 attributed units, which kills the
-      // hundreds-of-thousands of phantom revenue per pallet ASIN that
-      // the H2O Therapy report exposed.
-      const attributionInputs = products.map((p) => {
-        const rank = p.sales_rank_avg365 ?? p.sales_rank_current ?? null;
-        const categoryPath =
-          p.category_tree?.map((c) => c.name).join(" > ") ?? null;
-        const raw = rankToMonthlyUnits(
-          rank,
-          p.product_group ?? null,
-          categoryPath,
-        );
-        return {
-          asin: p.asin,
-          parent_asin: p.parent_asin ?? null,
-          raw_monthly_units: raw,
-          recent_review_count: p.review_count ?? null,
-          // Phase 32.2 — must match the writer in keepa-brand.ts. Without
-          // this signal, the report path's attribution falls back to
-          // review-only weighting and pallet siblings (no Buy Box churn,
-          // legacy reviews comparable to active siblings) keep ~10% of
-          // group volume each — which then flows into TTM revenue. The
-          // writer already passes this and persists pallet
-          // attributed_monthly_units = 0; the report path must compute
-          // the same number so its TTM matches the persisted truth.
-          buy_box_change_count_90d: p.buy_box_change_count_90d ?? null,
-        };
-      });
-      const attribution = indexAttributionByAsin(
-        attributeVariationSales(attributionInputs),
-      );
-      revenueEstimate = estimateBrandTtmRevenue(
-        products.map((p) => {
-          const att = attribution.get(p.asin) ?? null;
-          return {
-            asin: p.asin,
-            sales_rank_avg365: p.sales_rank_avg365 ?? null,
-            sales_rank_current: p.sales_rank_current ?? null,
-            buy_box_avg365: p.buy_box_avg365 ?? null,
-            buy_box_current: p.buy_box_current ?? null,
-            buy_box_now: p.buy_box_price ?? null,
-            product_group: p.product_group ?? null,
-            root_category: p.root_category ?? null,
-            category_path:
-              p.category_tree?.map((c) => c.name).join(" > ") ?? null,
-            attributed_monthly_units: att?.attributed_monthly_units ?? null,
-            variation_group_size: att?.variation_group_size ?? 1,
-          };
-        }),
-      );
       const inferred = inferProductCategoryHints(products, brand.name);
       productCategoryHints = inferred.seeds;
       titleVocab = inferred.titleVocab;
     }
   } catch (e) {
     console.warn("[v2/enrich] keepa /product details fetch failed:", e);
+  }
+
+  // 3b. Phase 33.2 — revenue from persisted brand_asins (full catalog).
+  //
+  // The writer (`enrichBrandWithKeepa`) already runs Phase 31/32/32.2
+  // variation-aware attribution and persists `attributed_monthly_units`
+  // and `buy_box_price` per ASIN. Summing those columns directly gives
+  // revenue covering ALL ASINs in `brand_asins` (Phase-33-pagination
+  // capped at 500), instead of the 50-row slice
+  // `getBrandEnrichmentBundle()` returns. Side benefits: ~N fewer
+  // Keepa /product calls per report regen (where N is catalog size),
+  // and writer↔report attribution can no longer drift since they read
+  // from the same row.
+  let revenueEstimate: RevenueEstimate | null = null;
+  try {
+    const allRows = await withTiming("enrich/loadBrandAsinsForRevenue", () =>
+      getBrandAsinsForRevenue(admin, brand.id),
+    );
+    if (allRows.length) {
+      revenueEstimate = estimateBrandTtmRevenueFromPersisted(
+        allRows.map((r) => ({
+          asin: r.asin,
+          attributed_monthly_units: r.attributed_monthly_units,
+          buy_box_price: r.buy_box_price,
+          variation_group_size: r.variation_group_size,
+          is_brand_controlled: r.is_brand_controlled,
+        })),
+      );
+      const asinsWithUnits = allRows.filter(
+        (r) =>
+          r.attributed_monthly_units != null &&
+          Number.isFinite(r.attributed_monthly_units) &&
+          (r.attributed_monthly_units as number) > 0 &&
+          r.buy_box_price != null &&
+          Number.isFinite(r.buy_box_price) &&
+          (r.buy_box_price as number) > 0,
+      ).length;
+      const monthlyAttributedGmv = allRows.reduce((sum, r) => {
+        const u = r.attributed_monthly_units ?? 0;
+        const p = r.buy_box_price ?? 0;
+        if (!Number.isFinite(u) || !Number.isFinite(p)) return sum;
+        return sum + u * p;
+      }, 0);
+      const ttm = revenueEstimate.total_ttm_revenue ?? 0;
+      console.log(
+        `[phase33.2] revenue from persisted brand_asins — brand="${brand.name}", asins_total=${allRows.length}, asins_with_units=${asinsWithUnits}, monthly_attributed_gmv=$${Math.round(monthlyAttributedGmv).toLocaleString("en-US")}, ttm=$${Math.round(ttm).toLocaleString("en-US")}`,
+      );
+    } else {
+      console.log(
+        `[phase33.2] revenue from persisted brand_asins — brand="${brand.name}", asins_total=0 (no rows persisted)`,
+      );
+    }
+  } catch (e) {
+    console.warn("[v2/enrich] phase33.2 persisted-revenue path failed:", e);
   }
 
   // 4. DataForSEO — runs after the Keepa /product fetch so we can pass
