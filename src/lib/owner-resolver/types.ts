@@ -26,7 +26,9 @@ export type OwnerCandidateSource =
   | "uspto"
   | "web_search"
   | "seller_name_heuristic"
-  | "manual";
+  | "manual"
+  | "apollo"
+  | "apollo_no_match";
 
 export type ResolvedOwnerType =
   | "manufacturer"
