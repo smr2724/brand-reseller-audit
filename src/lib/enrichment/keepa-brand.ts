@@ -33,6 +33,11 @@ import {
   AMAZON_RETAIL_SELLER_ID,
   type SellerClassification,
 } from "./seller-classification";
+import { rankToMonthlyUnits } from "./revenue-estimator";
+import {
+  attributeVariationSales,
+  indexAttributionByAsin,
+} from "./variation-attribution";
 
 export interface EnrichmentSummary {
   run_id: string;
@@ -314,6 +319,33 @@ export async function enrichBrandWithKeepa(
       if (nameKey) classificationByKey.set(nameKey, c.classification);
     }
 
+    // Phase 31 — compute pre-attribution monthly-units for each ASIN
+    // (rank → units lookup, same curves the brand-level estimator uses)
+    // and then run variation-aware attribution so per-ASIN persistence
+    // already carries the post-attribution numbers. Sibling pallet ASINs
+    // sharing a parent listing with active 4-pack/12-pack siblings
+    // collapse to ~0 attributed units, and the brand's TTM sum stops
+    // double-counting.
+    const attributionInputs = products.map((p) => {
+      const rank = p.sales_rank_avg365 ?? p.sales_rank_current ?? null;
+      const categoryPath = p.category_tree?.map((c) => c.name).join(" > ") ?? null;
+      const raw = rankToMonthlyUnits(rank, p.product_group ?? null, categoryPath);
+      return {
+        asin: p.asin,
+        parent_asin: p.parent_asin ?? null,
+        raw_monthly_units: raw,
+        // Without paying for full review history, total review_count is
+        // the best free proxy for "is this variation actually selling".
+        // Pallet/dead variations carry near-zero reviews; active 4-pack
+        // / 12-pack siblings carry hundreds. The brief allows this
+        // fallback explicitly.
+        recent_review_count: p.review_count ?? null,
+      };
+    });
+    const attribution = indexAttributionByAsin(
+      attributeVariationSales(attributionInputs),
+    );
+
     // Upsert brand_asins. is_brand_controlled is derived from the
     // already-classified seller list (resolved name + Jaccard / LLM
     // signals) rather than a raw substring match against
@@ -327,6 +359,7 @@ export async function enrichBrandWithKeepa(
       const isBrand = cls
         ? cls.is_brand_controlled
         : isBrandControlled(p.buy_box_seller, brand_name);
+      const att = attribution.get(p.asin) ?? null;
       return {
         brand_id,
         asin: p.asin,
@@ -337,6 +370,13 @@ export async function enrichBrandWithKeepa(
         fba_offers_count: p.fba_offers_count ?? 0,
         is_brand_controlled: isBrand,
         last_checked_at: new Date().toISOString(),
+        // Phase 31 — variation attribution.
+        parent_asin: att?.parent_asin ?? p.parent_asin ?? null,
+        variation_group_size: att?.variation_group_size ?? 1,
+        variation_weight: att?.variation_weight ?? 1,
+        recent_review_count: p.review_count ?? null,
+        raw_monthly_units: att?.raw_monthly_units ?? null,
+        attributed_monthly_units: att?.attributed_monthly_units ?? null,
       };
     });
 
@@ -344,7 +384,33 @@ export async function enrichBrandWithKeepa(
       const { error: upErr } = await supabase
         .from("brand_asins")
         .upsert(asinRows, { onConflict: "brand_id,asin" });
-      if (upErr) throw new Error(`brand_asins upsert: ${upErr.message}`);
+      if (upErr) {
+        // Pre-migration soft fall back: retry without the new
+        // variation-attribution columns so older environments don't
+        // block the whole enrichment run on a missing column.
+        const msg = upErr.message ?? "";
+        const looksLikeMissingColumn = /column .* does not exist|parent_asin|variation_group_size|variation_weight|recent_review_count|raw_monthly_units|attributed_monthly_units/i.test(msg);
+        if (looksLikeMissingColumn) {
+          console.warn(
+            `[keepa-brand] brand_asins upsert with variation columns failed (${msg}); retrying without them.`,
+          );
+          const legacyRows = asinRows.map(({
+            parent_asin: _p,
+            variation_group_size: _gs,
+            variation_weight: _w,
+            recent_review_count: _rr,
+            raw_monthly_units: _rm,
+            attributed_monthly_units: _am,
+            ...rest
+          }) => rest);
+          const { error: retryErr } = await supabase
+            .from("brand_asins")
+            .upsert(legacyRows, { onConflict: "brand_id,asin" });
+          if (retryErr) throw new Error(`brand_asins upsert: ${retryErr.message}`);
+        } else {
+          throw new Error(`brand_asins upsert: ${msg}`);
+        }
+      }
     }
 
     // Brand-level summary
