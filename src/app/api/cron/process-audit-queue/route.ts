@@ -8,9 +8,11 @@ import {
   sendReportReadyEmail,
   sendBrandNotFoundEmail,
   isResendConfigured,
+  STEVE_CC,
 } from "@/lib/email/resend";
 import { firstNameFromContact } from "@/lib/audit-request/security";
 import { createDraft } from "@/lib/microsoft/graph";
+import { aggregateClassificationShares } from "@/lib/brand-detail/seller-classification-shares";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +37,7 @@ interface LeadRow {
   brand_id: string | null;
   report_id: string | null;
   ip_address: string | null;
+  flow_version: string | null;
 }
 
 function makeReportToken(): string {
@@ -103,14 +106,29 @@ export async function GET(req: Request) {
     limit: MAX_PER_TICK,
   });
 
-  const { data: leadRows, error: selectErr } = await admin
+  let { data: leadRows, error: selectErr } = await admin
     .from("leads")
     .select(
-      "id, brand_name, requested_brand_name, contact_name, email, audit_status, brand_id, report_id, ip_address",
+      "id, brand_name, requested_brand_name, contact_name, email, audit_status, brand_id, report_id, ip_address, flow_version",
     )
     .eq("audit_status", "pending")
     .order("audit_requested_at", { ascending: true })
     .limit(MAX_PER_TICK);
+
+  if (selectErr && /flow_version/.test(selectErr.message ?? "")) {
+    // Older installs may not have the flow_version column yet — retry
+    // without it so cron keeps draining the queue during deploy window.
+    const retry = await admin
+      .from("leads")
+      .select(
+        "id, brand_name, requested_brand_name, contact_name, email, audit_status, brand_id, report_id, ip_address",
+      )
+      .eq("audit_status", "pending")
+      .order("audit_requested_at", { ascending: true })
+      .limit(MAX_PER_TICK);
+    leadRows = (retry.data ?? []).map((r) => ({ ...r, flow_version: null }));
+    selectErr = retry.error;
+  }
 
   if (selectErr) {
     console.error("[cron/audit-queue] lead select failed", selectErr);
@@ -195,59 +213,68 @@ async function processLead(
   ownerId: string,
 ) {
   const brandName = lead.requested_brand_name ?? lead.brand_name;
+  const isPublicFlow = lead.flow_version === "v2_wizard";
 
   // ---- 1. Status already flipped to `matching` by the atomic claim
   // in the GET handler. Skip the redundant write. ----
 
   // ---- 2. Keepa brand search ----
-  const search = await searchProductsByBrand(brandName, 5);
-  if (!search.asins.length) {
-    await admin
-      .from("leads")
-      .update({
-        audit_status: "not_found",
-        failure_reason: "No ASINs found on Amazon US for this brand name.",
-      })
-      .eq("id", lead.id);
-    if (isResendConfigured()) {
-      await sendBrandNotFoundEmail({
-        to: lead.email,
-        firstName: firstNameFromContact(lead.contact_name),
-        brandName,
-      });
-    }
-    return;
-  }
-
-  // ---- 3. Resolve / create the brand row under the owner ----
+  // Public-flow leads (v2 wizard) have already resolved their brand and
+  // populated brand_sellers during the verify-brand step. Skip the
+  // brand search + brand insert + Keepa enrichment bookkeeping for
+  // those — runV2Enrichment inside generateAuditReport will still read
+  // the brand row and freshen anything that needs freshening based on
+  // its own cache windows.
   let brandId: string | null = lead.brand_id;
-  if (!brandId) {
-    const norm = normalizeName(brandName);
-    const { data: existing } = await admin
-      .from("brands")
-      .select("id")
-      .eq("user_id", ownerId)
-      .eq("name_normalized", norm)
-      .maybeSingle();
-    if (existing?.id) {
-      brandId = existing.id;
-    } else {
-      const { data: created, error: insErr } = await admin
-        .from("brands")
-        .insert({
-          user_id: ownerId,
-          name: brandName,
-          name_normalized: norm,
-          status: "lead_request",
+  if (!isPublicFlow || !brandId) {
+    const search = await searchProductsByBrand(brandName, 5);
+    if (!search.asins.length) {
+      await admin
+        .from("leads")
+        .update({
+          audit_status: "not_found",
+          failure_reason: "No ASINs found on Amazon US for this brand name.",
         })
-        .select("id")
-        .single();
-      if (insErr || !created) {
-        throw new Error(`brand insert failed: ${insErr?.message ?? "unknown"}`);
+        .eq("id", lead.id);
+      if (isResendConfigured()) {
+        await sendBrandNotFoundEmail({
+          to: lead.email,
+          firstName: firstNameFromContact(lead.contact_name),
+          brandName,
+        });
       }
-      brandId = created.id;
+      return;
     }
-    await admin.from("leads").update({ brand_id: brandId }).eq("id", lead.id);
+
+    // ---- 3. Resolve / create the brand row under the owner ----
+    if (!brandId) {
+      const norm = normalizeName(brandName);
+      const { data: existing } = await admin
+        .from("brands")
+        .select("id")
+        .eq("user_id", ownerId)
+        .eq("name_normalized", norm)
+        .maybeSingle();
+      if (existing?.id) {
+        brandId = existing.id;
+      } else {
+        const { data: created, error: insErr } = await admin
+          .from("brands")
+          .insert({
+            user_id: ownerId,
+            name: brandName,
+            name_normalized: norm,
+            status: "lead_request",
+          })
+          .select("id")
+          .single();
+        if (insErr || !created) {
+          throw new Error(`brand insert failed: ${insErr?.message ?? "unknown"}`);
+        }
+        brandId = created.id;
+      }
+      await admin.from("leads").update({ brand_id: brandId }).eq("id", lead.id);
+    }
   }
   if (!brandId) throw new Error("brand_id resolution failed");
 
@@ -305,6 +332,40 @@ async function processLead(
       .update({ audit_status: "generating_report", report_id: reportId })
       .eq("id", lead.id);
 
+    // Phase 43 — when the lead came through the public wizard the user
+    // has already classified every brand_seller row. Read those back
+    // and pass the snapshot to generateAuditReport so the report uses
+    // the user's own buckets instead of the keepa name-overlap
+    // heuristic. (Mirror of what the admin "Generate Report" path does
+    // through SellerClassificationModal.)
+    let classificationShares = null as
+      | null
+      | {
+          brand_owned_share_pct: number;
+          authorized_share_pct: number;
+          amazon_share_pct: number;
+          reseller_share_pct: number;
+          non_reseller_share_pct: number;
+        };
+    if (isPublicFlow) {
+      const { data: rows } = await admin
+        .from("brand_sellers")
+        .select("seller_id, seller_name, share_pct, classification")
+        .eq("brand_id", brandId);
+      if (Array.isArray(rows) && rows.length > 0) {
+        const shares = aggregateClassificationShares(rows as Array<{ seller_id: string | null; seller_name: string | null; share_pct: number | null; classification: string | null }>);
+        if (shares.has_data) {
+          classificationShares = {
+            brand_owned_share_pct: shares.brand_owned_share_pct,
+            authorized_share_pct: shares.authorized_share_pct,
+            amazon_share_pct: shares.amazon_share_pct,
+            reseller_share_pct: shares.reseller_share_pct,
+            non_reseller_share_pct: shares.non_reseller_share_pct,
+          };
+        }
+      }
+    }
+
     // Phase 6.7 hotfix lesson: await generation. Do not waitUntil — we need
     // the row finalized before we can email the prospect on the same tick.
     await generateAuditReport({
@@ -312,6 +373,7 @@ async function processLead(
       userId: ownerId,
       brandId,
       contactEmail: lead.email,
+      classificationShares,
     });
   }
 
@@ -352,16 +414,32 @@ async function processLead(
   }
 
   // ---- 6. Send report-ready email via Resend ----
+  // Phase 43: every public-flow report is cc'd to Steve. This is a hard
+  // requirement — non-negotiable. Admin-initiated reports through this
+  // cron path don't go through this code path normally (they generate
+  // synchronously from the brand page), but we still cc Steve here for
+  // safety so any future direct-to-cron path stays consistent.
+  let resendMessageId: string | null = null;
+  let emailCc: string | null = null;
   if (isResendConfigured()) {
+    const ccList = [STEVE_CC];
     const send = await sendReportReadyEmail({
       to: lead.email,
       firstName: firstNameFromContact(lead.contact_name),
       brandName,
       reportToken: finalReport.token,
+      cc: ccList,
     });
     if (!send.ok) {
       throw new Error(`resend failed: ${send.error}`);
     }
+    resendMessageId = send.id ?? null;
+    emailCc = ccList.join(",");
+    console.log("[cron/audit-queue] report-ready email sent", {
+      lead_id: lead.id,
+      message_id: resendMessageId,
+      cc: emailCc,
+    });
   } else {
     console.warn("[cron/audit-queue] RESEND_API_KEY missing — skipping prospect email");
   }
@@ -435,14 +513,36 @@ async function processLead(
     }
   }
 
-  await admin
+  const finalUpdate: Record<string, unknown> = {
+    audit_status: "sent",
+    audit_email_sent_at: new Date().toISOString(),
+    outlook_draft_id: outlookDraftId,
+    email_sent_at: new Date().toISOString(),
+    resend_message_id: resendMessageId,
+    email_cc: emailCc,
+  };
+  let { error: finalUpErr } = await admin
     .from("leads")
-    .update({
-      audit_status: "sent",
-      audit_email_sent_at: new Date().toISOString(),
-      outlook_draft_id: outlookDraftId,
-    })
+    .update(finalUpdate)
     .eq("id", lead.id);
+  if (finalUpErr) {
+    // Older installs may not yet have the new columns. Strip and retry.
+    const drop = ["email_sent_at", "resend_message_id", "email_cc"];
+    let stripped = false;
+    for (const k of drop) {
+      if (k in finalUpdate) {
+        delete finalUpdate[k];
+        stripped = true;
+      }
+    }
+    if (stripped) {
+      const retry = await admin.from("leads").update(finalUpdate).eq("id", lead.id);
+      finalUpErr = retry.error;
+    }
+    if (finalUpErr) {
+      console.warn("[cron/audit-queue] final lead update failed", finalUpErr);
+    }
+  }
 }
 
 async function postSlackAlert(message: string): Promise<void> {
