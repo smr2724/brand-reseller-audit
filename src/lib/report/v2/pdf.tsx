@@ -49,6 +49,7 @@ import {
   type ReportAssumptions,
   type ResellerRow,
 } from "./types";
+import { DIVERSIFIED_HOSPITALITY_CASE_STUDY } from "./case-studies";
 
 // =====================================================================
 // Palette + base styles (cream paper for print)
@@ -983,7 +984,7 @@ function CustomerExperiencePage({ brand }: { brand: BrandForReport }) {
         />
       </View>
       <Text style={styles.proseCallout}>
-        At Diversified Hospitality, the biggest unlock was not only capturing reseller margin. The bigger unlock was that the brand owner finally controlled the customer experience, listings, packaging, inventory, pricing, reviews, and long-term channel strategy. That is what allowed the Amazon channel to scale — relevant for {brand.name} too.
+        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.customerExperience} That is what allowed the Amazon channel to scale — relevant for {brand.name} too. ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
       </Text>
       <PageFooter label="Customer Experience" brandName={brand.name} />
     </Page>
@@ -1551,7 +1552,7 @@ function FrameworkPage({
                 <View style={[styles.bannerWarn, { marginTop: 8, marginBottom: 0 }]}>
                   <Text style={styles.eyebrow}>Case study</Text>
                   <Text style={{ fontSize: 9, color: P.ink, lineHeight: 1.5 }}>
-                    When we did this for Diversified Hospitality, customer experience metrics improved immediately and Amazon sales went from <Text style={styles.bold}>$8.34M (2022)</Text> to <Text style={styles.bold}>$9.02M (2023)</Text> — without adding a single new customer. They also paid down $5M in AP from the recovered margin.
+                    {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep4} ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
                   </Text>
                 </View>
               )}
@@ -1559,7 +1560,7 @@ function FrameworkPage({
                 <View style={[styles.bannerWarn, { marginTop: 8, marginBottom: 0 }]}>
                   <Text style={styles.eyebrow}>Team model</Text>
                   <Text style={{ fontSize: 9, color: P.ink, lineHeight: 1.5 }}>
-                    Your team will typically be <Text style={styles.bold}>1-2 US-based members</Text> supported by offshore for logistics, ops, customer service, and listing management — the same model that runs Diversified Hospitality today.
+                    {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep5} ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
                   </Text>
                 </View>
               )}
@@ -1586,6 +1587,137 @@ function FrameworkPage({
   );
 }
 
+// =====================================================================
+// Phase 44 — Diversified Hospitality case study (opportunity-only)
+// Renders as a normal lower section. PDF has no collapsibles, so the
+// full text always renders. Page uses `wrap` so long content breaks
+// cleanly across pages with the standard footer on every page.
+// =====================================================================
+
+function CaseStudyDiversifiedHospitalityPage({
+  brand,
+}: {
+  brand: BrandForReport;
+}) {
+  const cs = DIVERSIFIED_HOSPITALITY_CASE_STUDY;
+  return (
+    <Page size="LETTER" style={styles.page} wrap>
+      <SectionHead
+        eyebrow="Case Study"
+        title="How Diversified Hospitality turned Amazon from a reseller-controlled channel into a $10M brand-owned revenue stream"
+      />
+      <Text style={[styles.prose, { fontStyle: "italic", color: P.muted }]}>
+        Why we share this: when a brand owner takes Amazon back from
+        resellers, the unlock is not just margin recapture — it is the
+        ability to invest in listings, packaging, customer experience,
+        and long-term channel strategy in a way resellers never will.
+        That same shift is the opportunity in front of {brand.name}.
+      </Text>
+      <Text style={[styles.prose, { fontFamily: "Helvetica-Oblique" }]}>
+        {cs.preface}
+      </Text>
+
+      <Text style={[styles.h3, { marginTop: 10 }]}>The Situation</Text>
+      {cs.sections.situation.paragraphs?.map((p, i) => (
+        <Text key={`s-p-${i}`} style={styles.prose}>
+          {p}
+        </Text>
+      ))}
+      {cs.sections.situation.bullets && (
+        <BulletList items={cs.sections.situation.bullets} />
+      )}
+      {cs.sections.situation.tail?.map((p, i) => (
+        <Text key={`s-t-${i}`} style={[styles.prose, { marginTop: 6 }]}>
+          {p}
+        </Text>
+      ))}
+
+      <Text style={[styles.h3, { marginTop: 10 }]}>The Decision</Text>
+      {cs.sections.decision.paragraphs?.map((p, i) => (
+        <Text key={`d-p-${i}`} style={styles.prose}>
+          {p}
+        </Text>
+      ))}
+      {cs.sections.decision.bullets && (
+        <BulletList items={cs.sections.decision.bullets} />
+      )}
+
+      <Text style={[styles.h3, { marginTop: 10 }]}>The Execution</Text>
+      <Text style={styles.prose}>{cs.sections.execution.lead}</Text>
+      {cs.sections.execution.steps.map((step, i) => (
+        <View key={`e-${i}`} style={{ marginBottom: 6 }} wrap={false}>
+          <Text style={[styles.prose, { fontFamily: "Helvetica-Bold", marginBottom: 2 }]}>
+            {i + 1}. {step.title}
+          </Text>
+          <Text style={[styles.prose, { marginBottom: 6 }]}>{step.body}</Text>
+        </View>
+      ))}
+
+      <Text style={[styles.h3, { marginTop: 10 }]}>The Results</Text>
+      {cs.sections.results.paragraphs?.map((p, i) => (
+        <Text key={`r-p-${i}`} style={styles.prose}>
+          {p}
+        </Text>
+      ))}
+      {cs.sections.results.bullets && (
+        <BulletList items={cs.sections.results.bullets} />
+      )}
+      {cs.sections.results.tail?.map((p, i) => (
+        <Text key={`r-t-${i}`} style={[styles.prose, { marginTop: 6 }]}>
+          {p}
+        </Text>
+      ))}
+      <BulletList
+        items={[
+          "Amazon became a major profit center",
+          "Customer experience became more consistent",
+          "Cash flow improved significantly because Amazon paid faster than reseller terms",
+          "Diversified paid down more than $5 million in accounts payable across 2022 and 2023",
+          "The increased profitability materially improved the value of the business",
+        ]}
+      />
+
+      <Text style={[styles.h3, { marginTop: 10 }]}>The Lesson</Text>
+      {cs.sections.lesson.paragraphs?.map((p, i) => (
+        <Text key={`l-p-${i}`} style={styles.prose}>
+          {p}
+        </Text>
+      ))}
+      {cs.sections.lesson.bullets && (
+        <BulletList items={cs.sections.lesson.bullets} />
+      )}
+      {cs.sections.lesson.tail?.map((p, i) => (
+        <Text key={`l-t-${i}`} style={[styles.prose, { marginTop: 6 }]}>
+          {p}
+        </Text>
+      ))}
+
+      <Text style={[styles.h3, { marginTop: 10 }]}>
+        Why This Matters for Your Brand
+      </Text>
+      {cs.sections.whyThisMatters.paragraphs?.map((p, i) => (
+        <Text key={`w-p-${i}`} style={styles.prose}>
+          {p}
+        </Text>
+      ))}
+
+      <View
+        style={{
+          marginTop: 14,
+          paddingTop: 8,
+          borderTopWidth: 1,
+          borderTopColor: P.rule,
+          borderStyle: "dashed",
+        }}
+      >
+        <Text style={styles.small}>{cs.footnote}</Text>
+      </View>
+
+      <PageFooter label="Case Study · Diversified Hospitality" brandName={brand.name} />
+    </Page>
+  );
+}
+
 function WhySteveRollePage({ brand }: { brand: BrandForReport }) {
   return (
     <Page size="LETTER" style={styles.page}>
@@ -1594,7 +1726,7 @@ function WhySteveRollePage({ brand }: { brand: BrandForReport }) {
         title="Operator-led, not agency"
       />
       <Text style={styles.prose}>
-        Steve Rolle has lived this problem as a brand owner, not just as a consultant. At Diversified Hospitality, reseller-controlled Amazon activity created inconsistent listings, pricing issues, and margin leakage. Once the channel was brought under brand control, Amazon became a roughly <Text style={styles.bold}>$9M/year</Text> revenue channel.
+        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.whySteveBio} ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
       </Text>
       <Text style={styles.prose}>
         More recently, Steve helped <Text style={styles.bold}>Legion Chemicals</Text> grow from $0 to roughly a <Text style={styles.bold}>$1M ARR</Text> Amazon run rate in less than 10 months.
@@ -2450,6 +2582,7 @@ function AuditV2Document({
       <SafeTransitionPage brand={brand} />
       <FrameworkPage narrative={narrative} brand={brand} />
       <WhySteveRollePage brand={brand} />
+      <CaseStudyDiversifiedHospitalityPage brand={brand} />
       <CtaPage narrative={narrative} brand={brand} />
       <MethodologyPage narrative={narrative} brand={brand} />
       <DisclaimerPage brand={brand} />
