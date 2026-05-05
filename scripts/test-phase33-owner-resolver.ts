@@ -15,7 +15,7 @@
  *     brand state, soft-fails when adapters throw
  */
 import {
-  parseUsptoRecord,
+  isLive,
   searchUsptoTrademarks,
 } from "../src/lib/owner-resolver/uspto";
 import {
@@ -45,125 +45,26 @@ function assert(cond: unknown, msg: string) {
 }
 
 async function main() {
-  console.log("\n=== USPTO adapter ===");
+  console.log("\n=== USPTO adapter (Phase 34.1 — TSDR-backed) ===");
 
-  // parseUsptoRecord — happy path
-  {
-    const rec = parseUsptoRecord({
-      serial_number: "12345678",
-      mark_text: "Terra Pure",
-      current_owner_name: "Acme Holdings, LLC",
-      current_owner_address: "123 Main St, Atlanta, GA 30301",
-      goods_services_text: "soaps, shampoos",
-      registration_date: "2020-04-15",
-      status: "LIVE/REGISTRATION",
-    });
-    assert(rec !== null, "parses LIVE record");
-    assert(rec?.candidate_company_name === "Acme Holdings, LLC", "owner name");
-    assert(rec?.trademark_serial_number === "12345678", "serial captured");
-    assert(rec?.trademark_status?.includes("LIVE") ?? false, "status retained");
-    assert(rec?.trademark_registration_date === "2020-04-15", "reg date ISO");
-  }
-
-  // parseUsptoRecord — DEAD filtered out
-  {
-    const rec = parseUsptoRecord({
-      serial_number: "9",
-      mark_text: "Terra Pure",
-      current_owner_name: "Old Owner Inc",
-      status: "DEAD",
-    });
-    assert(rec === null, "DEAD record returns null");
-  }
-
-  // parseUsptoRecord — no owner name
-  {
-    const rec = parseUsptoRecord({
-      serial_number: "9",
-      mark_text: "Terra Pure",
-      status: "LIVE",
-    });
-    assert(rec === null, "missing owner name returns null");
-  }
-
-  // searchUsptoTrademarks — 404 returns empty (no throw)
-  {
-    const fake404 = (() =>
-      Promise.resolve({
-        ok: false,
-        status: 404,
-        statusText: "Not Found",
-        json: () => Promise.resolve({}),
-      } as unknown as Response)) as unknown as typeof fetch;
-    const r = await searchUsptoTrademarks("Whatever", {
-      fetchImpl: fake404,
-      skipRateLimit: true,
-    });
-    assert(r.error === null, "404 yields no error");
-    assert(r.candidates.length === 0, "404 yields zero candidates");
-  }
-
-  // searchUsptoTrademarks — network error swallowed
+  // searchUsptoTrademarks — search HTTP failure returns structured error
   {
     const broken = (() =>
       Promise.reject(new Error("network down"))) as unknown as typeof fetch;
     const r = await searchUsptoTrademarks("X", {
       fetchImpl: broken,
       skipRateLimit: true,
+      skipRetries: true,
     });
     assert(r.error !== null, "network error captured in result");
     assert(r.candidates.length === 0, "no candidates on failure");
   }
 
-  // searchUsptoTrademarks — happy path with parsed records and ranking
+  // searchUsptoTrademarks — empty TESS results yield zero candidates, no error
   {
-    const payload = {
-      results: [
-        {
-          serial_number: "1",
-          mark_text: "Terra Pure",
-          current_owner_name: "Exact Owner Co",
-          status: "LIVE",
-        },
-        {
-          serial_number: "2",
-          mark_text: "Terra Pure Naturals",
-          current_owner_name: "Partial Owner Co",
-          status: "LIVE",
-        },
-        {
-          serial_number: "3",
-          mark_text: "OTHER",
-          current_owner_name: "Wrong Owner",
-          status: "DEAD",
-        },
-      ],
-    };
-    const fakeOk = (() =>
-      Promise.resolve({
-        ok: true,
-        status: 200,
-        statusText: "OK",
-        json: () => Promise.resolve(payload),
-      } as unknown as Response)) as unknown as typeof fetch;
-    const r = await searchUsptoTrademarks("Terra Pure", {
-      fetchImpl: fakeOk,
-      skipRateLimit: true,
-    });
-    assert(r.error === null, "happy path no error");
-    assert(r.candidates.length === 2, "DEAD filtered out, 2 LIVE returned");
-    assert(
-      r.candidates[0]?.candidate_company_name === "Exact Owner Co",
-      "exact match ranks first",
-    );
-    assert(r.results_count === 3, "results_count counts raw records");
-  }
-
-  // Rate-limit delay actually waits when not skipped
-  {
-    const calls: number[] = [];
+    let nCalls = 0;
     const fakeOk = ((_url: string) => {
-      calls.push(Date.now());
+      nCalls += 1;
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -171,13 +72,14 @@ async function main() {
         json: () => Promise.resolve({ results: [] }),
       } as unknown as Response);
     }) as unknown as typeof fetch;
-    const start = Date.now();
-    await searchUsptoTrademarks("X", {
+    const r = await searchUsptoTrademarks("Whatever", {
       fetchImpl: fakeOk,
-      rateLimitDelayMs: 50,
+      skipRateLimit: true,
+      skipRetries: true,
     });
-    const elapsed = Date.now() - start;
-    assert(elapsed >= 45, `rate-limit delay applied (~50ms, got ${elapsed}ms)`);
+    assert(r.error === null, "empty search yields no error");
+    assert(r.candidates.length === 0, "empty search yields zero candidates");
+    assert(nCalls === 1, "no TSDR call when search returned no serials");
   }
 
   console.log("\n=== Web-search adapter ===");
@@ -870,64 +772,20 @@ async function main() {
     );
   }
 
-  // M4 — "PUBLISHED FOR OPPOSITION" must NOT be treated as LIVE.
-  {
-    const rec = parseUsptoRecord({
-      serial_number: "11",
-      mark_text: "Brand X",
-      current_owner_name: "Brand X Co",
-      status: "PUBLISHED FOR OPPOSITION",
-    });
-    assert(rec === null, "PUBLISHED FOR OPPOSITION rejected (not LIVE)");
-  }
-  {
-    const rec = parseUsptoRecord({
-      serial_number: "12",
-      mark_text: "Brand Y",
-      current_owner_name: "Brand Y Co",
-      status: "ALLOWED — INTENT TO USE",
-    });
-    assert(rec === null, "ALLOWED / INTENT TO USE rejected (not LIVE)");
-  }
-  {
-    const rec = parseUsptoRecord({
-      serial_number: "13",
-      mark_text: "Brand Z",
-      current_owner_name: "Brand Z Co",
-      status: "REGISTERED",
-    });
-    assert(rec !== null, "REGISTERED accepted as LIVE");
-  }
-  {
-    const rec = parseUsptoRecord({
-      serial_number: "14",
-      mark_text: "Brand W",
-      current_owner_name: "Brand W Co",
-      status: "Some text",
-      status_code: 712,
-    });
-    assert(rec !== null, "status_code 712 accepted as LIVE");
-  }
-
-  // M5 — USPTO record with null/empty mark_text or serial_number rejected.
-  {
-    const rec = parseUsptoRecord({
-      mark_text: null,
-      serial_number: "9",
-      current_owner_name: "Owner",
-      status: "REGISTERED",
-    });
-    assert(rec === null, "missing mark_text rejected");
-  }
-  {
-    const rec = parseUsptoRecord({
-      mark_text: "Some Mark",
-      serial_number: "",
-      current_owner_name: "Owner",
-      status: "REGISTERED",
-    });
-    assert(rec === null, "empty serial_number rejected");
-  }
+  // M4 / Phase 34.1 — `isLive` is the authoritative status filter used by
+  // both the TESS search shortlist and the TSDR owner parser.
+  assert(
+    isLive("PUBLISHED FOR OPPOSITION") === false,
+    "PUBLISHED FOR OPPOSITION rejected (not LIVE)",
+  );
+  assert(
+    isLive("ALLOWED — INTENT TO USE") === false,
+    "ALLOWED / INTENT TO USE rejected (not LIVE)",
+  );
+  assert(isLive("REGISTERED") === true, "REGISTERED accepted as LIVE");
+  assert(isLive("DEAD") === false, "DEAD rejected as LIVE");
+  assert(isLive("Some text", 712) === true, "status_code 712 accepted as LIVE");
+  assert(isLive("LIVE/REGISTRATION ISSUED") === true, "LIVE/REGISTRATION accepted");
 
   // M7 — extended deny list covers Crunchbase, Bloomberg, Google, Yahoo, etc.
   assert(isDeniedDomain("crunchbase.com") === true, "crunchbase denied");

@@ -74,14 +74,43 @@ async function searchOpenAIImpl(
     }
     const json = (await res.json()) as unknown;
     const items = parseOpenAIResponse(json, query);
-    return { items, raw: json, error: null };
+    const full_text = parseOpenAIFullText(json);
+    return { items, raw: json, error: null, full_text };
   } catch (e) {
     return {
       items: [],
       raw: null,
       error: e instanceof Error ? e.message : String(e),
+      full_text: null,
     };
   }
+}
+
+/**
+ * Phase 34.1 — concatenate every `output_text` block from message items so
+ * the extractor sees the full prose answer (where attestations like
+ * "produced by ..." live), not just URL-citation snippets.
+ */
+export function parseOpenAIFullText(json: unknown): string | null {
+  if (!json || typeof json !== "object") return null;
+  const root = json as Record<string, unknown>;
+  const output = Array.isArray(root.output) ? (root.output as unknown[]) : [];
+  const chunks: string[] = [];
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const type = typeof obj.type === "string" ? obj.type : "";
+    if (type !== "message") continue;
+    const content = Array.isArray(obj.content) ? (obj.content as unknown[]) : [];
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as Record<string, unknown>;
+      const text = typeof b.text === "string" ? (b.text as string) : null;
+      if (text && text.trim().length > 0) chunks.push(text);
+    }
+  }
+  if (chunks.length === 0) return null;
+  return chunks.join("\n\n");
 }
 
 /**

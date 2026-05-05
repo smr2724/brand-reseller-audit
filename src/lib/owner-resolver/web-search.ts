@@ -22,11 +22,12 @@ import type { RawOwnerCandidate } from "./types";
 import { rateLimit } from "./rate-limit";
 import { searchOpenAI } from "./web-search-openai";
 import type {
+  PerQueryAnswer,
   ProviderResult,
   WebSearchResultItem,
 } from "./web-search-types";
 
-export type { WebSearchResultItem } from "./web-search-types";
+export type { WebSearchResultItem, PerQueryAnswer } from "./web-search-types";
 
 export type WebSearchProvider = "openai" | "perplexity" | "brave";
 
@@ -51,6 +52,13 @@ export interface WebSearchAdapterResult {
   results_count: number;
   /** Provider that was actually used (or null when none was configured). */
   provider_used?: WebSearchProvider | null;
+  /**
+   * Phase 34.1 — Full per-query assistant answer text, captured from the
+   * OpenAI Responses API output. The extractor uses these prose blocks to
+   * find owner attestations ("produced by …") that the snippet field
+   * truncates.
+   */
+  per_query_answers?: PerQueryAnswer[];
 }
 
 const DEFAULT_MAX_PER_QUERY = 15;
@@ -411,6 +419,7 @@ export async function searchWebForOwners(
   const rawByQuery: Record<string, unknown> = {};
   let allItems: WebSearchResultItem[] = [];
   const errors: string[] = [];
+  const perQueryAnswers: PerQueryAnswer[] = [];
   for (const q of queries) {
     const result = await provider.run(q);
     rawByQuery[q] = result.raw;
@@ -418,6 +427,19 @@ export async function searchWebForOwners(
     if (result.items.length > 0) {
       allItems = allItems.concat(result.items.slice(0, maxPerQuery));
     }
+    const citations: Array<{ url: string; title: string | null }> = [];
+    const seenUrls = new Set<string>();
+    for (const it of result.items) {
+      if (!seenUrls.has(it.url)) {
+        seenUrls.add(it.url);
+        citations.push({ url: it.url, title: it.title });
+      }
+    }
+    perQueryAnswers.push({
+      query: q,
+      full_text: result.full_text ?? null,
+      citation_urls: citations,
+    });
   }
 
   // Track which queries surfaced each domain so the heuristic can reward
@@ -471,6 +493,7 @@ export async function searchWebForOwners(
     error: surfacedError,
     results_count: allItems.length,
     provider_used: provider.name,
+    per_query_answers: perQueryAnswers,
   };
 }
 

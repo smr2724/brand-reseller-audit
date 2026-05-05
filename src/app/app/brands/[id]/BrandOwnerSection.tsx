@@ -71,6 +71,8 @@ export interface BrandOwnerCandidate {
   extractor_confidence?: number | null;
   extractor_reasoning?: string | null;
   evidence_urls?: string[] | null;
+  // Phase 34.1 — manual Apollo override marker.
+  is_manual_apollo?: boolean | null;
 }
 
 const OWNER_TYPES = [
@@ -146,6 +148,9 @@ export default function BrandOwnerSection({
     initialBrand.owner_resolution_notes ?? "",
   );
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [manualQuery, setManualQuery] = useState<string>("");
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualMsg, setManualMsg] = useState<string | null>(null);
 
   useEffect(() => {
     setBrand(initialBrand);
@@ -215,27 +220,31 @@ export default function BrandOwnerSection({
   // Phase 34 — only show Apollo / apollo_no_match candidates. Older raw
   // candidates from a pre-Phase-34 run still render at the bottom for
   // back-compat, but we collapse them.
-  const { apolloMatches, noMatches, legacyHits } = useMemo(() => {
+  const { apolloMatches, manualMatches, noMatches, legacyHits } = useMemo(() => {
     const apolloMatches: BrandOwnerCandidate[] = [];
+    const manualMatches: BrandOwnerCandidate[] = [];
     const noMatches: BrandOwnerCandidate[] = [];
     const legacyHits: BrandOwnerCandidate[] = [];
     for (const c of candidates) {
-      if (c.candidate_source === "apollo") apolloMatches.push(c);
+      if (c.candidate_source === "apollo_manual") manualMatches.push(c);
+      else if (c.candidate_source === "apollo") apolloMatches.push(c);
       else if (c.candidate_source === "apollo_no_match") noMatches.push(c);
       else legacyHits.push(c);
     }
-    apolloMatches.sort((a, b) => {
+    const byContacts = (a: BrandOwnerCandidate, b: BrandOwnerCandidate) => {
       const ac = a.apollo_total_contacts ?? -1;
       const bc = b.apollo_total_contacts ?? -1;
       if (bc !== ac) return bc - ac;
       const af = a.extractor_confidence ?? 0;
       const bf = b.extractor_confidence ?? 0;
       return bf - af;
-    });
+    };
+    apolloMatches.sort(byContacts);
+    manualMatches.sort(byContacts);
     noMatches.sort(
       (a, b) => (b.extractor_confidence ?? 0) - (a.extractor_confidence ?? 0),
     );
-    return { apolloMatches, noMatches, legacyHits };
+    return { apolloMatches, manualMatches, noMatches, legacyHits };
   }, [candidates]);
 
   const callApi = useCallback(
@@ -364,6 +373,77 @@ export default function BrandOwnerSection({
     }
   }, [brand.id, callApi, notes, router]);
 
+  const refreshCandidates = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/owner-resolver/candidates?brand_id=${encodeURIComponent(brand.id)}`,
+        { credentials: "include", cache: "no-store" },
+      );
+      if (!res.ok) return;
+      const json = (await res.json()) as {
+        brand: BrandOwnerBrand;
+        run: BrandOwnerRun | null;
+        candidates: BrandOwnerCandidate[];
+      };
+      setBrand(json.brand);
+      setRun(json.run);
+      setCandidates(json.candidates ?? []);
+    } catch {
+      // soft-fail — manual search already showed its own status
+    }
+  }, [brand.id]);
+
+  const onManualApolloSearch = useCallback(async () => {
+    const q = manualQuery.trim();
+    if (q.length === 0) {
+      setManualMsg("Enter a company name first.");
+      return;
+    }
+    setManualBusy(true);
+    setManualMsg(null);
+    setErrorMsg(null);
+    try {
+      const res = await fetch("/api/owner-resolver/manual-apollo-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ brand_id: brand.id, company_name: q }),
+      });
+      const json = (await res.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      if (!res.ok) {
+        if (res.status === 429) {
+          const retry = Number(json.retry_after_seconds ?? 0);
+          setManualMsg(
+            retry > 0
+              ? `Rate limit — try again in ~${retry}s.`
+              : (typeof json.error === "string" ? json.error : "rate limit"),
+          );
+        } else {
+          setManualMsg(
+            typeof json.error === "string" ? json.error : `failed (${res.status})`,
+          );
+        }
+        return;
+      }
+      const inserted = Number(json.inserted_count ?? 0);
+      const noMatch = json.no_match === true;
+      setManualMsg(
+        noMatch
+          ? `No Apollo match for "${q}" — recorded as no-match.`
+          : `Inserted ${inserted} Apollo result(s) for "${q}".`,
+      );
+      setManualQuery("");
+      await refreshCandidates();
+    } catch (e) {
+      setManualMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setManualBusy(false);
+    }
+  }, [brand.id, manualQuery, refreshCandidates]);
+
   const toggleSelected = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -438,6 +518,7 @@ export default function BrandOwnerSection({
       {state === "candidates_ready" && (
         <CandidatesView
           apolloMatches={apolloMatches}
+          manualMatches={manualMatches}
           noMatches={noMatches}
           legacyHits={legacyHits}
           selectedIds={selectedIds}
@@ -454,6 +535,11 @@ export default function BrandOwnerSection({
           onMarkNone={onMarkNone}
           onRerun={onTrigger}
           triggerBusy={triggerBusy}
+          manualQuery={manualQuery}
+          onManualQueryChange={setManualQuery}
+          manualBusy={manualBusy}
+          manualMsg={manualMsg}
+          onManualSearch={onManualApolloSearch}
         />
       )}
 
@@ -466,11 +552,20 @@ export default function BrandOwnerSection({
       )}
 
       {state === "failed" && (
-        <FailedView
-          brand={brand}
-          triggerBusy={triggerBusy}
-          onRerun={onTrigger}
-        />
+        <>
+          <FailedView
+            brand={brand}
+            triggerBusy={triggerBusy}
+            onRerun={onTrigger}
+          />
+          <ManualApolloSearchBlock
+            manualQuery={manualQuery}
+            onManualQueryChange={setManualQuery}
+            manualBusy={manualBusy}
+            manualMsg={manualMsg}
+            onManualSearch={onManualApolloSearch}
+          />
+        </>
       )}
     </div>
   );
@@ -744,6 +839,7 @@ function NoMatchCard({
 
 function CandidatesView({
   apolloMatches,
+  manualMatches,
   noMatches,
   legacyHits,
   selectedIds,
@@ -760,8 +856,14 @@ function CandidatesView({
   onMarkNone,
   onRerun,
   triggerBusy,
+  manualQuery,
+  onManualQueryChange,
+  manualBusy,
+  manualMsg,
+  onManualSearch,
 }: {
   apolloMatches: BrandOwnerCandidate[];
+  manualMatches: BrandOwnerCandidate[];
   noMatches: BrandOwnerCandidate[];
   legacyHits: BrandOwnerCandidate[];
   selectedIds: Set<string>;
@@ -778,9 +880,15 @@ function CandidatesView({
   onMarkNone: () => void;
   onRerun: () => void;
   triggerBusy: boolean;
+  manualQuery: string;
+  onManualQueryChange: (v: string) => void;
+  manualBusy: boolean;
+  manualMsg: string | null;
+  onManualSearch: () => void;
 }) {
   const selectedCount = selectedIds.size;
-  const totalShown = apolloMatches.length + noMatches.length;
+  const totalShown =
+    apolloMatches.length + manualMatches.length + noMatches.length;
 
   return (
     <div>
@@ -797,6 +905,24 @@ function CandidatesView({
                 Apollo matches ({apolloMatches.length})
               </div>
               {apolloMatches.map((c) => (
+                <ApolloCard
+                  key={c.id}
+                  c={c}
+                  picked={selectedIds.has(c.id)}
+                  expanded={expanded.has(c.id)}
+                  onToggleSelected={onToggleSelected}
+                  onToggleExpanded={onToggleExpanded}
+                />
+              ))}
+            </div>
+          )}
+
+          {manualMatches.length > 0 && (
+            <div className="mb-4">
+              <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-2">
+                Manual Apollo searches ({manualMatches.length})
+              </div>
+              {manualMatches.map((c) => (
                 <ApolloCard
                   key={c.id}
                   c={c}
@@ -831,6 +957,14 @@ function CandidatesView({
               they live in the database but are noise compared to Apollo. */}
         </>
       )}
+
+      <ManualApolloSearchBlock
+        manualQuery={manualQuery}
+        onManualQueryChange={onManualQueryChange}
+        manualBusy={manualBusy}
+        manualMsg={manualMsg}
+        onManualSearch={onManualSearch}
+      />
 
       <div className="mt-4">
         <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-2">
@@ -937,6 +1071,65 @@ function SelectedView({
       >
         {triggerBusy ? "Re-running…" : "Re-run resolver"}
       </button>
+    </div>
+  );
+}
+
+function ManualApolloSearchBlock({
+  manualQuery,
+  onManualQueryChange,
+  manualBusy,
+  manualMsg,
+  onManualSearch,
+}: {
+  manualQuery: string;
+  onManualQueryChange: (v: string) => void;
+  manualBusy: boolean;
+  manualMsg: string | null;
+  onManualSearch: () => void;
+}) {
+  return (
+    <div
+      className="mt-4 p-3 rounded border"
+      style={{
+        background: "var(--bg-2)",
+        borderColor: "var(--border-soft)",
+      }}
+    >
+      <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-2">
+        Search Apollo for a specific company
+      </div>
+      <div className="text-xs text-[var(--text-muted)] mb-2">
+        Don&apos;t see the right owner? Type a company name and we&apos;ll add
+        the matching Apollo organization(s) above.
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          value={manualQuery}
+          onChange={(e) => onManualQueryChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              onManualSearch();
+            }
+          }}
+          placeholder="e.g. Diversified Hospitality Solutions"
+          className="input flex-1 min-w-[220px]"
+          disabled={manualBusy}
+        />
+        <button
+          type="button"
+          className="btn btn-primary text-sm"
+          onClick={onManualSearch}
+          disabled={manualBusy || manualQuery.trim().length === 0}
+        >
+          {manualBusy ? "Searching…" : "Search"}
+        </button>
+      </div>
+      {manualMsg && (
+        <div className="text-xs text-[var(--text-muted)] mt-2">{manualMsg}</div>
+      )}
     </div>
   );
 }
