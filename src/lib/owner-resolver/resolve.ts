@@ -257,6 +257,8 @@ function buildApolloRow(
   tierUsed: ApolloSearchTier | null,
 ): PersistedApolloMatchRow {
   const tierSuffix = tierUsed ? ` (tier=${tierUsed})` : "";
+  const sourceSuffix =
+    org.apollo_source === "crm" ? " [Your Apollo CRM]" : "";
   return {
     brand_id: brandId,
     resolution_run_id: runId,
@@ -269,7 +271,7 @@ function buildApolloRow(
       extractorRow.evidence_urls.length > 0
         ? extractorRow.evidence_urls[0] ?? null
         : null,
-    match_reason: `Apollo match for "${extractorRow.candidate_company_name}"${tierSuffix}`,
+    match_reason: `Apollo match for "${extractorRow.candidate_company_name}"${tierSuffix}${sourceSuffix}`,
     trademark_serial_number: null,
     trademark_status: null,
     trademark_registration_date: null,
@@ -278,7 +280,16 @@ function buildApolloRow(
     heuristic_score: 0,
     heuristic_label: "unscored",
     needs_manual_review: false,
-    raw_payload: { source_candidate_id: extractorRow.id, apollo: org },
+    // Phase 34.3 — `apollo_source` rides in raw_payload (no migration
+    // needed). The candidates GET endpoint surfaces raw_payload so the
+    // UI can read this and render the right "Your Apollo CRM" /
+    // "Apollo Public" badge.
+    raw_payload: {
+      source_candidate_id: extractorRow.id,
+      apollo: org,
+      apollo_source: org.apollo_source,
+      tier_used: tierUsed,
+    },
     apollo_organization_id: org.id,
     apollo_organization_name: org.name,
     apollo_domain: org.primary_domain,
@@ -573,6 +584,10 @@ export async function enrichSelectedCandidatesWithApollo(
   }
 
   const apolloRowsToInsert: PersistedApolloMatchRow[] = [];
+  // Phase 34.3 — Dedupe key combines id+source so the same company
+  // surfacing in BOTH `accounts/search` (CRM) and `mixed_companies/search`
+  // (public) yields TWO rows. The user picks which one is the right
+  // owner.
   const seenApolloIds = new Set<string>();
   let inserted = 0;
   let noMatch = 0;
@@ -595,8 +610,9 @@ export async function enrichSelectedCandidatesWithApollo(
     }
     let appendedAnyForExt = false;
     for (const org of orgs) {
-      if (seenApolloIds.has(org.id)) continue;
-      seenApolloIds.add(org.id);
+      const dedupeKey = `${org.id}|${org.apollo_source}`;
+      if (seenApolloIds.has(dedupeKey)) continue;
+      seenApolloIds.add(dedupeKey);
       const total = await apollo.countContacts(org.id);
       apolloRowsToInsert.push(
         buildApolloRow(brandId, runId, c, org, total, tiered.tier_used),
