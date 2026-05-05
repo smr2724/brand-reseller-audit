@@ -73,6 +73,27 @@ export default function AddBrandByName() {
     null,
   );
 
+  // Phase 45 — 2 Hounds Design bug. Even when the create POST returned
+  // an error to the client, the brand row was often inserted server-side.
+  // After a failure we hold the last-attempted payload so "Try again" can
+  // re-POST the SAME candidate (instead of forcing a fresh Keepa search),
+  // and we poll /api/brands/lookup?name=… for up to 30s to discover that
+  // the brand actually exists; if it does, surface the inline state pill
+  // and a link to the brand detail page rather than the stale red banner.
+  type LastAttempt = {
+    brand: string;
+    confirmed_ttm_revenue_dollars?: number;
+    confirmed_ttm_source?: string;
+  };
+  const [lastAttempt, setLastAttempt] = useState<LastAttempt | null>(null);
+  const [reconciling, setReconciling] = useState(false);
+  const [reconciledBrand, setReconciledBrand] = useState<{
+    id: string;
+    name: string;
+    enrichment_state: string | null;
+  } | null>(null);
+  const [reconcileChecked, setReconcileChecked] = useState(false);
+
   function resetResults() {
     setKeepaCandidates(null);
     setFuzzyCandidates(null);
@@ -146,19 +167,32 @@ export default function AddBrandByName() {
     setError(null);
     setCreating(true);
     setCreateFailed(false);
+    setReconciledBrand(null);
+    setReconcileChecked(false);
+
+    // Phase 45 — capture the exact payload the user selected so a later
+    // "Try again" re-POSTs this same candidate (no fresh Keepa search).
+    const attempt: LastAttempt = { brand };
+    const confirmedNum = Number(confirmedTtmInput.replace(/[$,\s]/g, ""));
+    if (
+      showConfirmedTtm &&
+      Number.isFinite(confirmedNum) &&
+      confirmedNum > 0
+    ) {
+      attempt.confirmed_ttm_revenue_dollars = confirmedNum;
+      if (confirmedTtmSource.trim().length > 0) {
+        attempt.confirmed_ttm_source = confirmedTtmSource.trim();
+      }
+    }
+    setLastAttempt(attempt);
+
     try {
-      const body: Record<string, unknown> = { brand };
-      // Phase 28 — only attach the confirmed TTM payload if the user
-      // actually expanded the form and entered a positive number.
-      const confirmedNum = Number(confirmedTtmInput.replace(/[$,\s]/g, ""));
-      if (
-        showConfirmedTtm &&
-        Number.isFinite(confirmedNum) &&
-        confirmedNum > 0
-      ) {
-        body.confirmed_ttm_revenue_dollars = confirmedNum;
-        if (confirmedTtmSource.trim().length > 0) {
-          body.confirmed_ttm_source = confirmedTtmSource.trim();
+      const body: Record<string, unknown> = { brand: attempt.brand };
+      if (attempt.confirmed_ttm_revenue_dollars != null) {
+        body.confirmed_ttm_revenue_dollars =
+          attempt.confirmed_ttm_revenue_dollars;
+        if (attempt.confirmed_ttm_source) {
+          body.confirmed_ttm_source = attempt.confirmed_ttm_source;
         }
       }
       const res = await fetch("/api/brands/create-from-lookup", {
@@ -190,17 +224,68 @@ export default function AddBrandByName() {
       setError(err instanceof Error ? err.message : "create failed");
       setCreating(false);
       setCreateFailed(true);
+      // Phase 45 — kick off the reconcile poll. The brand may have been
+      // inserted server-side before the error surfaced; if so we want to
+      // surface the existing row instead of a stale red banner.
+      void reconcileByName(attempt.brand);
     }
   }
 
-  // Phase 29 — explicit user-driven reset after a failed create. Clears
-  // the lock and any stale failure state so the user can try a different
-  // candidate (or the same candidate after the cron has had a chance to
-  // recover the brand).
-  function resetAfterFailure() {
-    setCreateFailed(false);
-    setCreateFailedBrandId(null);
-    setError(null);
+  // Phase 45 — poll /api/brands/lookup?name= every 3s for up to 30s
+  // looking for a brand that matches the failed-attempt name. If found,
+  // clear the create-failed state and surface an inline link to the
+  // brand-detail page (with an `enrichment_state` pill if it's mid-flight
+  // or failed). If not found after 30s, leave the original error banner.
+  async function reconcileByName(brand: string) {
+    setReconciling(true);
+    setReconcileChecked(false);
+    const deadline = Date.now() + 30_000;
+    try {
+      while (Date.now() < deadline) {
+        try {
+          const res = await fetch(
+            `/api/brands/lookup?name=${encodeURIComponent(brand)}`,
+            { method: "GET" },
+          );
+          if (res.ok) {
+            const data = (await res.json().catch(() => ({}))) as {
+              brand?: { id: string; name: string; enrichment_state: string | null } | null;
+            };
+            if (data?.brand?.id) {
+              setReconciledBrand({
+                id: data.brand.id,
+                name: data.brand.name,
+                enrichment_state: data.brand.enrichment_state ?? null,
+              });
+              setCreateFailed(false);
+              setError(null);
+              return;
+            }
+          }
+        } catch {
+          // transient — keep polling
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    } finally {
+      setReconciling(false);
+      setReconcileChecked(true);
+    }
+  }
+
+  // Phase 45 — "Try again" now re-POSTs the same candidate the user
+  // already selected (instead of just clearing the banner and forcing
+  // them to re-search Keepa).
+  async function retryLastAttempt() {
+    if (creating) return;
+    if (!lastAttempt) {
+      // Defensive — should never happen; fall back to clearing state.
+      setCreateFailed(false);
+      setCreateFailedBrandId(null);
+      setError(null);
+      return;
+    }
+    await createBrand(lastAttempt.brand);
   }
 
   async function resolveAsin() {
@@ -285,7 +370,37 @@ export default function AddBrandByName() {
         </div>
       </form>
 
-      {error && (
+      {reconciledBrand && (
+        <div className="card p-3 border border-emerald-700/50 bg-emerald-950/30 text-sm text-emerald-200 space-y-2">
+          <div className="font-medium">
+            “{reconciledBrand.name}” was already created.
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {reconciledBrand.enrichment_state && (
+              <span
+                className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--bg-3)] text-[var(--text-muted)] border border-[var(--border)]"
+              >
+                {reconciledBrand.enrichment_state}
+              </span>
+            )}
+            <a
+              href={`/app/brands/${reconciledBrand.id}`}
+              className="underline text-[var(--accent)]"
+            >
+              Open brand →
+            </a>
+            {(reconciledBrand.enrichment_state === "pending" ||
+              reconciledBrand.enrichment_state === "enriching" ||
+              reconciledBrand.enrichment_state === "failed") && (
+              <span className="text-[var(--text-muted)]">
+                The brand-detail page will show enrichment progress.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {error && !reconciledBrand && (
         <div className="card p-3 border border-red-700/50 bg-red-950/30 text-sm text-red-300 space-y-2">
           <div>{error}</div>
           {createFailed && (
@@ -293,9 +408,10 @@ export default function AddBrandByName() {
               <button
                 type="button"
                 className="btn btn-ghost text-xs"
-                onClick={resetAfterFailure}
+                onClick={retryLastAttempt}
+                disabled={creating || reconciling}
               >
-                Try again
+                {creating ? "Retrying…" : "Try again"}
               </button>
               {createFailedBrandId && (
                 <a
@@ -305,9 +421,16 @@ export default function AddBrandByName() {
                   Open brand anyway →
                 </a>
               )}
-              <span className="text-[var(--text-muted)]">
-                The recovery sweep retries stuck brands every 5 minutes.
-              </span>
+              {reconciling && (
+                <span className="text-[var(--text-muted)]">
+                  Checking whether the brand was created anyway…
+                </span>
+              )}
+              {reconcileChecked && !reconciling && (
+                <span className="text-[var(--text-muted)]">
+                  The recovery sweep retries stuck brands every 5 minutes.
+                </span>
+              )}
             </div>
           )}
         </div>

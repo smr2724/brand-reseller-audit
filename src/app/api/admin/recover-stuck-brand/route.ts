@@ -19,7 +19,9 @@ import { NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import {
   findStuckBrands,
+  isEnrichingRecoverable,
   recoverStuckBrand,
+  STUCK_ENRICHING_THRESHOLD_MIN,
   type StuckBrand,
 } from "@/lib/brand/recover-stuck-brands";
 
@@ -29,7 +31,10 @@ export const fetchCache = "force-no-store";
 export const revalidate = 0;
 export const maxDuration = 800;
 
-const ALLOWED_STATES = new Set(["pending", "failed", "deferred"]);
+// Phase 45 — `enriching` is recoverable too, but only when the row's
+// `updated_at` is older than `STUCK_ENRICHING_THRESHOLD_MIN`. We let it
+// through this set and then check the timestamp below.
+const ALLOWED_STATES = new Set(["pending", "failed", "deferred", "enriching"]);
 
 function authorize(req: Request): boolean {
   const auth = req.headers.get("authorization") ?? "";
@@ -63,7 +68,7 @@ export async function POST(req: Request) {
   }
   const { data: row, error: rowErr } = await admin
     .from("brands")
-    .select("id, user_id, name, created_at, enrichment_state")
+    .select("id, user_id, name, created_at, updated_at, enrichment_state")
     .eq("id", brandId)
     .maybeSingle();
   if (rowErr || !row) {
@@ -74,6 +79,7 @@ export async function POST(req: Request) {
   }
 
   const state = String((row as { enrichment_state?: string }).enrichment_state ?? "pending");
+  const updatedAt = (row as { updated_at?: string | null }).updated_at ?? null;
   if (!ALLOWED_STATES.has(state)) {
     return NextResponse.json(
       {
@@ -89,6 +95,19 @@ export async function POST(req: Request) {
         error:
           "brand is deferred — pass { force: true } to re-enrich a deferred brand",
         enrichment_state: state,
+      },
+      { status: 409 },
+    );
+  }
+  // Phase 45 — `enriching` is only recoverable once `updated_at` is older
+  // than the threshold. Otherwise we'd race a healthy in-progress run.
+  // `force: true` overrides (rare — operator knows the lambda is dead).
+  if (state === "enriching" && !force && !isEnrichingRecoverable(updatedAt)) {
+    return NextResponse.json(
+      {
+        error: `brand is still actively enriching (updated_at within ${STUCK_ENRICHING_THRESHOLD_MIN} minutes) — pass { force: true } to override`,
+        enrichment_state: state,
+        updated_at: updatedAt,
       },
       { status: 409 },
     );

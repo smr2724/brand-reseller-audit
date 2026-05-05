@@ -28,9 +28,35 @@ export interface StuckBrand {
 export const STUCK_BRAND_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 export const RECOVERY_BRAND_BATCH_LIMIT = 5;
 export const TOKEN_BUDGET_FLOOR = 50;
-/** States the recovery sweep is allowed to touch. `deferred` and
- * `enriched`/`enriching`/`queued` are never picked up by the cron. */
+/**
+ * Phase 45 — A brand whose lambda died mid-flight will sit in
+ * `enrichment_state='enriching'` forever otherwise. After this many
+ * minutes since `updated_at`, treat it as stuck and let recovery
+ * pick it up. Threshold is high enough that we don't fight a healthy
+ * in-progress enrichment (Keepa enrichment runs typically finish in
+ * 1–9 minutes; the create-from-lookup route's `maxDuration` is 300s).
+ */
+export const STUCK_ENRICHING_THRESHOLD_MIN = 10;
+export const STUCK_ENRICHING_THRESHOLD_MS = STUCK_ENRICHING_THRESHOLD_MIN * 60 * 1000;
+/** States the recovery sweep is allowed to touch unconditionally.
+ * `enriching` is also recoverable but only when `updated_at` is older
+ * than `STUCK_ENRICHING_THRESHOLD_MIN` — see `RECOVERABLE_ENRICHING_STATE`
+ * and `isEnrichingRecoverable`. `deferred` requires explicit `force` from
+ * the admin route. `enriched`/`queued` are never picked up by the cron. */
 export const RECOVERABLE_STATES = ["pending", "failed"] as const;
+export const RECOVERABLE_ENRICHING_STATE = "enriching" as const;
+
+/**
+ * Phase 45 — true when an `enriching` brand has been sitting past
+ * `updated_at` longer than the threshold (i.e. the lambda almost
+ * certainly died mid-flight and nobody is going to finish it).
+ */
+export function isEnrichingRecoverable(updatedAt: string | null | undefined): boolean {
+  if (!updatedAt) return false;
+  const t = Date.parse(updatedAt);
+  if (!Number.isFinite(t)) return false;
+  return Date.now() - t >= STUCK_ENRICHING_THRESHOLD_MS;
+}
 
 export async function findStuckBrands(
   admin: SupabaseClient,
@@ -38,18 +64,48 @@ export async function findStuckBrands(
   limit: number = RECOVERY_BRAND_BATCH_LIMIT,
 ): Promise<StuckBrand[]> {
   const cutoff = new Date(Date.now() - thresholdMs).toISOString();
-  const { data, error } = await admin
-    .from("brands")
-    .select("id, user_id, name, created_at, enrichment_state")
-    .in("enrichment_state", RECOVERABLE_STATES as unknown as string[])
-    .lte("created_at", cutoff)
-    .order("created_at", { ascending: true })
-    .limit(limit);
-  if (error) {
-    console.error("[recover-brands] findStuckBrands error", error);
-    return [];
+  const enrichingCutoff = new Date(Date.now() - STUCK_ENRICHING_THRESHOLD_MS).toISOString();
+
+  const [pendingFailedRes, enrichingRes] = await Promise.all([
+    admin
+      .from("brands")
+      .select("id, user_id, name, created_at, enrichment_state")
+      .in("enrichment_state", RECOVERABLE_STATES as unknown as string[])
+      .lte("created_at", cutoff)
+      .order("created_at", { ascending: true })
+      .limit(limit),
+    // Phase 45 — also pick up brands stuck in `enriching` whose
+    // `updated_at` (last state transition) is older than the threshold.
+    admin
+      .from("brands")
+      .select("id, user_id, name, created_at, enrichment_state")
+      .eq("enrichment_state", RECOVERABLE_ENRICHING_STATE)
+      .lte("updated_at", enrichingCutoff)
+      .order("updated_at", { ascending: true })
+      .limit(limit),
+  ]);
+
+  if (pendingFailedRes.error) {
+    console.error("[recover-brands] findStuckBrands (pending|failed) error", pendingFailedRes.error);
   }
-  return (data ?? []) as StuckBrand[];
+  if (enrichingRes.error) {
+    console.error("[recover-brands] findStuckBrands (enriching) error", enrichingRes.error);
+  }
+
+  const merged = [
+    ...((pendingFailedRes.data ?? []) as StuckBrand[]),
+    ...((enrichingRes.data ?? []) as StuckBrand[]),
+  ];
+  // De-dupe by id (defensive — the two queries are disjoint by state).
+  const seen = new Set<string>();
+  const out: StuckBrand[] = [];
+  for (const b of merged) {
+    if (seen.has(b.id)) continue;
+    seen.add(b.id);
+    out.push(b);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 export interface RecoverBrandResult {
