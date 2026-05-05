@@ -12,6 +12,9 @@ const FROM_DEFAULT =
   "Rolle Consulting Group Audits <audits@rolleconsultinggroup.com>";
 const REPLY_TO = "steve@rollemanagementgroup.com";
 const COMPANY = "Rolle Consulting Group";
+// Phase 43 — Steve must be cc'd on every report email sent through the
+// client-facing audit-request flow. Hard requirement.
+export const STEVE_CC = "steve@rollemanagementgroup.com";
 const APP_BASE_URL =
   process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") ||
   "https://brand-reseller-audit.vercel.app";
@@ -28,6 +31,7 @@ interface SendInput {
   subject: string;
   html: string;
   text?: string;
+  cc?: string[];
 }
 
 function from(): string {
@@ -58,6 +62,7 @@ async function sendRaw(input: SendInput): Promise<ResendSendResult> {
         subject: input.subject,
         html: input.html,
         ...(input.text ? { text: input.text } : {}),
+        ...(input.cc && input.cc.length > 0 ? { cc: input.cc } : {}),
       }),
     });
   } catch (e) {
@@ -137,6 +142,9 @@ export interface ReportReadyEmailInput {
   firstName: string | null;
   brandName: string;
   reportToken: string;
+  /** Optional cc list. Phase 43 — public client-facing flow always
+   *  passes [STEVE_CC]. */
+  cc?: string[];
 }
 
 export function renderReportReadyEmail({
@@ -174,7 +182,13 @@ export async function sendReportReadyEmail(input: ReportReadyEmailInput): Promis
     brandName: input.brandName,
     reportToken: input.reportToken,
   });
-  return sendRaw({ to: input.to, subject: r.subject, html: r.html, text: r.text });
+  return sendRaw({
+    to: input.to,
+    subject: r.subject,
+    html: r.html,
+    text: r.text,
+    cc: input.cc && input.cc.length > 0 ? input.cc : undefined,
+  });
 }
 
 export interface BrandNotFoundEmailInput {
