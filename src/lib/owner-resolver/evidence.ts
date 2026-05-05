@@ -1,5 +1,5 @@
 /**
- * Phase 34.5 — Evidence transparency normalizer.
+ * Phase 34.5 / 34.6 — Evidence transparency normalizer.
  *
  * Boils down a raw `owner_resolution_runs` row into a small, allowlisted
  * shape the brand-page evidence panel can render without ever seeing the
@@ -7,13 +7,18 @@
  *
  * Payload shapes consumed:
  *
- * `raw_uspto_payload` — written by `src/lib/owner-resolver/uspto.ts`:
- *   - success:  { search: <usptoLookupJson>, request_url, request_method,
- *                 total_search_hits, search_note? }
- *   - failure:  { search_error, request_url, request_method }
- *   The `search` object is the USPTO `tmsearch.uspto.gov/api/lookup/`
- *   response body; the array of marks lands under one of `results /
- *   trademarks / items / records / data / hits / docs`.
+ * `raw_uspto_payload` — written by `src/lib/owner-resolver/uspto.ts`
+ * (Phase 34.6, OpenAI web-search-based):
+ *   - success:  { method: "openai_web_search", request_summary,
+ *                 marks: [{ mark, owner, serial_number, status,
+ *                 registration_date, source_url }],
+ *                 notes, sources, full_text }
+ *   - failure:  { method: "openai_web_search", request_summary,
+ *                 search_error }
+ *   For backwards compatibility we still read pre-34.6 payloads
+ *   (`{ search: <usptoLookupJson>, ... }`) by falling back to the legacy
+ *   `markIdentification / ownerInformation / serialNumber / status`
+ *   field names.
  *
  * `raw_web_search_payload` — written by
  * `src/lib/owner-resolver/web-search.ts`:
@@ -34,6 +39,9 @@ export interface UsptoMarkSummary {
   mark: string | null;
   owner: string | null;
   status: string | null;
+  // Phase 34.6 — direct citation URL for the mark (e.g. tsdr.uspto.gov,
+  // trademarks.justia.com). `null` for legacy pre-34.6 payloads.
+  sourceUrl: string | null;
 }
 
 export interface WebSearchSourceSummary {
@@ -48,7 +56,11 @@ export interface EvidenceSummary {
     resultsCount: number;
     errored: boolean;
     errorMessage: string | null;
+    // Phase 34.6 — `requestUrl` is now optional; the OpenAI web-search
+    // method exposes a `requestSummary` and `notes` line instead.
     requestUrl: string | null;
+    requestSummary: string | null;
+    notes: string | null;
     marks: UsptoMarkSummary[];
   };
   webSearch: {
@@ -139,41 +151,80 @@ function normalizeUspto(
   const resultsCount = run.uspto_results_count ?? 0;
   const payload = asObject(run.raw_uspto_payload);
   const requestUrl = payload ? asString(payload.request_url) : null;
+  const requestSummary = payload ? asString(payload.request_summary) : null;
+  const notes = payload ? asString(payload.notes) : null;
   const searchError = payload ? asString(payload.search_error) : null;
   const errored = Boolean(searchError);
 
   const marks: UsptoMarkSummary[] = [];
   if (!errored && payload) {
-    const search = asObject(payload.search) ?? payload;
-    const arr = findResultsArray(search);
-    for (const item of arr) {
-      if (marks.length >= MAX_MARKS) break;
-      const inner = asObject(item);
-      if (!inner) continue;
-      const source = asObject(inner._source) ?? inner;
-      marks.push({
-        serialNumber: pickFirstString(source, [
-          "serialNumber",
-          "serial_number",
-          "serial",
-          "sn",
-        ]),
-        mark: pickFirstString(source, [
-          "markIdentification",
-          "mark_identification",
-          "markVerbalElement",
-          "mark_text",
-          "wordmark",
-          "mark",
-        ]),
-        owner: extractOwner(source),
-        status: pickFirstString(source, [
-          "status",
-          "statusDescription",
-          "tm_status",
-          "current_status",
-        ]),
-      });
+    // Phase 34.6 — preferred shape: marks[] at the top level, each row
+    // already normalized into { mark, owner, serial_number, status,
+    // registration_date, source_url }.
+    const phase346Marks = Array.isArray(payload.marks)
+      ? (payload.marks as unknown[])
+      : null;
+    if (phase346Marks && phase346Marks.length > 0) {
+      for (const item of phase346Marks) {
+        if (marks.length >= MAX_MARKS) break;
+        const inner = asObject(item);
+        if (!inner) continue;
+        marks.push({
+          serialNumber:
+            pickFirstString(inner, ["serial_number", "serialNumber"]) ?? null,
+          mark:
+            pickFirstString(inner, [
+              "mark",
+              "markIdentification",
+              "mark_identification",
+            ]) ?? null,
+          owner:
+            pickFirstString(inner, ["owner", "ownerInformation"]) ??
+            extractOwner(inner),
+          status:
+            pickFirstString(inner, [
+              "status",
+              "registration_status",
+              "trademark_status",
+            ]) ?? null,
+          sourceUrl:
+            pickFirstString(inner, ["source_url", "url", "source"]) ?? null,
+        });
+      }
+    } else {
+      // Pre-34.6 shape: { search: <usptoLookupJson>, ... }.
+      const search = asObject(payload.search) ?? payload;
+      const arr = findResultsArray(search);
+      for (const item of arr) {
+        if (marks.length >= MAX_MARKS) break;
+        const inner = asObject(item);
+        if (!inner) continue;
+        const source = asObject(inner._source) ?? inner;
+        marks.push({
+          serialNumber: pickFirstString(source, [
+            "serialNumber",
+            "serial_number",
+            "serial",
+            "sn",
+          ]),
+          mark: pickFirstString(source, [
+            "markIdentification",
+            "mark_identification",
+            "markVerbalElement",
+            "mark_text",
+            "wordmark",
+            "mark",
+          ]),
+          owner: extractOwner(source),
+          status: pickFirstString(source, [
+            "status",
+            "statusDescription",
+            "tm_status",
+            "current_status",
+          ]),
+          sourceUrl: null,
+        });
+      }
     }
   }
 
@@ -183,6 +234,8 @@ function normalizeUspto(
     errored,
     errorMessage: searchError,
     requestUrl,
+    requestSummary,
+    notes,
     marks,
   };
 }

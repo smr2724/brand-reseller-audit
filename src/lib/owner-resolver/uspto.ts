@@ -1,60 +1,56 @@
 /**
- * Phase 34.1 / 34.4 — Official USPTO trademark adapter.
+ * Phase 34.6 — Trademark search via OpenAI web_search.
  *
- * Phase 34.4 — Replaces the Phase 34.1 POST against
- * `tmsearch.uspto.gov/api/search-database` (which now responds with
- * `405 Method Not Allowed`) with a **GET** against the public lookup
- * endpoint:
+ * USPTO's `tmsearch.uspto.gov/api/lookup/` endpoint that Phase 34.4 targeted
+ * does not exist (returns S3 404 NoSuchKey). TESS retired in November 2023
+ * and the replacement front-end is an Angular SPA on S3 with active anti-bot
+ * protection — there is no public REST replacement for name-based trademark
+ * search. `developer.uspto.gov`'s only trademark APIs are TSDR (serial-number
+ * lookup, requires API key) and Trademark Assignment Search (XML bulk dump),
+ * neither of which fits the resolver's "name → owner" path.
  *
- *   GET https://tmsearch.uspto.gov/api/lookup/
- *     ?searchText={URL-encoded mark}&searchType=mark&page=1&rows=20
+ * Replacement: a *targeted* OpenAI Responses API call with the built-in
+ * `web_search` tool, scoped to USPTO / Justia / TSDR sources, parsed into a
+ * strict JSON schema (mark, owner, status, serial, registration date,
+ * source URL). The result is the new "trademark evidence" the orchestrator
+ * already understands — same shape as before, just sourced from a focused
+ * web search instead of a dead REST endpoint.
  *
- * The lookup response embeds the registered-owner string (`ownerInformation`)
- * alongside the mark text and status, so we no longer need a second
- * TSDR round-trip per serial — one GET produces the full candidate set.
+ * The legacy USPTO field names (`markIdentification`, `ownerInformation`,
+ * `serialNumber`, `status`) are preserved on the per-mark `raw_payload`
+ * objects we emit, so the evidence panel and any downstream extractor that
+ * still reads them keeps working.
  *
- * Field mapping for each search hit:
- *   markIdentification    -> mark text
- *   ownerInformation      -> candidate_company_name
- *   status                -> trademark_status
- *   serialNumber          -> trademark_serial_number
- *   registrationNumber    -> registration number (optional)
- *   filingDate / regDate  -> registration date (optional)
+ * Soft-fails: any OpenAI / parse / network error returns a structured
+ * failure (empty candidates + error string) so the orchestrator keeps
+ * web-search results. The error is also stamped onto `raw.search_error`
+ * with the same shape Phase 34.4 used.
  *
- * Hits with status containing DEAD / ABANDON / CANCEL / EXPIRED are
- * dropped — they aren't a useful signal of who currently owns a brand.
+ * Rate-limit: shares the `openai-web-search` bucket with the broader web
+ * search adapter so a multi-brand recovery doesn't burn through quota.
  *
- * Soft-fails: any HTTP / parse error returns a structured failure
- * (empty candidates + error string) so the orchestrator keeps
- * web-search results. The error message is the actual `status statusText`
- * when the request hit the wire — no more bare "405 Method Not Allowed"
- * when the real problem is "we hit the wrong URL".
- *
- * Rate-limit: 1 in-flight call per bucket, 1.1s minimum between starts —
- * uses the shared `rate-limit` module so a multi-brand recovery doesn't
- * blast USPTO from one Vercel egress IP.
- *
- * `parseTsdrInfo` is retained so legacy unit tests that exercise the
- * TSDR JSON shape still pass; production no longer calls it.
+ * `parseTsdrInfo` and `pickLiveSerialsFromTmSearch` are retained so unit
+ * tests / scripts that exercised the TSDR / TM-Search JSON shapes still
+ * compile; production no longer calls them.
  */
 import type { RawOwnerCandidate } from "./types";
 import { rateLimit } from "./rate-limit";
 
 export interface UsptoFetchOptions {
-  /** Override the search URL — used by tests. */
-  searchUrl?: string;
-  /** Override the TSDR base URL — kept for the parseTsdrInfo helper. */
-  tsdrBaseUrl?: string;
+  /** Override the OpenAI API key — used by tests. */
+  apiKey?: string;
   /** Override the global fetch implementation — used by tests. */
   fetchImpl?: typeof fetch;
-  /** Override the per-request delay (ms) used by the rate limiter. */
-  rateLimitDelayMs?: number;
-  /** Skip the rate-limit delay entirely (used by tests). */
-  skipRateLimit?: boolean;
-  /** Disable retry-with-backoff on transient failures (used by tests). */
+  /** Skip retries on transient failures (used by tests). */
   skipRetries?: boolean;
+  /** Skip the rate-limit / shared bucket (used by tests). */
+  skipRateLimit?: boolean;
   /** Hard cap on candidates returned per search. */
   maxCandidates?: number;
+  /** Override the model — used by tests. */
+  model?: string;
+  /** Per-attempt delay (ms) used by retry/backoff. */
+  retryDelaysMs?: number[];
 }
 
 export interface UsptoSearchResult {
@@ -65,15 +61,10 @@ export interface UsptoSearchResult {
   results_count: number;
 }
 
-const TMSEARCH_URL = "https://tmsearch.uspto.gov/api/lookup/";
-const TSDR_BASE_URL = "https://tsdr.uspto.gov/status";
-const DEFAULT_RATE_LIMIT_DELAY_MS = 1100;
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const DEFAULT_MODEL = "gpt-4.1";
 const DEFAULT_MAX_CANDIDATES = 5;
-const RETRY_DELAYS_MS = [500, 1500];
-const RETRY_STATUSES = new Set<number>([403, 429, 500, 502, 503, 504]);
-
-const USER_AGENT =
-  "Mozilla/5.0 (compatible; BrandResellerAudit/1.0; +https://brand-reseller-audit.vercel.app)";
+const DEFAULT_RETRY_DELAYS_MS = [500, 1500];
 
 const LIVE_REGISTERED_STATUS_TOKENS: ReadonlyArray<string> = [
   "REGISTERED",
@@ -113,12 +104,6 @@ export function isLive(rawStatus: unknown, statusCode?: unknown): boolean {
   return false;
 }
 
-/**
- * Returns true if the status string is dead / abandoned / cancelled / expired
- * — those filings are dropped before we emit a candidate. Anything else
- * (LIVE, REGISTERED, plus pending / unknown statuses) is allowed through;
- * the caller decides whether to keep pending filings as evidence.
- */
 function isDeadStatus(rawStatus: unknown): boolean {
   if (typeof rawStatus !== "string") return false;
   const upper = rawStatus.toUpperCase();
@@ -160,208 +145,425 @@ function pickIsoDate(obj: unknown, ...keys: string[]): string | null {
 }
 
 /**
- * Phase 34.4 — Pull RawOwnerCandidates straight out of a
- * `tmsearch.uspto.gov/api/lookup/` response. Drops dead / abandoned /
- * cancelled filings and dedupes on (owner, serial). Returns at most
- * `maxCandidates` rows.
+ * Phase 34.6 — Build the natural-language query the resolver fires at
+ * OpenAI. Echoed back to the UI via `uspto_query`.
  */
-export function parseLookupResults(
-  json: unknown,
-  brandName: string,
-  maxCandidates: number,
-): { candidates: RawOwnerCandidate[]; total: number } {
-  if (!json || typeof json !== "object") return { candidates: [], total: 0 };
-  const root = json as Record<string, unknown>;
-  let arr: unknown[] = [];
-  for (const key of [
-    "results",
-    "trademarks",
-    "items",
-    "records",
-    "data",
-    "hits",
-    "docs",
-  ]) {
-    const v = root[key];
-    if (Array.isArray(v) && v.length > 0) {
-      arr = v;
-      break;
-    }
-  }
-  if (arr.length === 0 && root.hits && typeof root.hits === "object") {
-    const hitsArr = (root.hits as { hits?: unknown }).hits;
-    if (Array.isArray(hitsArr)) arr = hitsArr;
-  }
+export function buildTrademarkQuery(brandName: string): string {
+  return (
+    `Find USPTO trademark filings for the mark "${brandName}". ` +
+    "Return the registered owner name, serial number, registration status (live/dead/abandoned), " +
+    "and registration date. Prefer official sources: tsdr.uspto.gov, trademarks.justia.com, " +
+    "tmsearch.uspto.gov. Skip dead/cancelled/abandoned marks unless none are live."
+  );
+}
 
-  const target = brandName.trim().toLowerCase();
-  const candidates: RawOwnerCandidate[] = [];
-  const seen = new Set<string>();
+interface ParsedMark {
+  mark: string;
+  owner: string;
+  serial_number: string | null;
+  status: string;
+  registration_date: string | null;
+  source_url: string;
+}
 
-  for (const item of arr) {
-    if (!item || typeof item !== "object") continue;
-    let inner = item as Record<string, unknown>;
-    if (inner._source && typeof inner._source === "object") {
-      inner = inner._source as Record<string, unknown>;
-    }
-
-    // 34.4 field names per the lookup schema: markIdentification,
-    // ownerInformation, status, serialNumber. Older / alt names are
-    // accepted as fallbacks.
-    const mark =
-      pickString(
-        inner,
-        "markIdentification",
-        "mark_identification",
-        "markVerbalElement",
-        "mark_text",
-        "wordmark",
-        "mark",
-      ) ?? "";
-    const status =
-      pickString(
-        inner,
-        "status",
-        "statusDescription",
-        "tm_status",
-        "current_status",
-      ) ?? "";
-
-    if (status && isDeadStatus(status)) continue;
-    // We do NOT require `isLive` here — the lookup endpoint returns
-    // pending filings too, and a brand-new application is still a
-    // useful signal of who is claiming the mark. The dead-status check
-    // is the only hard filter.
-
-    const serial =
-      pickString(
-        inner,
-        "serialNumber",
-        "serial_number",
-        "serial",
-        "sn",
-      );
-    const ownerName = extractOwnerName(inner);
-    if (!ownerName) continue;
-
-    const dedupeKey = `${ownerName.toLowerCase()}|${(serial ?? "").toLowerCase()}`;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-
-    const registrationNumber = pickString(
-      inner,
-      "registrationNumber",
-      "registration_number",
-    );
-    const registrationDate =
-      pickIsoDate(
-        inner,
-        "registrationDate",
-        "registration_date",
-        "regDate",
-      ) ?? pickIsoDate(inner, "filingDate", "filing_date");
-    const goodsServices = pickString(
-      inner,
-      "goodsServices",
-      "goods_services_text",
-      "description",
-    );
-
-    const tsdrUrl = serial
-      ? `https://tsdr.uspto.gov/#caseNumber=${encodeURIComponent(serial)}&caseType=DEFAULT&searchType=statusSearch`
-      : null;
-
-    const matchReason = serial
-      ? registrationNumber
-        ? `USPTO trademark owner of record (Reg. ${registrationNumber}, Serial ${serial})`
-        : `USPTO trademark owner of record (Serial ${serial})`
-      : `USPTO trademark owner of record (mark="${mark}")`;
-
-    const evidencePieces: string[] = [];
-    evidencePieces.push(
-      `REGISTERED TRADEMARK OWNER (USPTO): ${ownerName}`,
-    );
-    if (registrationNumber) evidencePieces.push(`registration=${registrationNumber}`);
-    if (mark) evidencePieces.push(`mark="${mark}"`);
-    if (status) evidencePieces.push(`status=${status}`);
-    if (goodsServices) evidencePieces.push(`goods/services=${goodsServices.slice(0, 200)}`);
-    if (target && mark && mark.toLowerCase() === target) {
-      evidencePieces.push("exact_mark_match=true");
-    }
-
-    candidates.push({
-      candidate_company_name: ownerName,
-      candidate_domain: null,
-      candidate_source: "uspto",
-      evidence_text: evidencePieces.join(" | "),
-      evidence_url: tsdrUrl,
-      match_reason: matchReason,
-      trademark_serial_number: serial,
-      trademark_status: status || null,
-      trademark_registration_date: registrationDate,
-      trademark_owner_address: null,
-      goods_services_text: goodsServices,
-      raw_payload: inner,
-    });
-    if (candidates.length >= maxCandidates) break;
-  }
-
-  return { candidates, total: arr.length };
+interface ParsedSearch {
+  marks: ParsedMark[];
+  notes: string;
+  sources: { url: string; title: string | null }[];
+  full_text: string | null;
 }
 
 /**
- * `ownerInformation` in the lookup response is sometimes a string,
- * sometimes a structured object (`partyName`, `name`), sometimes an
- * array of those. We pull the first non-empty owner string we can find.
+ * Walk an OpenAI Responses API body. Returns the concatenated text of the
+ * last `message` item plus any `url_citation` annotations harvested from
+ * the same message blocks.
  */
-function extractOwnerName(inner: Record<string, unknown>): string | null {
-  const flat = pickString(inner, "ownerInformation", "owner_information", "owner", "current_owner_name", "ownerName");
-  if (flat) return flat;
-
-  const ownerObj = inner.ownerInformation;
-  if (ownerObj && typeof ownerObj === "object" && !Array.isArray(ownerObj)) {
-    const n = pickString(ownerObj, "partyName", "name", "ownerName");
-    if (n) return n;
-  }
-  if (Array.isArray(ownerObj) && ownerObj.length > 0) {
-    const first = ownerObj[0];
-    if (typeof first === "string" && first.trim().length > 0) return first.trim();
-    if (first && typeof first === "object") {
-      const n = pickString(first, "partyName", "name", "ownerName");
-      if (n) return n;
-    }
-  }
-
-  // Some payloads put owners under `owners[0]` or `parties.owners[0]`.
-  const ownersArr = Array.isArray(inner.owners) ? (inner.owners as unknown[]) : [];
-  if (ownersArr.length > 0) {
-    const first = ownersArr[0];
-    if (typeof first === "string" && first.trim().length > 0) return first.trim();
-    if (first && typeof first === "object") {
-      const n = pickString(first, "partyName", "name", "ownerName");
-      if (n) return n;
-    }
-  }
-  const parties = inner.parties as Record<string, unknown> | undefined;
-  if (parties && typeof parties === "object") {
-    const partyOwners = Array.isArray(parties.owners) ? (parties.owners as unknown[]) : [];
-    if (partyOwners.length > 0) {
-      const first = partyOwners[0];
-      if (typeof first === "string" && first.trim().length > 0) return first.trim();
-      if (first && typeof first === "object") {
-        const n = pickString(first, "partyName", "name", "ownerName");
-        if (n) return n;
+function extractMessageTextAndSources(
+  json: unknown,
+): { text: string; sources: { url: string; title: string | null }[] } {
+  const root =
+    json && typeof json === "object" && !Array.isArray(json)
+      ? (json as Record<string, unknown>)
+      : null;
+  if (!root) return { text: "", sources: [] };
+  const output = Array.isArray(root.output) ? (root.output as unknown[]) : [];
+  const chunks: string[] = [];
+  const seen = new Set<string>();
+  const sources: { url: string; title: string | null }[] = [];
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    if (obj.type !== "message") continue;
+    const content = Array.isArray(obj.content) ? (obj.content as unknown[]) : [];
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as Record<string, unknown>;
+      const text = typeof b.text === "string" ? (b.text as string) : null;
+      if (text && text.length > 0) chunks.push(text);
+      const annotations = Array.isArray(b.annotations)
+        ? (b.annotations as unknown[])
+        : [];
+      for (const ann of annotations) {
+        if (!ann || typeof ann !== "object") continue;
+        const a = ann as Record<string, unknown>;
+        if (a.type !== "url_citation") continue;
+        const url = typeof a.url === "string" ? (a.url as string) : null;
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        const title = typeof a.title === "string" ? (a.title as string) : null;
+        sources.push({ url, title });
       }
     }
   }
-  return null;
+  return { text: chunks.join("\n\n"), sources };
 }
 
 /**
- * Build a TSDR-derived RawOwnerCandidate from the trademark status JSON
- * returned by `https://tsdr.uspto.gov/status/sn{serial}/info.json`.
- *
- * Retained for tests that still exercise the TSDR shape; the production
- * search path now reads owner info directly from the lookup response.
+ * Pull a `{ marks: [...], notes: "..." }` object out of the model's text.
+ * Tolerant of fenced code blocks, leading prose, and stray whitespace.
+ */
+export function parseStrictMarksJson(
+  text: string,
+): { marks: ParsedMark[]; notes: string } | null {
+  if (!text) return null;
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1]! : text;
+  const firstBrace = candidate.indexOf("{");
+  const lastBrace = candidate.lastIndexOf("}");
+  if (firstBrace < 0 || lastBrace <= firstBrace) return null;
+  const slice = candidate.slice(firstBrace, lastBrace + 1);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(slice);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const root = parsed as Record<string, unknown>;
+  const arr = Array.isArray(root.marks) ? (root.marks as unknown[]) : [];
+  const notes =
+    typeof root.notes === "string" ? (root.notes as string) : "";
+  const marks: ParsedMark[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const mark = pickString(o, "mark", "markIdentification") ?? "";
+    const owner =
+      pickString(o, "owner", "ownerInformation", "owner_name", "company") ?? "";
+    if (!mark && !owner) continue;
+    const serial = pickString(o, "serial_number", "serialNumber", "serial");
+    const status =
+      pickString(o, "status", "registration_status", "trademark_status") ?? "";
+    const regDate = pickIsoDate(
+      o,
+      "registration_date",
+      "registrationDate",
+      "regDate",
+    );
+    const sourceUrl = pickString(o, "source_url", "url", "source") ?? "";
+    marks.push({
+      mark,
+      owner,
+      serial_number: serial,
+      status,
+      registration_date: regDate,
+      source_url: sourceUrl,
+    });
+  }
+  return { marks, notes };
+}
+
+/**
+ * Phase 34.6 — Convert a list of strict `marks[]` entries into the
+ * `RawOwnerCandidate` shape the resolver pipeline already understands.
+ * Drops dead / abandoned / cancelled rows; requires a non-empty owner.
+ */
+export function buildCandidatesFromMarks(
+  marks: ReadonlyArray<ParsedMark>,
+  brandName: string,
+  maxCandidates: number,
+): RawOwnerCandidate[] {
+  const out: RawOwnerCandidate[] = [];
+  const seen = new Set<string>();
+  const target = brandName.trim().toLowerCase();
+  for (const m of marks) {
+    if (!m.owner || !m.owner.trim()) continue;
+    if (m.status && isDeadStatus(m.status)) continue;
+
+    const serial = m.serial_number ?? null;
+    const dedupeKey = `${m.owner.toLowerCase()}|${(serial ?? "").toLowerCase()}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    const tsdrUrl =
+      serial && /^\d{6,}$/.test(serial.replace(/[^0-9]/g, ""))
+        ? `https://tsdr.uspto.gov/#caseNumber=${encodeURIComponent(serial)}&caseType=DEFAULT&searchType=statusSearch`
+        : null;
+    const evidenceUrl = tsdrUrl ?? (m.source_url || null);
+
+    const matchReason = serial
+      ? `USPTO trademark owner of record (Serial ${serial})`
+      : `USPTO trademark owner of record (mark="${m.mark || brandName}")`;
+
+    const evidencePieces: string[] = [];
+    evidencePieces.push(`REGISTERED TRADEMARK OWNER (USPTO): ${m.owner}`);
+    if (m.mark) evidencePieces.push(`mark="${m.mark}"`);
+    if (m.status) evidencePieces.push(`status=${m.status}`);
+    if (m.registration_date) {
+      evidencePieces.push(`registration_date=${m.registration_date}`);
+    }
+    if (m.source_url) evidencePieces.push(`source=${m.source_url}`);
+    if (target && m.mark && m.mark.toLowerCase() === target) {
+      evidencePieces.push("exact_mark_match=true");
+    }
+
+    out.push({
+      candidate_company_name: m.owner.trim(),
+      candidate_domain: null,
+      candidate_source: "uspto",
+      evidence_text: evidencePieces.join(" | "),
+      evidence_url: evidenceUrl,
+      match_reason: matchReason,
+      trademark_serial_number: serial,
+      trademark_status: m.status || null,
+      trademark_registration_date: m.registration_date,
+      trademark_owner_address: null,
+      goods_services_text: null,
+      // Preserve the legacy USPTO field names so downstream code that still
+      // reads `markIdentification` / `ownerInformation` / `serialNumber` /
+      // `status` keeps working without changes.
+      raw_payload: {
+        markIdentification: m.mark || null,
+        ownerInformation: m.owner,
+        serialNumber: serial,
+        status: m.status || null,
+        registrationDate: m.registration_date,
+        source_url: m.source_url || null,
+      },
+    });
+    if (out.length >= maxCandidates) break;
+  }
+  return out;
+}
+
+function isLiveLike(status: string | null | undefined): boolean {
+  if (!status) return true;
+  const upper = status.toUpperCase();
+  for (const tok of ["DEAD", "ABANDON", "CANCEL", "EXPIRED"]) {
+    if (upper.includes(tok)) return false;
+  }
+  return true;
+}
+
+interface AttemptOk {
+  ok: true;
+  json: unknown;
+}
+interface AttemptErr {
+  ok: false;
+  error: string;
+}
+
+const RETRY_STATUS_HINTS: ReadonlyArray<string> = [
+  "429",
+  "500",
+  "502",
+  "503",
+  "504",
+];
+
+async function fetchOpenAIWithRetry(
+  body: Record<string, unknown>,
+  apiKey: string,
+  fetchImpl: typeof fetch,
+  retryDelaysMs: number[],
+  skipRetries: boolean,
+): Promise<AttemptOk | AttemptErr> {
+  const attempts = skipRetries ? 1 : retryDelaysMs.length + 1;
+  let lastError = "openai web-search failed";
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      const res = await fetchImpl(OPENAI_RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(body),
+        cache: "no-store",
+      } as RequestInit);
+      if (res.ok) {
+        const json = (await res.json()) as unknown;
+        return { ok: true, json };
+      }
+      let detail = "";
+      try {
+        detail = (await res.text()).slice(0, 300);
+      } catch {
+        // ignore
+      }
+      lastError = `openai web-search ${res.status}${detail ? `: ${detail}` : ""}`;
+      const isRetryable = RETRY_STATUS_HINTS.some((s) =>
+        String(res.status).startsWith(s.charAt(0)) && lastError.includes(s),
+      ) || res.status === 429 || res.status >= 500;
+      if (!isRetryable) return { ok: false, error: lastError };
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+    }
+    const delay = retryDelaysMs[i];
+    if (delay !== undefined && i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
+/**
+ * Phase 34.6 — Search trademarks via OpenAI's `web_search` tool, scoped
+ * to USPTO / Justia / TSDR sources. Returns RawOwnerCandidates compatible
+ * with the rest of the resolver pipeline.
+ */
+export async function searchUsptoTrademarks(
+  brandName: string,
+  opts: UsptoFetchOptions = {},
+): Promise<UsptoSearchResult> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY ?? "";
+  const maxCandidates = opts.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
+  const model = opts.model ?? DEFAULT_MODEL;
+  const retryDelaysMs = opts.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
+  const query = buildTrademarkQuery(brandName);
+  const requestSummary = `trademark search for "${brandName}" via OpenAI web_search`;
+
+  if (!apiKey) {
+    return {
+      query,
+      candidates: [],
+      raw: {
+        method: "openai_web_search",
+        request_summary: requestSummary,
+        search_error: "missing OPENAI_API_KEY",
+      },
+      error: "missing OPENAI_API_KEY",
+      results_count: 0,
+    };
+  }
+
+  const promptInstructions =
+    `${query}\n\n` +
+    "Return ONLY a JSON object (no prose, no markdown fences) of the form:\n" +
+    `{
+  "marks": [
+    {
+      "mark": string,
+      "owner": string,
+      "serial_number": string | null,
+      "status": "live" | "dead" | "abandoned" | "cancelled" | "registered" | "pending" | "unknown",
+      "registration_date": string | null,
+      "source_url": string
+    }
+  ],
+  "notes": string
+}` +
+    "\n\nRules:\n" +
+    "- Always include the JSON object even if marks is empty.\n" +
+    '- registration_date must be ISO YYYY-MM-DD or null.\n' +
+    '- source_url must be one of the URLs you cited.\n' +
+    "- Skip dead / cancelled / abandoned marks unless none are live, then include them with their actual status.\n" +
+    "- notes: one short sentence summarizing what you found.\n";
+
+  const body: Record<string, unknown> = {
+    model,
+    tools: [{ type: "web_search" }],
+    tool_choice: "auto",
+    input: promptInstructions,
+  };
+
+  const doFetch = async (): Promise<UsptoSearchResult> => {
+    const attempt = await fetchOpenAIWithRetry(
+      body,
+      apiKey,
+      fetchImpl,
+      retryDelaysMs,
+      opts.skipRetries === true,
+    );
+    if (!attempt.ok) {
+      return {
+        query,
+        candidates: [],
+        raw: {
+          method: "openai_web_search",
+          request_summary: requestSummary,
+          search_error: attempt.error,
+        },
+        error: attempt.error,
+        results_count: 0,
+      };
+    }
+
+    const { text, sources } = extractMessageTextAndSources(attempt.json);
+    const parsed = parseStrictMarksJson(text);
+    if (!parsed) {
+      const note = "openai web-search returned no parseable JSON";
+      return {
+        query,
+        candidates: [],
+        raw: {
+          method: "openai_web_search",
+          request_summary: requestSummary,
+          marks: [],
+          notes: note,
+          sources,
+          full_text: text || null,
+        },
+        error: null,
+        results_count: 0,
+      };
+    }
+
+    const candidates = buildCandidatesFromMarks(
+      parsed.marks,
+      brandName,
+      maxCandidates,
+    );
+    const liveCount = parsed.marks.filter((m) => isLiveLike(m.status)).length;
+
+    return {
+      query,
+      candidates,
+      raw: {
+        method: "openai_web_search",
+        request_summary: requestSummary,
+        marks: parsed.marks,
+        notes: parsed.notes,
+        sources,
+        full_text: text || null,
+      },
+      error: null,
+      results_count: liveCount,
+    };
+  };
+
+  if (opts.skipRateLimit) {
+    return doFetch();
+  }
+  // Share the OpenAI bucket with the broader web-search adapter so the two
+  // calls don't fight each other on a multi-brand recovery.
+  return rateLimit(
+    {
+      key: "openai-web-search",
+      maxConcurrent: 3,
+      minIntervalMs: 200,
+      maxWaitMs: 60_000,
+    },
+    doFetch,
+  );
+}
+
+/**
+ * Phase 34.1 — Legacy export kept so unit tests / scripts that still
+ * exercise the TSDR JSON shape compile. Production no longer calls it.
  */
 export function parseTsdrInfo(
   json: unknown,
@@ -479,169 +681,9 @@ function formatTsdrAddress(owner: unknown): string | null {
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
-interface FetchAttemptResult {
-  res: Response | null;
-  error: string | null;
-}
-
-async function fetchWithRetry(
-  url: string,
-  init: RequestInit,
-  fetchImpl: typeof fetch,
-  skipRetries: boolean,
-): Promise<FetchAttemptResult> {
-  const attempts = skipRetries ? 1 : RETRY_DELAYS_MS.length + 1;
-  let res: Response | null = null;
-  let lastError: string | null = null;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      res = await fetchImpl(url, init);
-    } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
-      res = null;
-    }
-    if (res && res.ok) return { res, error: null };
-    if (res) {
-      lastError = `${res.status} ${res.statusText}`;
-      if (!RETRY_STATUSES.has(res.status)) return { res, error: lastError };
-    }
-    const delay = RETRY_DELAYS_MS[attempt];
-    if (delay !== undefined) {
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-  return { res, error: lastError };
-}
-
-function buildLookupUrl(baseUrl: string, brandName: string): string {
-  // Phase 34.4 — `tmsearch.uspto.gov/api/lookup/` accepts query params:
-  //   searchText, searchType=mark, page, rows. Anything else is ignored.
-  const sep = baseUrl.includes("?") ? "&" : "?";
-  const params = [
-    `searchText=${encodeURIComponent(brandName)}`,
-    "searchType=mark",
-    "page=1",
-    "rows=20",
-  ].join("&");
-  return `${baseUrl}${sep}${params}`;
-}
-
 /**
- * Search USPTO trademarks for `brandName` and return RawOwnerCandidates
- * built directly from the lookup endpoint's response. Output is capped
- * at `maxCandidates` (default 5).
- */
-export async function searchUsptoTrademarks(
-  brandName: string,
-  opts: UsptoFetchOptions = {},
-): Promise<UsptoSearchResult> {
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  const delayMs = opts.rateLimitDelayMs ?? DEFAULT_RATE_LIMIT_DELAY_MS;
-  const searchBase = opts.searchUrl ?? TMSEARCH_URL;
-  const maxCandidates = opts.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
-  const query = `tmsearch:${brandName}`;
-  // Touch the optional override so the param is unused-warning-free.
-  void opts.tsdrBaseUrl;
-  void TSDR_BASE_URL;
-
-  const doFetch = async (): Promise<UsptoSearchResult> => {
-    const url = buildLookupUrl(searchBase, brandName);
-    let searchJson: unknown = null;
-    let searchError: string | null = null;
-    try {
-      const attempt = await fetchWithRetry(
-        url,
-        {
-          method: "GET",
-          headers: {
-            Accept: "application/json",
-            "User-Agent": USER_AGENT,
-            "Accept-Language": "en-US,en;q=0.9",
-          },
-          cache: "no-store",
-        } as RequestInit,
-        fetchImpl,
-        opts.skipRetries === true,
-      );
-      if (attempt.res && attempt.res.ok) {
-        try {
-          searchJson = await attempt.res.json();
-        } catch (e) {
-          searchError = e instanceof Error ? e.message : String(e);
-        }
-      } else {
-        searchError =
-          attempt.error ??
-          (attempt.res
-            ? `${attempt.res.status} ${attempt.res.statusText}`
-            : "uspto search failed");
-      }
-    } catch (e) {
-      searchError = e instanceof Error ? e.message : String(e);
-    }
-
-    if (searchError && !searchJson) {
-      return {
-        query,
-        candidates: [],
-        raw: { search_error: searchError, request_url: url, request_method: "GET" },
-        error: `uspto tmsearch lookup: ${searchError}`,
-        results_count: 0,
-      };
-    }
-
-    const { candidates, total } = parseLookupResults(
-      searchJson,
-      brandName,
-      maxCandidates,
-    );
-
-    return {
-      query,
-      candidates,
-      raw: {
-        search: searchJson,
-        request_url: url,
-        request_method: "GET",
-        total_search_hits: total,
-        // Phase 34.4 — A successful empty result is not an error; the
-        // orchestrator falls back to web-search candidates. Surface the
-        // "no live marks found" message in the raw payload only so the
-        // log entry is clearer than `search_error: 405 Method Not Allowed`.
-        ...(candidates.length === 0
-          ? { search_note: `no live marks found for query '${brandName}'` }
-          : {}),
-      },
-      error: null,
-      results_count: candidates.length,
-    };
-  };
-
-  if (opts.skipRateLimit) {
-    return doFetch();
-  }
-
-  return rateLimit(
-    {
-      key: "uspto",
-      maxConcurrent: 1,
-      minIntervalMs: Math.max(delayMs, 1100),
-      maxWaitMs: 60_000,
-    },
-    async () => {
-      if (delayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
-      return doFetch();
-    },
-  );
-}
-
-/**
- * Phase 34.1 — Legacy export kept so callers still importing
- * `pickLiveSerialsFromTmSearch` compile. Returns up to `maxSerials`
- * LIVE serials whose mark text matches `brandName` exactly. The
- * production code path no longer uses this.
+ * Phase 34.1 — Legacy export kept so callers / tests still importing
+ * `pickLiveSerialsFromTmSearch` compile. Production no longer uses it.
  */
 export function pickLiveSerialsFromTmSearch(
   json: unknown,

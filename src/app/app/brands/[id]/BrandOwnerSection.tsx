@@ -434,6 +434,76 @@ export default function BrandOwnerSection({
     );
   }, [brand.id]);
 
+  // Phase 34.6 — Reset resolver button. Clears candidates, marks any
+  // non-terminal runs failed, and flips the brand back to `pending` so
+  // the user can rerun without manual SQL. Does NOT delete run rows;
+  // audit history is preserved.
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const onResetResolver = useCallback(async () => {
+    setResetBusy(true);
+    setResetError(null);
+    try {
+      const res = await fetch(
+        `/api/brands/${encodeURIComponent(brand.id)}/owner-resolver/reset`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+        },
+      );
+      const json = (await res.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      if (!res.ok || !json.ok) {
+        const msg =
+          typeof json.error === "string"
+            ? json.error
+            : `reset failed (${res.status})`;
+        setResetError(msg);
+        return;
+      }
+      // Optimistically clear local state and refetch so the UI returns
+      // to the pending view immediately.
+      setBrand((b) => ({
+        ...b,
+        owner_resolution_state: "pending",
+        owner_resolution_error: null,
+      }));
+      setCandidates([]);
+      setSelectedIds(new Set());
+      setCheckpointSelected(new Set());
+      setStatusMsg(null);
+      setErrorMsg(null);
+      try {
+        const refresh = await fetch(
+          `/api/owner-resolver/candidates?brand_id=${encodeURIComponent(brand.id)}`,
+          { credentials: "include", cache: "no-store" },
+        );
+        if (refresh.ok) {
+          const fresh = (await refresh.json()) as {
+            brand: BrandOwnerBrand;
+            run: BrandOwnerRun | null;
+            candidates: BrandOwnerCandidate[];
+            evidence?: EvidenceSummary | null;
+          };
+          setBrand(fresh.brand);
+          setRun(fresh.run);
+          setCandidates(fresh.candidates ?? []);
+          setEvidence(fresh.evidence ?? null);
+        }
+      } catch {
+        // ignore — the optimistic state above is already correct.
+      }
+      router.refresh();
+    } catch (e) {
+      setResetError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setResetBusy(false);
+    }
+  }, [brand.id, router]);
+
   const onTrigger = useCallback(async () => {
     optimisticToRunning();
     const result = await callApi("/api/owner-resolver/trigger", {
@@ -738,7 +808,13 @@ export default function BrandOwnerSection({
         </div>
       )}
 
-      <EvidencePanel run={run} evidence={evidence} />
+      <EvidencePanel
+        run={run}
+        evidence={evidence}
+        onReset={onResetResolver}
+        resetBusy={resetBusy}
+        resetError={resetError}
+      />
 
       {state === "pending" && (
         <PendingView triggerBusy={triggerBusy} onTrigger={onTrigger} />
@@ -1810,9 +1886,15 @@ function EnrichingApolloView({
 function EvidencePanel({
   run,
   evidence,
+  onReset,
+  resetBusy,
+  resetError,
 }: {
   run: BrandOwnerRun | null;
   evidence: EvidenceSummary | null;
+  onReset: () => void;
+  resetBusy: boolean;
+  resetError: string | null;
 }) {
   if (!run || !evidence) return null;
   const status = run.status;
@@ -1823,9 +1905,30 @@ function EvidencePanel({
       open
       className="mb-4 rounded-xl border border-slate-700/60 bg-slate-900/40 p-3"
     >
-      <summary className="cursor-pointer select-none text-xs uppercase tracking-wide text-[var(--text-muted)]">
-        Resolver evidence
+      <summary className="flex cursor-pointer select-none items-center justify-between gap-3 text-xs uppercase tracking-wide text-[var(--text-muted)]">
+        <span>Resolver evidence</span>
+        <span className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={(e) => {
+              // Prevent the surrounding <details> from toggling when the
+              // user clicks the button.
+              e.preventDefault();
+              e.stopPropagation();
+              if (!resetBusy) onReset();
+            }}
+            disabled={resetBusy}
+            className="rounded border border-slate-600/70 bg-slate-900/60 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {resetBusy ? "Resetting…" : "Reset resolver"}
+          </button>
+        </span>
       </summary>
+      {resetError && (
+        <div className="mt-2 break-all rounded bg-rose-950/40 px-2 py-1 text-[11px] text-rose-200">
+          {resetError}
+        </div>
+      )}
       <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
         <UsptoEvidenceCard uspto={evidence.uspto} />
         <WebSearchEvidenceCard webSearch={evidence.webSearch} />
@@ -1851,19 +1954,25 @@ function UsptoEvidenceCard({
 }: {
   uspto: EvidenceSummary["uspto"];
 }) {
-  const { query, resultsCount, errored, errorMessage, requestUrl, marks } = uspto;
+  const {
+    query,
+    resultsCount,
+    errored,
+    errorMessage,
+    notes,
+    marks,
+  } = uspto;
   let body: ReactNode;
   if (errored) {
-    const detail = [errorMessage, requestUrl].filter(Boolean).join(" — ");
     body = (
       <>
         <div className="flex items-center gap-2 text-sm font-semibold">
           <StatusDot tone="red" />
-          USPTO failed
+          Trademark search failed
         </div>
-        {detail && (
+        {errorMessage && (
           <div className="mt-2 break-all rounded bg-slate-950/60 p-2 font-mono text-[11px] text-rose-200">
-            {detail}
+            {errorMessage}
           </div>
         )}
         <div className="mt-2 text-xs text-[var(--text-muted)]">
@@ -1876,18 +1985,17 @@ function UsptoEvidenceCard({
       <>
         <div className="flex items-center gap-2 text-sm font-semibold">
           <StatusDot tone="yellow" />
-          USPTO returned no live marks
+          No live trademark filings found
         </div>
-        <div className="mt-2 text-xs text-[var(--text-muted)]">
-          {query ? (
-            <>
-              Query: <code className="font-mono">{query}</code>. No active
-              trademark filings matched.
-            </>
-          ) : (
-            "No active trademark filings matched."
-          )}
-        </div>
+        {query && (
+          <div className="mt-2 text-xs text-[var(--text-muted)]">
+            Query:{" "}
+            <code className="break-words font-mono text-[11px]">{query}</code>
+          </div>
+        )}
+        {notes && (
+          <div className="mt-2 text-xs text-[var(--text-muted)]">{notes}</div>
+        )}
       </>
     );
   } else {
@@ -1895,41 +2003,65 @@ function UsptoEvidenceCard({
       <>
         <div className="flex items-center gap-2 text-sm font-semibold">
           <StatusDot tone="green" />
-          USPTO found {resultsCount} mark{resultsCount === 1 ? "" : "s"}
+          Found {resultsCount} live trademark filing
+          {resultsCount === 1 ? "" : "s"}
         </div>
-        {query && (
-          <div className="mt-1 text-xs text-[var(--text-muted)]">
-            Query: <code className="font-mono">{query}</code>
-          </div>
+        {notes && (
+          <div className="mt-1 text-xs text-[var(--text-muted)]">{notes}</div>
         )}
         {marks.length > 0 && (
           <div className="mt-2 overflow-x-auto">
             <table className="w-full text-xs">
               <thead className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
                 <tr>
-                  <th className="py-1 pr-2 text-left">Serial</th>
                   <th className="py-1 pr-2 text-left">Mark</th>
                   <th className="py-1 pr-2 text-left">Owner</th>
                   <th className="py-1 pr-2 text-left">Status</th>
+                  <th className="py-1 pr-2 text-left">Serial</th>
+                  <th className="py-1 pr-2 text-left">Source</th>
                 </tr>
               </thead>
               <tbody>
-                {marks.map((m, i) => (
+                {marks.slice(0, 5).map((m, i) => (
                   <tr
                     key={`${m.serialNumber ?? "no-serial"}-${i}`}
                     className="border-t border-slate-800/60 align-top"
                   >
-                    <td className="py-1 pr-2 font-mono">
-                      {m.serialNumber ?? "—"}
-                    </td>
                     <td className="py-1 pr-2">{m.mark ?? "—"}</td>
                     <td className="py-1 pr-2">{m.owner ?? "—"}</td>
                     <td className="py-1 pr-2">{m.status ?? "—"}</td>
+                    <td className="py-1 pr-2 font-mono">
+                      {m.serialNumber ?? "—"}
+                    </td>
+                    <td className="py-1 pr-2">
+                      {m.sourceUrl ? (
+                        <a
+                          href={m.sourceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-300 hover:underline"
+                        >
+                          link
+                        </a>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+        )}
+        {query && (
+          <details className="mt-2">
+            <summary className="cursor-pointer select-none text-xs text-[var(--text-muted)]">
+              Query
+            </summary>
+            <code className="mt-1 block break-words font-mono text-[11px] text-[var(--text-muted)]">
+              {query}
+            </code>
+          </details>
         )}
       </>
     );
@@ -1937,7 +2069,7 @@ function UsptoEvidenceCard({
   return (
     <div className="rounded-xl border border-slate-700/60 bg-slate-950/30 p-3">
       <div className="mb-2 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
-        USPTO Trademark Search
+        Trademark Search (USPTO via web)
       </div>
       {body}
     </div>
