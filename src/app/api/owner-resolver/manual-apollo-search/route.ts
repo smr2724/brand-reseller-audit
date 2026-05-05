@@ -132,17 +132,16 @@ export async function POST(req: Request) {
       ? [buildManualNoMatchRow(brand_id, latestRunId, company_name)]
       : search.rows.map((r) => ({ ...r, resolution_run_id: latestRunId }));
 
-  // Phase 34.4 — Defensive upsert: if the same manual search returns
-  // duplicate (run_id, name, domain, source) tuples, drop the surplus
-  // rows instead of crashing.
-  const { data: insRows, error: insErr } = await admin
-    .from("owner_candidates")
-    .upsert(rowsToInsert, {
-      onConflict:
-        "resolution_run_id,candidate_company_name,candidate_domain,candidate_source",
-      ignoreDuplicates: true,
-    })
-    .select("id, apollo_organization_name, apollo_organization_id");
+  // Phase 34.7 — supabase-js `.upsert(..., { onConflict })` blew up
+  // with SQLSTATE 42P10 because the unique index uses expressions
+  // (lower(name), COALESCE(...)) and PostgREST's emitted ON CONFLICT
+  // target only references plain columns. Delegate to a SECURITY
+  // DEFINER function that runs the INSERT with a matching expression
+  // ON CONFLICT clause and returns the inserted rows.
+  const { data: insRows, error: insErr } = await admin.rpc(
+    "insert_owner_candidates_dedup",
+    { rows: rowsToInsert as unknown as object[] },
+  );
   if (insErr) {
     return NextResponse.json(
       { error: `insert failed: ${insErr.message}` },
