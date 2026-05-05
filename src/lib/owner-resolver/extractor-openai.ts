@@ -26,7 +26,10 @@ import { rateLimit } from "./rate-limit";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-5-mini";
 const MIN_CONFIDENCE = 0.3;
-const MAX_CANDIDATES = 3;
+// Phase 34.2 — soft cap kept high so the transparency checkpoint can show
+// every plausible candidate (the old 3-cap was a Phase-34 decision; with
+// the user-in-the-loop we want all >= MIN_CONFIDENCE).
+const MAX_CANDIDATES = 10;
 const PER_QUERY_TEXT_CHAR_LIMIT = 3000;
 const TOTAL_PROMPT_CHAR_LIMIT = 50_000;
 

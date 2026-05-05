@@ -19,7 +19,13 @@ import { waitUntil } from "@vercel/functions";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import { resolveBrandOwner } from "./resolve";
 
-const SKIP_STATES = new Set(["running", "candidates_ready", "selected"]);
+const SKIP_STATES = new Set([
+  "running",
+  "awaiting_apollo_selection",
+  "enriching_apollo",
+  "candidates_ready",
+  "selected",
+]);
 
 /**
  * Fire-and-forget. Returns immediately; resolver runs in the background

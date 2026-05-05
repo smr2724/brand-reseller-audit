@@ -10,6 +10,8 @@
 export type OwnerResolutionState =
   | "pending"
   | "running"
+  | "awaiting_apollo_selection"
+  | "enriching_apollo"
   | "candidates_ready"
   | "selected"
   | "failed"
@@ -29,7 +31,9 @@ export type OwnerCandidateSource =
   | "manual"
   | "apollo"
   | "apollo_no_match"
-  | "apollo_manual";
+  | "apollo_manual"
+  | "extractor"
+  | "extractor_manual";
 
 export type ResolvedOwnerType =
   | "manufacturer"
