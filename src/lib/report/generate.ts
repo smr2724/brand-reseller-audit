@@ -13,7 +13,35 @@ import { uploadReportPdf } from "./storage";
 import { runV2Enrichment, EnrichmentStepError, type BrandRowMin } from "./v2/enrich";
 import { assembleV2 } from "./v2/assemble";
 import { renderAuditPdfV2 } from "./v2/pdf";
+import type { SellerClassificationSnapshotEntry } from "./v2/snapshot-derive";
 import { persistBrandEconomics } from "@/lib/brand-detail/persist-economics";
+
+/**
+ * Phase 42 — Re-read `reports.seller_classifications` so the PDF
+ * renderer can branch into the same tight / opportunity / legacy
+ * layout the public web page picks. Returns null on legacy reports
+ * (column missing) or when the snapshot wasn't persisted.
+ */
+async function loadReportClassificationSnapshot(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  reportId: string,
+): Promise<SellerClassificationSnapshotEntry[] | null> {
+  if (!admin) return null;
+  try {
+    const { data, error } = await admin
+      .from("reports")
+      .select("seller_classifications")
+      .eq("id", reportId)
+      .maybeSingle();
+    if (error || !data) return null;
+    const raw = (data as { seller_classifications?: unknown })
+      .seller_classifications;
+    if (!Array.isArray(raw)) return null;
+    return raw as SellerClassificationSnapshotEntry[];
+  } catch {
+    return null;
+  }
+}
 
 const FALLBACK_CONTACT = "contact@rolleconsulting.com";
 
@@ -188,12 +216,45 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
     });
     logStep(reportId, currentStep, t);
 
-    // 4. PDF render.
+    // 4. PDF render. Phase 42 — pass the same `bundle`, `assumptions`,
+    //    and classification snapshot the web renderer reads so the PDF
+    //    branches into the matching layout (tight / legacy-diy /
+    //    opportunity) and renders identical content.
     currentStep = "render_pdf";
     t = Date.now();
+    const pdfClassificationSnapshot = input.classificationShares
+      ? null
+      : null;
+    const pdfShareCols = input.classificationShares
+      ? {
+          brand_owned: input.classificationShares.brand_owned_share_pct,
+          authorized: input.classificationShares.authorized_share_pct,
+          amazon: input.classificationShares.amazon_share_pct,
+          reseller: input.classificationShares.reseller_share_pct,
+        }
+      : null;
+    // Read back the persisted classification snapshot if present —
+    // `classificationShares` only carries the aggregate percentages, but
+    // the renderer also needs per-seller rows to bucket the dossier and
+    // top-seller bars correctly.
+    let snapshotForPdf: Awaited<
+      ReturnType<typeof loadReportClassificationSnapshot>
+    > = pdfClassificationSnapshot;
+    try {
+      snapshotForPdf = await loadReportClassificationSnapshot(admin, reportId);
+    } catch (e) {
+      console.warn(
+        "[report.generate] classification snapshot fetch for PDF failed:",
+        e,
+      );
+    }
     const buffer = await renderAuditPdfV2({
       brand: brandTyped,
       narrative: assembled.narrative,
+      bundle: enrichResult.bundle,
+      assumptions: assembled.assumptions,
+      classificationSnapshot: snapshotForPdf,
+      shareCols: pdfShareCols,
     });
     logStep(reportId, currentStep, t, { bytes: buffer.length });
 
