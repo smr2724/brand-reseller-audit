@@ -81,6 +81,8 @@ export interface BrandOwnerCandidate {
   apollo_domain?: string | null;
   apollo_employee_count?: number | null;
   apollo_total_contacts?: number | null;
+  /** Phase 38 — fallback proxy when total_contacts is null. */
+  apollo_estimated_employees?: number | null;
   apollo_hq_city?: string | null;
   apollo_hq_country?: string | null;
   apollo_industry?: string | null;
@@ -1158,7 +1160,10 @@ function ApolloCard({
             {c.apollo_total_contacts != null &&
             Number.isFinite(c.apollo_total_contacts)
               ? `${c.apollo_total_contacts.toLocaleString("en-US")} contacts`
-              : "Contacts unknown"}
+              : c.apollo_estimated_employees != null &&
+                  Number.isFinite(c.apollo_estimated_employees)
+                ? `~${c.apollo_estimated_employees.toLocaleString("en-US")} employees`
+                : "Contacts unknown"}
           </div>
         </div>
       </div>

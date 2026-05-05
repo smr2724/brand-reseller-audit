@@ -565,6 +565,24 @@ export async function enrichBrandWithKeepa(
       .eq("id", brand_id)
       .eq("user_id", user_id);
 
+    // Phase 38 — persist computeLegionEconomics output to the brand row
+    // so the brand page (and any other consumer) reads numbers from the
+    // database instead of re-deriving them at render time. Best-effort:
+    // a write failure does not fail the enrichment summary.
+    try {
+      const { persistBrandEconomics } = await import(
+        "@/lib/brand-detail/persist-economics"
+      );
+      const persisted = await persistBrandEconomics(supabase, brand_id);
+      if (!persisted.ok) {
+        console.warn(
+          `[keepa-brand] persistBrandEconomics skipped/failed for ${brand_id}: ${persisted.reason ?? "unknown"} ${persisted.error ?? ""}`,
+        );
+      }
+    } catch (e) {
+      console.warn(`[keepa-brand] persistBrandEconomics threw for ${brand_id}:`, e);
+    }
+
     if (run_id) {
       await supabase
         .from("enrichment_runs")

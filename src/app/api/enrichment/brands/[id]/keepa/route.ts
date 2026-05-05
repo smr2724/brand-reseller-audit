@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
+import { persistBrandEconomics } from "@/lib/brand-detail/persist-economics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,6 +57,23 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
       .eq("id", brand.id)
       .eq("user_id", user.id);
     if (enrichedNow) {
+      // Phase 38 — persist computeLegionEconomics output to the brand
+      // row so the brand page (and any downstream consumer) reads
+      // numbers from the database instead of re-deriving them every
+      // render. Best-effort: a write failure does not fail the
+      // enrichment response.
+      try {
+        const persisted = await persistBrandEconomics(supabase as any, brand.id);
+        if (!persisted.ok) {
+          console.warn(
+            "[api/enrichment/keepa] persistBrandEconomics skipped/failed:",
+            persisted.reason ?? "unknown",
+            persisted.error ?? "",
+          );
+        }
+      } catch (e) {
+        console.warn("[api/enrichment/keepa] persistBrandEconomics threw:", e);
+      }
       maybeTriggerOwnerResolution(brand.id);
     }
     return NextResponse.json({ ok: true, summary });

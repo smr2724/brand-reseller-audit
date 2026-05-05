@@ -90,7 +90,7 @@ export async function GET(req: Request) {
         // `raw_payload.apollo_source` (`crm` | `public`) and render the
         // "Your Apollo CRM" / "Apollo Public" badge without a new
         // migration.
-        "id, brand_id, resolution_run_id, candidate_company_name, candidate_domain, candidate_source, evidence_text, evidence_url, match_reason, trademark_serial_number, trademark_status, trademark_registration_date, trademark_owner_address, goods_services_text, heuristic_score, heuristic_label, is_selected_owner, needs_manual_review, selected_at, created_at, apollo_organization_id, apollo_organization_name, apollo_domain, apollo_employee_count, apollo_total_contacts, apollo_hq_city, apollo_hq_country, apollo_industry, extractor_confidence, extractor_reasoning, evidence_urls, is_manual_apollo, derived_from_candidate_id, apollo_search_attempted_at, raw_payload",
+        "id, brand_id, resolution_run_id, candidate_company_name, candidate_domain, candidate_source, evidence_text, evidence_url, match_reason, trademark_serial_number, trademark_status, trademark_registration_date, trademark_owner_address, goods_services_text, heuristic_score, heuristic_label, is_selected_owner, needs_manual_review, selected_at, created_at, apollo_organization_id, apollo_organization_name, apollo_domain, apollo_employee_count, apollo_total_contacts, apollo_estimated_employees, apollo_hq_city, apollo_hq_country, apollo_industry, extractor_confidence, extractor_reasoning, evidence_urls, is_manual_apollo, derived_from_candidate_id, apollo_search_attempted_at, raw_payload",
       )
       .eq("resolution_run_id", (rawRun as { id: string }).id)
       .order("apollo_total_contacts", { ascending: false, nullsFirst: false })

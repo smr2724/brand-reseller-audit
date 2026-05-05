@@ -171,6 +171,8 @@ interface PersistedExtractorRow {
   apollo_domain: null;
   apollo_employee_count: null;
   apollo_total_contacts: null;
+  /** Phase 38 — fallback proxy when contact count is unavailable. */
+  apollo_estimated_employees: null;
   apollo_hq_city: null;
   apollo_hq_country: null;
   apollo_industry: null;
@@ -207,6 +209,7 @@ function buildExtractorRow(
     apollo_domain: null,
     apollo_employee_count: null,
     apollo_total_contacts: null,
+    apollo_estimated_employees: null,
     apollo_hq_city: null,
     apollo_hq_country: null,
     apollo_industry: null,
@@ -239,6 +242,11 @@ interface PersistedApolloMatchRow {
   apollo_domain: string | null;
   apollo_employee_count: number | null;
   apollo_total_contacts: number | null;
+  /** Phase 38 — populated when `apollo_total_contacts` is null and we
+   *  have an `estimated_num_employees` from organizations/enrich. UI
+   *  renders "~N employees" instead of "Contacts unknown". Never mixed
+   *  with `apollo_total_contacts`. */
+  apollo_estimated_employees: number | null;
   apollo_hq_city: string | null;
   apollo_hq_country: string | null;
   apollo_industry: string | null;
@@ -301,6 +309,14 @@ function buildApolloRow(
     apollo_domain: org.primary_domain,
     apollo_employee_count: org.estimated_num_employees,
     apollo_total_contacts: totalContacts,
+    // Phase 38 — fallback proxy. When mixed_people/search couldn't
+    // give us a real contact count (null), surface the org-side
+    // estimated_num_employees so the UI can show "~N employees"
+    // instead of "Contacts unknown". When totalContacts is a real
+    // number we deliberately leave this null so the two values are
+    // never conflated.
+    apollo_estimated_employees:
+      totalContacts == null ? org.estimated_num_employees ?? null : null,
     apollo_hq_city: org.organization_city,
     apollo_hq_country: org.organization_country,
     apollo_industry: org.industry,

@@ -753,19 +753,28 @@ async function countContactsImpl(
   const parsed = parseTotalEntries(json);
   if (parsed == null) {
     // Successful 2xx but Apollo did not return a parseable
-    // pagination.total_entries (e.g. people: [], no pagination block).
-    // Treat that as 0 hits rather than null so the UI shows a real
-    // number; log the response shape so we can debug from Vercel.
+    // pagination.total_entries. We split this into two sub-cases:
+    //  (a) `people` is a present array — even an empty one — and a
+    //      `pagination` block exists. Apollo returned a real,
+    //      structured-empty result; report it as 0 contacts.
+    //  (b) Neither `people` nor `pagination` are present. The response
+    //      shape doesn't look like the documented contract — likely a
+    //      plan-permission soft-fail or a gateway response. Return null
+    //      so the caller can fall back to the org-side
+    //      `estimated_num_employees` proxy (Phase 38).
     const root =
       json && typeof json === "object" ? (json as Record<string, unknown>) : {};
     const peopleArr = Array.isArray(root.people) ? root.people : null;
+    const hasPagination = root.pagination != null;
+    const looksStructured = peopleArr != null && hasPagination;
     console.log(
       JSON.stringify({
         scope: "apollo.countContacts",
         organization_id: organizationId,
         status: res.status,
         warning: "missing total_entries",
-        has_pagination: root.pagination != null,
+        looks_structured: looksStructured,
+        has_pagination: hasPagination,
         pagination_keys:
           root.pagination && typeof root.pagination === "object"
             ? Object.keys(root.pagination as Record<string, unknown>)
@@ -775,7 +784,7 @@ async function countContactsImpl(
       }),
     );
     return {
-      count: peopleArr ? peopleArr.length : 0,
+      count: looksStructured ? peopleArr!.length : null,
       raw: json,
       status: res.status,
     };

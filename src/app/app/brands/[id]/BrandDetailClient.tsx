@@ -292,7 +292,10 @@ export default function BrandDetailClient({
           <Field label="12-Month Growth" v={formatNumber(brand.trailing_12_growth_pct, { decimals: 2 })} />
         </Card>
 
-        <Card title="Financial model">
+        <Card
+          title="Financial model"
+          actions={<FinancialModelRefreshButton brandId={brand.id} />}
+        >
           <FinancialModelBody
             financials={financials}
             brandId={brand.id}
@@ -989,10 +992,23 @@ function ScanBanner({
   return null;
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function Card({
+  title,
+  children,
+  actions,
+}: {
+  title: string;
+  children: React.ReactNode;
+  actions?: React.ReactNode;
+}) {
   return (
     <div className="card p-4">
-      <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-3">{title}</div>
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">
+          {title}
+        </div>
+        {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+      </div>
       {children}
     </div>
   );
@@ -1003,6 +1019,54 @@ function Field({ label, v }: { label: string; v: string }) {
     <div className="flex justify-between py-1.5 border-b border-[var(--border-soft)] last:border-0 text-sm">
       <span className="text-[var(--text-muted)]">{label}</span>
       <span className="font-medium">{v}</span>
+    </div>
+  );
+}
+
+function FinancialModelRefreshButton({ brandId }: { brandId: string }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function onRefresh() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch(
+        `/api/brands/${encodeURIComponent(brandId)}/financial-model/refresh`,
+        { method: "POST" },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg =
+          (data && typeof data === "object" && "error" in data
+            ? String((data as { error?: unknown }).error ?? "")
+            : "") ||
+          (res.status === 409
+            ? "Run Keepa enrichment first."
+            : `HTTP ${res.status}`);
+        throw new Error(msg);
+      }
+      router.refresh();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {err && <span className="text-[11px] text-red-300">{err}</span>}
+      <button
+        type="button"
+        className="btn text-xs"
+        onClick={onRefresh}
+        disabled={busy}
+        title="Re-run computeLegionEconomics from current brand inputs"
+      >
+        {busy ? "Refreshing…" : "Refresh"}
+      </button>
     </div>
   );
 }
