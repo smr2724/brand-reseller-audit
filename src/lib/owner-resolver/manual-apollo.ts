@@ -93,13 +93,15 @@ export function buildManualRow(
     apollo_organization_id: org.id,
     apollo_organization_name: org.name,
     apollo_domain: org.primary_domain,
+    // Phase 38.1 — `apollo_employee_count` is the canonical column for
+    // the org's employee size. After the organizations/enrich follow-up
+    // (Phase 38.1), `org.estimated_num_employees` is now reliably
+    // populated for any search hit. The legacy `apollo_estimated_employees`
+    // column is left null going forward; the UI badge falls through to
+    // it for older rows but new writes only land in apollo_employee_count.
     apollo_employee_count: org.estimated_num_employees,
     apollo_total_contacts: totalContacts,
-    // Phase 38 — surface estimated_num_employees as a "~N employees"
-    // proxy when mixed_people/search returned null. Never mixed with
-    // apollo_total_contacts.
-    apollo_estimated_employees:
-      totalContacts == null ? org.estimated_num_employees ?? null : null,
+    apollo_estimated_employees: null,
     apollo_hq_city: org.organization_city,
     apollo_hq_country: org.organization_country,
     apollo_industry: org.industry,

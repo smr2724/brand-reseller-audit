@@ -307,16 +307,14 @@ function buildApolloRow(
     apollo_organization_id: org.id,
     apollo_organization_name: org.name,
     apollo_domain: org.primary_domain,
+    // Phase 38.1 — apollo_employee_count is the canonical column. After
+    // the organizations/enrich follow-up the search-side payload now
+    // carries estimated_num_employees, so we can write that here without
+    // also duplicating it into apollo_estimated_employees. Older rows
+    // still render via the legacy column path in the UI badge fallback.
     apollo_employee_count: org.estimated_num_employees,
     apollo_total_contacts: totalContacts,
-    // Phase 38 — fallback proxy. When mixed_people/search couldn't
-    // give us a real contact count (null), surface the org-side
-    // estimated_num_employees so the UI can show "~N employees"
-    // instead of "Contacts unknown". When totalContacts is a real
-    // number we deliberately leave this null so the two values are
-    // never conflated.
-    apollo_estimated_employees:
-      totalContacts == null ? org.estimated_num_employees ?? null : null,
+    apollo_estimated_employees: null,
     apollo_hq_city: org.organization_city,
     apollo_hq_country: org.organization_country,
     apollo_industry: org.industry,
