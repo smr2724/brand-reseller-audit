@@ -16,8 +16,16 @@
  * "Load failed" banner can't stick around after a fetch was aborted by
  * router.refresh().
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useRouter } from "next/navigation";
+import type { EvidenceSummary } from "@/lib/owner-resolver/evidence";
 
 export interface BrandOwnerBrand {
   id: string;
@@ -148,16 +156,21 @@ export default function BrandOwnerSection({
   brand: initialBrand,
   run: initialRun,
   candidates: initialCandidates,
+  evidence: initialEvidence = null,
 }: {
   brand: BrandOwnerBrand;
   run: BrandOwnerRun | null;
   candidates: BrandOwnerCandidate[];
+  evidence?: EvidenceSummary | null;
 }) {
   const router = useRouter();
   const [brand, setBrand] = useState(initialBrand);
   const [run, setRun] = useState<BrandOwnerRun | null>(initialRun);
   const [candidates, setCandidates] =
     useState<BrandOwnerCandidate[]>(initialCandidates);
+  const [evidence, setEvidence] = useState<EvidenceSummary | null>(
+    initialEvidence,
+  );
   const [busy, setBusy] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
@@ -194,12 +207,13 @@ export default function BrandOwnerSection({
     setBrand(initialBrand);
     setRun(initialRun);
     setCandidates(initialCandidates);
+    setEvidence(initialEvidence);
     setOwnerType(initialBrand.resolved_owner_type ?? "manufacturer");
     setNotes(initialBrand.owner_resolution_notes ?? "");
     const ids = new Set<string>();
     for (const c of initialCandidates) if (c.is_selected_owner) ids.add(c.id);
     setSelectedIds(ids);
-  }, [initialBrand, initialRun, initialCandidates]);
+  }, [initialBrand, initialRun, initialCandidates, initialEvidence]);
 
   const pollCountRef = useRef(0);
 
@@ -235,11 +249,13 @@ export default function BrandOwnerSection({
           brand: BrandOwnerBrand;
           run: BrandOwnerRun | null;
           candidates: BrandOwnerCandidate[];
+          evidence?: EvidenceSummary | null;
         };
         if (cancelled) return;
         setBrand(json.brand);
         setRun(json.run);
         setCandidates(json.candidates ?? []);
+        setEvidence(json.evidence ?? null);
         const nextState = json.brand.owner_resolution_state;
         if (nextState !== "running" && nextState !== "enriching_apollo") {
           // Clear any stale "Load failed" left over from an aborted
@@ -494,10 +510,12 @@ export default function BrandOwnerSection({
         brand: BrandOwnerBrand;
         run: BrandOwnerRun | null;
         candidates: BrandOwnerCandidate[];
+        evidence?: EvidenceSummary | null;
       };
       setBrand(json.brand);
       setRun(json.run);
       setCandidates(json.candidates ?? []);
+      setEvidence(json.evidence ?? null);
     } catch {
       // soft-fail — manual search already showed its own status
     }
@@ -719,6 +737,8 @@ export default function BrandOwnerSection({
           {errorMsg}
         </div>
       )}
+
+      <EvidencePanel run={run} evidence={evidence} />
 
       {state === "pending" && (
         <PendingView triggerBusy={triggerBusy} onTrigger={onTrigger} />
@@ -1775,6 +1795,270 @@ function EnrichingApolloView({
         >
           Refresh
         </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Phase 34.5 — Resolver evidence panel. Renders side-by-side USPTO and
+ * Web Search outcome cards above the candidate flow so the user can see
+ * exactly what each upstream returned (or how it failed) before working
+ * the candidate list. Default-expanded `<details>`. Hidden entirely
+ * when there is no run yet.
+ */
+function EvidencePanel({
+  run,
+  evidence,
+}: {
+  run: BrandOwnerRun | null;
+  evidence: EvidenceSummary | null;
+}) {
+  if (!run || !evidence) return null;
+  const status = run.status;
+  if (!status || status === "pending") return null;
+
+  return (
+    <details
+      open
+      className="mb-4 rounded-xl border border-slate-700/60 bg-slate-900/40 p-3"
+    >
+      <summary className="cursor-pointer select-none text-xs uppercase tracking-wide text-[var(--text-muted)]">
+        Resolver evidence
+      </summary>
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+        <UsptoEvidenceCard uspto={evidence.uspto} />
+        <WebSearchEvidenceCard webSearch={evidence.webSearch} />
+      </div>
+    </details>
+  );
+}
+
+function StatusDot({ tone }: { tone: "green" | "yellow" | "red" }) {
+  const cls =
+    tone === "green"
+      ? "bg-emerald-500"
+      : tone === "yellow"
+        ? "bg-amber-400"
+        : "bg-rose-500";
+  return (
+    <span aria-hidden className={`inline-block h-2 w-2 rounded-full ${cls}`} />
+  );
+}
+
+function UsptoEvidenceCard({
+  uspto,
+}: {
+  uspto: EvidenceSummary["uspto"];
+}) {
+  const { query, resultsCount, errored, errorMessage, requestUrl, marks } = uspto;
+  let body: ReactNode;
+  if (errored) {
+    const detail = [errorMessage, requestUrl].filter(Boolean).join(" — ");
+    body = (
+      <>
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <StatusDot tone="red" />
+          USPTO failed
+        </div>
+        {detail && (
+          <div className="mt-2 break-all rounded bg-slate-950/60 p-2 font-mono text-[11px] text-rose-200">
+            {detail}
+          </div>
+        )}
+        <div className="mt-2 text-xs text-[var(--text-muted)]">
+          Resolver fell back to web search alone for this run.
+        </div>
+      </>
+    );
+  } else if (resultsCount === 0) {
+    body = (
+      <>
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <StatusDot tone="yellow" />
+          USPTO returned no live marks
+        </div>
+        <div className="mt-2 text-xs text-[var(--text-muted)]">
+          {query ? (
+            <>
+              Query: <code className="font-mono">{query}</code>. No active
+              trademark filings matched.
+            </>
+          ) : (
+            "No active trademark filings matched."
+          )}
+        </div>
+      </>
+    );
+  } else {
+    body = (
+      <>
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <StatusDot tone="green" />
+          USPTO found {resultsCount} mark{resultsCount === 1 ? "" : "s"}
+        </div>
+        {query && (
+          <div className="mt-1 text-xs text-[var(--text-muted)]">
+            Query: <code className="font-mono">{query}</code>
+          </div>
+        )}
+        {marks.length > 0 && (
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+                <tr>
+                  <th className="py-1 pr-2 text-left">Serial</th>
+                  <th className="py-1 pr-2 text-left">Mark</th>
+                  <th className="py-1 pr-2 text-left">Owner</th>
+                  <th className="py-1 pr-2 text-left">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {marks.map((m, i) => (
+                  <tr
+                    key={`${m.serialNumber ?? "no-serial"}-${i}`}
+                    className="border-t border-slate-800/60 align-top"
+                  >
+                    <td className="py-1 pr-2 font-mono">
+                      {m.serialNumber ?? "—"}
+                    </td>
+                    <td className="py-1 pr-2">{m.mark ?? "—"}</td>
+                    <td className="py-1 pr-2">{m.owner ?? "—"}</td>
+                    <td className="py-1 pr-2">{m.status ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </>
+    );
+  }
+  return (
+    <div className="rounded-xl border border-slate-700/60 bg-slate-950/30 p-3">
+      <div className="mb-2 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+        USPTO Trademark Search
+      </div>
+      {body}
+    </div>
+  );
+}
+
+function WebSearchEvidenceCard({
+  webSearch,
+}: {
+  webSearch: EvidenceSummary["webSearch"];
+}) {
+  const {
+    queries,
+    resultsCount,
+    errored,
+    errorMessage,
+    sources,
+    fullText,
+    fullTextTruncated,
+  } = webSearch;
+  let header: ReactNode;
+  if (errored) {
+    header = (
+      <>
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <StatusDot tone="red" />
+          Web search failed
+        </div>
+        {errorMessage && (
+          <div className="mt-2 break-all rounded bg-slate-950/60 p-2 font-mono text-[11px] text-rose-200">
+            {errorMessage}
+          </div>
+        )}
+      </>
+    );
+  } else if (resultsCount === 0) {
+    header = (
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        <StatusDot tone="yellow" />
+        No web sources returned
+      </div>
+    );
+  } else {
+    header = (
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        <StatusDot tone="green" />
+        Web search returned {resultsCount} source
+        {resultsCount === 1 ? "" : "s"}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-700/60 bg-slate-950/30 p-3">
+      <div className="mb-2 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+        Web Search (OpenAI)
+      </div>
+      {header}
+
+      {queries.length > 0 && (
+        <details className="mt-2">
+          <summary className="cursor-pointer select-none text-xs text-[var(--text-muted)]">
+            Queries used ({queries.length})
+          </summary>
+          <ul className="mt-1 list-disc pl-5 text-xs text-[var(--text-muted)]">
+            {queries.map((q, i) => (
+              <li key={i} className="break-all font-mono">
+                {q}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {sources.length > 0 && (
+        <ul className="mt-2 space-y-2">
+          {sources.map((s, i) => (
+            <li key={`${s.url}-${i}`} className="text-xs">
+              <div className="flex items-start gap-2">
+                <span
+                  aria-hidden
+                  className="mt-1 inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full bg-slate-500"
+                />
+                <div className="min-w-0">
+                  <a
+                    href={s.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-medium text-blue-300 hover:underline"
+                  >
+                    {s.title ?? s.url}
+                  </a>
+                  <div className="truncate font-mono text-[10px] text-[var(--text-muted)]">
+                    {s.url}
+                  </div>
+                  {s.snippet && (
+                    <div className="mt-0.5 text-[var(--text-muted)]">
+                      {s.snippet}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {fullText && (
+        <details className="mt-3">
+          <summary className="cursor-pointer select-none text-xs text-[var(--text-muted)]">
+            Show full extracted text
+          </summary>
+          <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-950/60 p-2 font-mono text-[11px] text-slate-200">
+            {fullText}
+          </pre>
+          {fullTextTruncated && (
+            <div className="mt-1 text-[10px] text-[var(--text-muted)]">
+              Truncated to first 2000 characters.
+            </div>
+          )}
+        </details>
       )}
     </div>
   );

@@ -10,6 +10,7 @@
 import { NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import { authorizeOwnerResolverRequest } from "@/lib/owner-resolver/auth";
+import { normalizeRunEvidence } from "@/lib/owner-resolver/evidence";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,18 +52,37 @@ export async function GET(req: Request) {
     );
   }
 
+  // Phase 34.5 — also pull the raw_uspto_payload / raw_web_search_payload
+  // so the evidence panel can be rendered without a second round-trip.
+  // We immediately normalize and strip these on the way out — never echo
+  // raw provider JSON to the client.
   const { data: runs } = await admin
     .from("owner_resolution_runs")
     .select(
-      "id, brand_id, triggered_by, started_at, completed_at, status, error_message, uspto_query, uspto_results_count, web_search_queries, web_search_results_count, candidates_inserted",
+      "id, brand_id, triggered_by, started_at, completed_at, status, error_message, uspto_query, uspto_results_count, raw_uspto_payload, web_search_queries, web_search_results_count, raw_web_search_payload, candidates_inserted",
     )
     .eq("brand_id", brandId)
     .order("started_at", { ascending: false })
     .limit(1);
-  const latestRun = (runs ?? [])[0] ?? null;
+  const rawRun = (runs ?? [])[0] ?? null;
+  const evidence = rawRun
+    ? normalizeRunEvidence(
+        rawRun as unknown as Parameters<typeof normalizeRunEvidence>[0],
+      )
+    : null;
+  // Strip raw payloads from the run we hand to the client.
+  const latestRun = rawRun
+    ? (() => {
+        const r = rawRun as Record<string, unknown>;
+        const { raw_uspto_payload: _u, raw_web_search_payload: _w, ...rest } = r;
+        void _u;
+        void _w;
+        return rest;
+      })()
+    : null;
 
   let candidates: unknown[] = [];
-  if (latestRun) {
+  if (rawRun) {
     const { data: cands } = await admin
       .from("owner_candidates")
       .select(
@@ -72,7 +92,7 @@ export async function GET(req: Request) {
         // migration.
         "id, brand_id, resolution_run_id, candidate_company_name, candidate_domain, candidate_source, evidence_text, evidence_url, match_reason, trademark_serial_number, trademark_status, trademark_registration_date, trademark_owner_address, goods_services_text, heuristic_score, heuristic_label, is_selected_owner, needs_manual_review, selected_at, created_at, apollo_organization_id, apollo_organization_name, apollo_domain, apollo_employee_count, apollo_total_contacts, apollo_hq_city, apollo_hq_country, apollo_industry, extractor_confidence, extractor_reasoning, evidence_urls, is_manual_apollo, derived_from_candidate_id, apollo_search_attempted_at, raw_payload",
       )
-      .eq("resolution_run_id", (latestRun as { id: string }).id)
+      .eq("resolution_run_id", (rawRun as { id: string }).id)
       .order("apollo_total_contacts", { ascending: false, nullsFirst: false })
       .order("extractor_confidence", { ascending: false, nullsFirst: false })
       .order("created_at", { ascending: false });
@@ -83,5 +103,6 @@ export async function GET(req: Request) {
     brand,
     run: latestRun,
     candidates,
+    evidence,
   });
 }
