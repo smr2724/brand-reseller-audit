@@ -94,4 +94,55 @@ export async function rateLimit<T>(
 /** Test-only: clear all bucket state. */
 export function __resetRateLimitBuckets(): void {
   buckets.clear();
+  slidingBuckets.clear();
+}
+
+/**
+ * Phase 34.1 — Sliding-window per-key counter for user-facing rate limits
+ * (e.g. "5 manual Apollo searches per brand per 10 min"). In-process; per
+ * Vercel function instance, which is fine for the manual override path
+ * since it's a low-volume user action.
+ *
+ * Returns `{ allowed, retry_after_ms }`. When `allowed` is false, the
+ * caller should reject with HTTP 429 and surface `retry_after_ms` so the
+ * UI can show "try again in N seconds".
+ */
+interface SlidingBucket {
+  hits: number[]; // ms timestamps of recent allowed calls
+}
+const slidingBuckets: Map<string, SlidingBucket> = new Map();
+
+export interface SlidingWindowDecision {
+  allowed: boolean;
+  retry_after_ms: number;
+  remaining: number;
+}
+
+export function checkSlidingWindow(
+  key: string,
+  limit: number,
+  windowMs: number,
+  now: number = Date.now(),
+): SlidingWindowDecision {
+  let b = slidingBuckets.get(key);
+  if (!b) {
+    b = { hits: [] };
+    slidingBuckets.set(key, b);
+  }
+  const cutoff = now - windowMs;
+  // Drop expired entries.
+  while (b.hits.length > 0 && b.hits[0]! < cutoff) {
+    b.hits.shift();
+  }
+  if (b.hits.length >= limit) {
+    const oldest = b.hits[0]!;
+    const retryAfterMs = Math.max(0, oldest + windowMs - now);
+    return { allowed: false, retry_after_ms: retryAfterMs, remaining: 0 };
+  }
+  b.hits.push(now);
+  return {
+    allowed: true,
+    retry_after_ms: 0,
+    remaining: Math.max(0, limit - b.hits.length),
+  };
 }

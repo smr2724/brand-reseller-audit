@@ -24,18 +24,21 @@ import { scoreCandidates } from "./heuristic-scoring";
 import {
   extractOwnerCandidates,
   buildExtractorHitsFromCandidates,
+  buildUsptoEvidence,
   type ExtractedCandidate,
 } from "./extractor-openai";
 import {
   createApolloClient,
   type ApolloClient,
   type ApolloOrganization,
+  type ApolloSearchTier,
 } from "./apollo-client";
 import type {
   BrandContext,
   OwnerResolutionTrigger,
   RawOwnerCandidate,
 } from "./types";
+import type { PerQueryAnswer } from "./web-search-types";
 
 export interface ResolveBrandOwnerOptions {
   triggered_by: OwnerResolutionTrigger;
@@ -173,7 +176,9 @@ function buildApolloRow(
   extracted: ExtractedCandidate,
   org: ApolloOrganization,
   totalContacts: number | null,
+  tierUsed: ApolloSearchTier | null,
 ): PersistedApolloMatchRow {
+  const tierSuffix = tierUsed ? ` (tier=${tierUsed})` : "";
   return {
     brand_id: brandId,
     resolution_run_id: runId,
@@ -182,7 +187,7 @@ function buildApolloRow(
     candidate_source: "apollo",
     evidence_text: extracted.reasoning || null,
     evidence_url: extracted.evidence_urls[0] ?? null,
-    match_reason: `Apollo match for "${extracted.canonical_company_name}"`,
+    match_reason: `Apollo match for "${extracted.canonical_company_name}"${tierSuffix}`,
     trademark_serial_number: null,
     trademark_status: null,
     trademark_registration_date: null,
@@ -280,10 +285,11 @@ export async function runApolloPipeline(
   }
 
   for (const ext of extracted) {
-    const orgs = await apollo.searchOrganizations(
+    const tiered = await apollo.searchOrganizationsTiered(
       ext.canonical_company_name,
       ext.domain,
     );
+    const orgs = tiered.orgs;
     if (orgs.length === 0) {
       rows.push(buildNoMatchRow(brandId, runId, ext));
       noMatchCount += 1;
@@ -294,7 +300,9 @@ export async function runApolloPipeline(
       if (seenApolloIds.has(org.id)) continue;
       seenApolloIds.add(org.id);
       const total = await apollo.countContacts(org.id);
-      rows.push(buildApolloRow(brandId, runId, ext, org, total));
+      rows.push(
+        buildApolloRow(brandId, runId, ext, org, total, tiered.tier_used),
+      );
       matchCount += 1;
       appendedAnyForExt = true;
     }
@@ -425,13 +433,17 @@ export async function resolveBrandOwner(
     );
   }
 
-  // 5. Run extractor over the merged raw hits.
+  // 5. Run extractor over the merged raw hits + USPTO TSDR evidence +
+  // per-query answer prose.
   const extractorHits = buildExtractorHitsFromCandidates(merged);
+  const usptoEvidence = buildUsptoEvidence(usptoResult.candidates);
   const extractorResult = await safeExtractor(
     brandContext.brand_name,
     brandContext.category,
     extractorHits,
     extractorFn,
+    usptoEvidence,
+    webResult.per_query_answers ?? [],
   );
 
   // 6. Apollo pipeline: org search + people-count for each extracted name.
@@ -549,6 +561,7 @@ interface WebSafeResult {
   queries: string[];
   results_count: number;
   error: string | null;
+  per_query_answers: PerQueryAnswer[];
 }
 
 interface ExtractorSafeResult {
@@ -593,6 +606,7 @@ async function safeWebSearch(
       queries: r.queries,
       results_count: r.results_count,
       error: r.error,
+      per_query_answers: r.per_query_answers ?? [],
     };
   } catch (e) {
     return {
@@ -601,6 +615,7 @@ async function safeWebSearch(
       queries: [],
       results_count: 0,
       error: e instanceof Error ? e.message : String(e),
+      per_query_answers: [],
     };
   }
 }
@@ -610,9 +625,11 @@ async function safeExtractor(
   category: string | null,
   hits: Parameters<typeof extractOwnerCandidates>[2],
   fn: typeof extractOwnerCandidates,
+  usptoEvidence: Parameters<typeof extractOwnerCandidates>[4],
+  perQueryAnswers: Parameters<typeof extractOwnerCandidates>[5],
 ): Promise<ExtractorSafeResult> {
   try {
-    const r = await fn(brandName, category, hits);
+    const r = await fn(brandName, category, hits, {}, usptoEvidence, perQueryAnswers);
     return {
       candidates: r.candidates,
       raw: r.raw,

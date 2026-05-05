@@ -28,7 +28,8 @@ export type OwnerCandidateSource =
   | "seller_name_heuristic"
   | "manual"
   | "apollo"
-  | "apollo_no_match";
+  | "apollo_no_match"
+  | "apollo_manual";
 
 export type ResolvedOwnerType =
   | "manufacturer"
