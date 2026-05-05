@@ -30,8 +30,10 @@ export type OwnerCandidateSource =
   | "seller_name_heuristic"
   | "manual"
   | "apollo"
+  | "apollo_crm"
   | "apollo_no_match"
   | "apollo_manual"
+  | "apollo_manual_crm"
   | "extractor"
   | "extractor_manual";
 
