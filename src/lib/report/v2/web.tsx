@@ -25,6 +25,7 @@ import type {
 } from "./types";
 import { DEFAULT_ASSUMPTIONS } from "./types";
 import { LegionMathSection } from "./LegionMathSection";
+import { computeBenchmarkEconomics } from "@/lib/math/legion-economics";
 import {
   confidenceForBusinessValue,
   confidenceForProfitRecapture,
@@ -34,7 +35,6 @@ import {
   lookupClassification,
   type ConfidenceLabel,
   type DerivedSnapshot,
-  type EffectiveClassification,
   type SellerClassificationSnapshotEntry,
 } from "./snapshot-derive";
 
@@ -73,6 +73,18 @@ export interface PublicReportV2Props {
 const STRATEGY_CALL_MAILTO_SUBJECT = "Amazon%20opportunity%20call";
 const STEVE_EMAIL = "steve@rollemanagementgroup.com";
 
+/**
+ * Phase 41a — three rendering modes:
+ *   - "tight"        : new short / tight-channel benchmark layout.
+ *                      Triggered when the persisted classification
+ *                      snapshot meets the TIGHT_CHANNEL_THRESHOLDS.
+ *   - "legacy-diy"   : older diy_fit reports without a classification
+ *                      snapshot. Kept for backward compatibility with
+ *                      reports generated before Phase 41a.
+ *   - "opportunity"  : the full executive long layout (Phase 40).
+ */
+type ReportLayoutMode = "tight" | "legacy-diy" | "opportunity";
+
 function strategyCallHref(narrative: NarrativeV2, brandName: string): string {
   const calendly = narrative.cta?.primary_cta_url;
   if (calendly) return calendly;
@@ -92,10 +104,6 @@ export function PublicReportV2({
 }: PublicReportV2Props) {
   const callHref = strategyCallHref(narrative, brand.name);
 
-  // Phase 24 — Report mode controls which sections render. Older reports
-  // omit `report_mode`; treat as the default high_fit pitch.
-  const isDiy = narrative.report_mode === "diy_fit";
-
   // Phase 40 — Derive the classification-aware snapshot view.
   // Falls back to bundle.keepa.brand_controlled_pct when neither the
   // snapshot nor share_pct cols are populated (legacy reports).
@@ -112,6 +120,21 @@ export function PublicReportV2({
       narrative.brand_controlled_pct ??
       null,
   });
+
+  // Phase 41a — short / tight-channel layout. Triggered when the
+  // persisted classification snapshot shows reseller share < 5% AND
+  // brand-owned + authorized share >= 90%. `derived.is_tight_channel`
+  // already requires `has_snapshot`, so legacy reports without a
+  // classification snapshot fall through to the long opportunity layout
+  // (or the legacy `diy_fit` rendering, if present).
+  const isTightShort = derived.is_tight_channel;
+
+  // Phase 24 — legacy diy_fit mode. Older reports without a
+  // classification snapshot may still be tagged `diy_fit` by
+  // `decideReportMode`; we keep the legacy DIY rendering path for them
+  // so existing public URLs render unchanged.
+  const isLegacyDiy =
+    !isTightShort && narrative.report_mode === "diy_fit";
 
   // Pull the seed values for the editable math input panel out of
   // narrative_json + the persisted ReportAssumptions row. Anything
@@ -143,15 +166,100 @@ export function PublicReportV2({
   const confProfit = confidenceForProfitRecapture(derived, revenueBadge);
   const confValue = confidenceForBusinessValue();
 
+  // Phase 41a — benchmark profit / business value for the short layout.
+  // Uses the same fixed margin (0.20) and EBITDA multiple (7) as the
+  // long layout's recapture math, but applied to total revenue rather
+  // than the recoverable slice — there is no recapture story for a
+  // tight-channel brand, but the benchmark is still useful.
+  const revenueValue =
+    typeof revenueLine?.value === "number" ? revenueLine.value : null;
+  const benchmark =
+    isTightShort && revenueValue != null
+      ? computeBenchmarkEconomics({
+          revenue: revenueValue,
+          current_profit_margin_pct: a.current_profit_margin_pct,
+          ebitda_multiple: a.ebitda_multiple,
+        })
+      : null;
+
   return (
     <div className="rv2">
       <V2Styles />
-      <Header brand={brand} pdfUrl={pdfUrl} narrative={narrative} isDiy={isDiy} />
-      <SideNav isDiy={isDiy} />
+      <Header
+        brand={brand}
+        pdfUrl={pdfUrl}
+        narrative={narrative}
+        mode={isTightShort ? "tight" : isLegacyDiy ? "legacy-diy" : "opportunity"}
+      />
+      <SideNav mode={isTightShort ? "tight" : isLegacyDiy ? "legacy-diy" : "opportunity"} />
 
       <main className="rv2-main">
-        {isDiy ? (
-          <SectionDiyCover narrative={narrative} brand={brand} />
+        {isTightShort ? (
+          <>
+            {/* 1. Hero — revenue-led, benchmark framing */}
+            <SectionTightHero
+              narrative={narrative}
+              brand={brand}
+              callHref={callHref}
+              revenue={revenueValue}
+              benchmark={benchmark}
+              derived={derived}
+              ebitdaMultiple={a.ebitda_multiple}
+              currentMarginPct={a.current_profit_margin_pct}
+              confRevenue={confRevenue}
+              confSellerControl={confSellerControl}
+            />
+            {/* 2. Three-card snapshot row (revenue · profit · business value) */}
+            <SectionTightBenchmarkCards
+              revenue={revenueValue}
+              benchmark={benchmark}
+              ebitdaMultiple={a.ebitda_multiple}
+              currentMarginPct={a.current_profit_margin_pct}
+              confRevenue={confRevenue}
+            />
+            {/* 3. Buy-box ownership 4-bucket bar */}
+            <SectionTightBuyBox
+              derived={derived}
+              bundle={bundle}
+              confSellerControl={confSellerControl}
+            />
+            {/* 4. Brand-controlled positive sub-heading */}
+            <SectionTightBrandControlled
+              narrative={narrative}
+              derived={derived}
+            />
+            {/* 5. Top products (capped at 5 in short mode) */}
+            <SectionTopProducts narrative={narrative} maxCards={5} />
+            {/* 6. Residual reseller activity (small table) */}
+            <SectionTightResidualResellers
+              narrative={narrative}
+              derived={derived}
+            />
+            {/* 7. Three concrete steps to seal the leak yourself */}
+            <SectionDiySteps narrative={narrative} brand={brand} />
+            {/* 8. Soft CTA */}
+            <SectionDiyFooterCta
+              narrative={narrative}
+              brand={brand}
+              pdfUrl={pdfUrl}
+              callHref={callHref}
+            />
+            {/* 9. Methodology Appendix */}
+            <SectionMethodology narrative={narrative} brand={brand} />
+            {/* 10. Disclaimer */}
+            <SectionDisclaimer />
+          </>
+        ) : isLegacyDiy ? (
+          <>
+            <SectionDiyCover narrative={narrative} brand={brand} />
+            <SectionResellerReality narrative={narrative} bundle={bundle} derived={derived} />
+            <SectionResellerDossier narrative={narrative} derived={derived} />
+            <SectionTopProducts narrative={narrative} />
+            <SectionDiySteps narrative={narrative} brand={brand} />
+            <SectionDiyFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
+            <SectionMethodology narrative={narrative} brand={brand} />
+            <SectionDisclaimer />
+          </>
         ) : (
           <>
             {/* 1. Hero / Executive Punch */}
@@ -181,16 +289,9 @@ export function PublicReportV2({
             />
             {/* 4. Customer Experience Problem */}
             <SectionCustomerExperience brand={brand} />
-          </>
-        )}
-        {/* 6. Evidence — top products (kept under reseller reality and CX) */}
-        {!isDiy && <SectionResellerReality narrative={narrative} bundle={bundle} derived={derived} />}
-        {!isDiy && <SectionResellerDossier narrative={narrative} derived={derived} />}
-        <SectionTopProducts narrative={narrative} />
-        {isDiy ? (
-          <SectionDiySteps narrative={narrative} />
-        ) : (
-          <>
+            <SectionResellerReality narrative={narrative} bundle={bundle} derived={derived} />
+            <SectionResellerDossier narrative={narrative} derived={derived} />
+            <SectionTopProducts narrative={narrative} />
             {/* 5. Financial Opportunity (line-by-line bridge) */}
             <LegionMathSection
               reportToken={reportToken}
@@ -215,17 +316,13 @@ export function PublicReportV2({
             <SectionPlan narrative={narrative} />
             {/* 9. Why Steve / RMG */}
             <SectionWhySteveRolle />
+            <SectionFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
+            {/* 10. Methodology Appendix (collapsible, low) */}
+            <SectionMethodology narrative={narrative} brand={brand} />
+            {/* 11. Disclaimer */}
+            <SectionDisclaimer />
           </>
         )}
-        {isDiy ? (
-          <SectionDiyFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
-        ) : (
-          <SectionFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
-        )}
-        {/* 10. Methodology Appendix (collapsible, low) */}
-        <SectionMethodology narrative={narrative} brand={brand} />
-        {/* 11. Disclaimer */}
-        <SectionDisclaimer />
       </main>
 
       <footer className="rv2-footer">
@@ -254,18 +351,19 @@ function Header({
   brand,
   pdfUrl,
   narrative,
-  isDiy,
+  mode,
 }: {
   brand: PublicReportV2Brand;
   pdfUrl: string | null;
   narrative: NarrativeV2;
-  isDiy?: boolean;
+  mode: ReportLayoutMode;
 }) {
-  // DIY mode keeps the same header chrome but reframes the subtitle —
-  // "Channel Ownership Recommendations" lands warmer than "Audit" when
-  // the report is congratulating the brand on already running a tight
-  // channel.
-  const subtitle = isDiy
+  // Tight / legacy DIY modes keep the same header chrome but reframe
+  // the subtitle — "Channel Ownership Recommendations" lands warmer
+  // than "Audit" when the report is congratulating the brand on already
+  // running a tight channel.
+  const useDiyChrome = mode === "tight" || mode === "legacy-diy";
+  const subtitle = useDiyChrome
     ? `Channel Ownership Recommendations · ${formatShortDate(narrative.generated_at)}`
     : `Channel Ownership Audit · ${formatShortDate(narrative.generated_at)}`;
   return (
@@ -295,32 +393,45 @@ function Header({
 // Side nav (anchors)
 // ====================================================================
 
-function SideNav({ isDiy }: { isDiy?: boolean }) {
-  const items: [string, string][] = isDiy
-    ? [
-        ["s-cover", "The good news"],
-        ["s-methodology", "Audit scope"],
-        ["s-reseller-reality", "Reseller reality"],
-        ["s-dossier", "Reseller dossier"],
-        ["s-products", "Top products"],
-        ["s-diy", "3 steps to wrap this up"],
-        ["s-cta", "Want help later?"],
-      ]
-    : [
-        ["s-cover", "Executive punch"],
-        ["s-summary", "Executive summary"],
-        ["s-channel-control", "Channel control"],
-        ["s-cx", "Customer experience"],
-        ["s-reseller-reality", "Reseller reality"],
-        ["s-dossier", "Reseller dossier"],
-        ["s-products", "Top products"],
-        ["s-math", "Financial opportunity"],
-        ["s-transition", "Safe transition"],
-        ["s-plan", "Five-step framework"],
-        ["s-why", "Why Steve / RMG"],
-        ["s-cta", "Recommended next step"],
-        ["s-methodology", "Methodology appendix"],
-      ];
+function SideNav({ mode }: { mode: ReportLayoutMode }) {
+  const items: [string, string][] =
+    mode === "tight"
+      ? [
+          ["s-cover", "The picture"],
+          ["s-benchmark", "Benchmark snapshot"],
+          ["s-buybox", "Buy-box ownership"],
+          ["s-brand-controlled", "Sellers you control"],
+          ["s-products", "Top products"],
+          ["s-residual", "Residual seller activity"],
+          ["s-diy", "3 steps to wrap this up"],
+          ["s-cta", "Want help later?"],
+          ["s-methodology", "Methodology"],
+        ]
+      : mode === "legacy-diy"
+        ? [
+            ["s-cover", "The good news"],
+            ["s-methodology", "Audit scope"],
+            ["s-reseller-reality", "Reseller reality"],
+            ["s-dossier", "Reseller dossier"],
+            ["s-products", "Top products"],
+            ["s-diy", "3 steps to wrap this up"],
+            ["s-cta", "Want help later?"],
+          ]
+        : [
+            ["s-cover", "Executive punch"],
+            ["s-summary", "Executive summary"],
+            ["s-channel-control", "Channel control"],
+            ["s-cx", "Customer experience"],
+            ["s-reseller-reality", "Reseller reality"],
+            ["s-dossier", "Reseller dossier"],
+            ["s-products", "Top products"],
+            ["s-math", "Financial opportunity"],
+            ["s-transition", "Safe transition"],
+            ["s-plan", "Five-step framework"],
+            ["s-why", "Why Steve / RMG"],
+            ["s-cta", "Recommended next step"],
+            ["s-methodology", "Methodology appendix"],
+          ];
   return (
     <nav className="rv2-sidenav" aria-label="Sections">
       <ul>
@@ -1149,14 +1260,22 @@ function SectionResellerDossier({
 // Section 4 — Top Products & Listing Health (per-ASIN economics)
 // ====================================================================
 
-function SectionTopProducts({ narrative }: { narrative: NarrativeV2 }) {
+function SectionTopProducts({
+  narrative,
+  maxCards = 10,
+}: {
+  narrative: NarrativeV2;
+  /** Phase 41a — short layout caps at 5 to keep the benchmark report
+   *  scannable. Long layout keeps the existing 10-card limit. */
+  maxCards?: number;
+}) {
   const cx = narrative.cx_audit;
-  // Cards are sorted by revenue desc and capped at 10. Older
+  // Cards are sorted by revenue desc and capped per `maxCards`. Older
   // narrative_json may have only 3 — we keep what's there.
   const sorted = cx.asin_scores
     .slice()
     .sort((a, b) => (b.ttm_revenue ?? -1) - (a.ttm_revenue ?? -1))
-    .slice(0, 10);
+    .slice(0, maxCards);
   // Phase 31 — fall back on per-card group size when the narrative
   // doesn't carry the dedicated `variation_disclosure` flag (legacy
   // narrative_json from before this phase shipped). Either signal
@@ -1516,8 +1635,23 @@ function SectionDiyCover({
   );
 }
 
-function SectionDiySteps({ narrative }: { narrative: NarrativeV2 }) {
-  const steps: DiyStep[] = narrative.diy_steps ?? [];
+function SectionDiySteps({
+  narrative,
+  brand,
+}: {
+  narrative: NarrativeV2;
+  /** Phase 41a — tight-channel reports may not have `diy_steps` baked
+   *  into narrative_json (legacy `decideReportMode` only populates them
+   *  for `diy_fit`). When missing, we fall back to the canonical
+   *  copy parametrised on the brand name. */
+  brand?: PublicReportV2Brand;
+}) {
+  const steps: DiyStep[] =
+    narrative.diy_steps && narrative.diy_steps.length > 0
+      ? narrative.diy_steps
+      : brand
+        ? defaultDiySteps(brand.name)
+        : [];
   if (!steps.length) return null;
   return (
     <section id="s-diy" className="rv2-section rv2-section-alt">
@@ -1921,6 +2055,330 @@ function SectionWhySteveRolle() {
       </p>
     </section>
   );
+}
+
+// ====================================================================
+// Phase 41a — Short / tight-channel benchmark layout sections.
+// Triggered when the persisted classification snapshot meets the
+// TIGHT_CHANNEL_THRESHOLDS (reseller share < 5%, brand_owned +
+// authorized >= 90%). Tone is consultative — we already control the
+// channel, this is a benchmark, not a recapture pitch.
+// ====================================================================
+
+function SectionTightHero({
+  narrative,
+  brand,
+  callHref,
+  revenue,
+  benchmark,
+  derived,
+  ebitdaMultiple,
+  currentMarginPct,
+  confRevenue,
+  confSellerControl,
+}: {
+  narrative: NarrativeV2;
+  brand: PublicReportV2Brand;
+  callHref: string;
+  revenue: number | null;
+  benchmark: { current_profit_annual: number; business_value: number } | null;
+  derived: DerivedSnapshot;
+  ebitdaMultiple: number;
+  currentMarginPct: number;
+  confRevenue: ConfidenceLabel;
+  confSellerControl: ConfidenceLabel;
+}) {
+  const brandPct = Math.round(derived.non_reseller_share * 100);
+  const headline =
+    revenue != null
+      ? `${brand.name} runs an estimated ${money(revenue)} Amazon channel — and based on your classifications, you control roughly ${brandPct}% of the buy box already.`
+      : `${brand.name}, based on your classifications you already control roughly ${brandPct}% of your Amazon buy box.`;
+  return (
+    <section id="s-cover" className="rv2-section rv2-section-cover">
+      <div className="rv2-eyebrow">Channel Ownership Benchmark</div>
+      <div className="rv2-cover-meta">
+        <div className="rv2-cover-meta-line">Prepared for {brand.name}</div>
+        <div className="rv2-cover-meta-line rv2-muted">
+          {formatLongDate(narrative.generated_at)} · By Rolle Consulting Group
+        </div>
+      </div>
+      <h1 className="rv2-h1">{headline}</h1>
+      <p className="rv2-prose rv2-cover-subhead">
+        These are the same numbers we&apos;d compute for a brand we engage with — shared as a benchmark since the channel appears to already be under your control. Below: the buy-box picture, the sellers you&apos;ve confirmed represent the brand, top products driving the revenue, and a small residual reseller table you can address with the 3-step playbook further down.
+      </p>
+
+      <div className="rv2-cover-secondary">
+        <div className="rv2-cover-secondary-stat">
+          <span className="rv2-cover-secondary-lbl">Brand-controlled buy box</span>
+          <span className="rv2-cover-secondary-val">
+            {brandPct}%
+            <ConfidencePill level={confSellerControl} />
+          </span>
+        </div>
+      </div>
+
+      <div className="rv2-cover-actions">
+        <a className="rv2-btn rv2-btn-primary" href={callHref}>
+          Book a 15-minute review
+        </a>
+      </div>
+
+      {/* Compact revenue-led signal at the top of the cover. The full
+          three-card snapshot lives below in SectionTightBenchmarkCards. */}
+      {revenue != null && (
+        <div className="rv2-kpi-grid rv2-kpi-grid-1" style={{ marginTop: 36 }}>
+          <BigStat
+            label="Estimated annual Amazon revenue"
+            value={money(revenue)}
+            sub="Based on available marketplace data"
+            confidence={confRevenue}
+          />
+        </div>
+      )}
+      {revenue == null && (
+        <p className="rv2-muted-small" style={{ marginTop: 24 }}>
+          Revenue not measured this run. Margin / business value below default to <strong>{Math.round(currentMarginPct * 100)}%</strong> of revenue at a {ebitdaMultiple}× EBITDA multiple — pressure-test on a call.
+        </p>
+      )}
+      {benchmark == null && revenue != null && null}
+    </section>
+  );
+}
+
+function SectionTightBenchmarkCards({
+  revenue,
+  benchmark,
+  ebitdaMultiple,
+  currentMarginPct,
+  confRevenue,
+}: {
+  revenue: number | null;
+  benchmark: { current_profit_annual: number; business_value: number } | null;
+  ebitdaMultiple: number;
+  currentMarginPct: number;
+  confRevenue: ConfidenceLabel;
+}) {
+  const marginPctLabel = `${Math.round(currentMarginPct * 100)}%`;
+  return (
+    <section id="s-benchmark" className="rv2-section">
+      <SectionHead
+        eyebrow="Benchmark Snapshot"
+        title="The same numbers we&rsquo;d compute for a brand we engage with"
+        source={`Directional benchmark · ${marginPctLabel} margin · ${ebitdaMultiple}× EBITDA`}
+      />
+      <p className="rv2-prose">
+        These are the same numbers we&apos;d compute for a brand we engage with — shared as a benchmark since the channel is already under your control. They are directional estimates designed to size the business, not a recapture pitch.
+      </p>
+
+      <div className="rv2-kpi-grid rv2-kpi-grid-3">
+        <BigStat
+          label="Estimated annual Amazon revenue"
+          value={revenue != null ? money(revenue) : "— not measured"}
+          sub="Based on available marketplace data"
+          confidence={confRevenue}
+        />
+        <BigStat
+          label={`Estimated annual profit at ${marginPctLabel} margin`}
+          value={
+            benchmark != null
+              ? money(benchmark.current_profit_annual)
+              : "— not measured"
+          }
+          sub="Directional estimate · margin assumption shown above"
+          confidence="Medium"
+        />
+        <BigStat
+          label={`Estimated business value (${ebitdaMultiple}× EBITDA)`}
+          value={
+            benchmark != null
+              ? money(benchmark.business_value)
+              : "— not measured"
+          }
+          sub="Assumption-based · pressure-tested on a call"
+          confidence="Assumption-based"
+        />
+      </div>
+    </section>
+  );
+}
+
+function SectionTightBuyBox({
+  derived,
+  bundle,
+  confSellerControl,
+}: {
+  derived: DerivedSnapshot;
+  bundle: BrandEnrichmentBundle | null;
+  confSellerControl: ConfidenceLabel;
+}) {
+  return (
+    <section id="s-buybox" className="rv2-section rv2-section-alt">
+      <SectionHead
+        eyebrow="Buy-box ownership"
+        title="Who actually wins the buy box on your listings"
+        source="Keepa · 90-day window · split by your seller classifications"
+      />
+      <p className="rv2-prose">
+        The bar below splits the buy-box wins on the audited ASINs across the four buckets we track. For a tight channel like yours, the bar should read mostly brand-owned with a small residual reseller sliver.
+      </p>
+      <div className="rv2-channel-cards">
+        <ChannelCard
+          label="Brand-controlled buy box"
+          value={`${Math.round(derived.non_reseller_share * 100)}%`}
+          tone="good"
+          confidence={confSellerControl}
+        />
+        <ChannelCard
+          label="Reseller-controlled buy box"
+          value={`${Math.round(derived.reseller_share * 100)}%`}
+          tone="warn"
+          confidence={confSellerControl}
+        />
+      </div>
+      <BuyBoxPanel
+        derived={derived}
+        legacyPct={bundle?.keepa?.brand_controlled_pct ?? null}
+      />
+    </section>
+  );
+}
+
+function SectionTightBrandControlled({
+  narrative,
+  derived,
+}: {
+  narrative: NarrativeV2;
+  derived: DerivedSnapshot;
+}) {
+  const sellers = narrative.reseller_reality.top_sellers ?? [];
+  const brandRows: ResellerRow[] = [];
+  for (const s of sellers) {
+    const cls = lookupClassification(derived, s);
+    if (cls === "brand_owned" || cls === "authorized" || cls === "amazon") {
+      brandRows.push(s);
+    }
+  }
+  const maxShare =
+    brandRows.reduce((m, s) => Math.max(m, s.share_pct ?? 0), 0) || 1;
+
+  return (
+    <section id="s-brand-controlled" className="rv2-section">
+      <SectionHead
+        eyebrow="Sellers you&rsquo;ve identified as brand-controlled"
+        title="The sellers carrying your buy-box share"
+        source="Keepa · classifications confirmed by you"
+      />
+      {brandRows.length > 0 ? (
+        <>
+          <p className="rv2-prose">
+            These are the sellers you&apos;ve confirmed represent the brand. They appear here so the channel-control picture stays accurate — and so the residual reseller table below is a clean, scoped list.
+          </p>
+          <div className="rv2-channel-block rv2-channel-good">
+            <div className="rv2-bars">
+              {brandRows.map((s, i) => (
+                <ResellerBar
+                  key={`tbc-${s.seller_name}-${i}`}
+                  row={s}
+                  maxShare={maxShare}
+                  tone="good"
+                />
+              ))}
+            </div>
+          </div>
+        </>
+      ) : (
+        <p className="rv2-muted rv2-prose">
+          No sellers were classified as brand-controlled in your snapshot. The buy-box bar above still reflects the persisted share columns.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function SectionTightResidualResellers({
+  narrative,
+  derived,
+}: {
+  narrative: NarrativeV2;
+  derived: DerivedSnapshot;
+}) {
+  const sellers = narrative.reseller_reality.top_sellers ?? [];
+  const resellerRows: ResellerRow[] = [];
+  for (const s of sellers) {
+    const cls = lookupClassification(derived, s);
+    if (cls === "reseller") resellerRows.push(s);
+  }
+  const residualPct = Math.round(derived.reseller_share * 100);
+
+  return (
+    <section id="s-residual" className="rv2-section rv2-section-alt">
+      <SectionHead
+        eyebrow={`Residual third-party seller activity (~${residualPct}%)`}
+        title="The small residual you can address yourself"
+        source="Keepa · classifications confirmed by you"
+      />
+      {resellerRows.length > 0 ? (
+        <>
+          <p className="rv2-prose">
+            These are the third-party sellers in the residual reseller bucket. The combined share is small — small enough that the 3-step playbook below is usually enough to seal it without bringing anyone in.
+          </p>
+          <div className="rv2-bars">
+            {resellerRows.map((s, i) => (
+              <ResellerBar
+                key={`tr-${s.seller_name}-${i}`}
+                row={s}
+                maxShare={
+                  resellerRows.reduce((m, x) => Math.max(m, x.share_pct ?? 0), 0) || 1
+                }
+              />
+            ))}
+          </div>
+          <p className="rv2-muted-small" style={{ marginTop: 12 }}>
+            Authorization status should be confirmed with your team before contacting any of these sellers.
+          </p>
+        </>
+      ) : (
+        <p className="rv2-muted rv2-prose">
+          No third-party reseller activity to investigate based on your classifications.
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Phase 41a — canonical 3-step DIY copy. Mirrors the assemble.ts
+ * `buildDiySteps` so a tight-channel report rendered without a baked
+ * `narrative.diy_steps` (e.g. one generated under the Phase 40 high_fit
+ * mode) still gets the 3-step playbook.
+ */
+function defaultDiySteps(brandName: string): DiyStep[] {
+  return [
+    {
+      number: 1,
+      title: "Send a polite request to the reseller asking them to stop selling.",
+      body:
+        `Most small unauthorized resellers — especially LLCs that look like ${brandName}'s own family or DBA — will comply when contacted directly. ` +
+        `A short note works: "Hi, we've noticed you're listing our products on Amazon. We don't have a wholesale agreement on file — could you confirm your source so we can make sure our distribution is clean?" ` +
+        `Give them 14 days.`,
+    },
+    {
+      number: 2,
+      title: "If they don't comply, file an Amazon Brand Registry complaint.",
+      body:
+        "Brand Registry gives you takedown power for unauthorized listings and counterfeit claims. " +
+        "It's the lever that converts a polite ask into an enforced outcome. " +
+        "Most resellers de-list within a week of the first complaint hitting their account.",
+    },
+    {
+      number: 3,
+      title: "Tighten distribution with your existing wholesale customers.",
+      body:
+        "Add a Minimum Advertised Price (MAP) policy and no-resale clauses for new accounts. " +
+        "For existing accounts, send a one-page distribution policy update (MAP, no Amazon resale, no transshipping) and ask for written acknowledgment. " +
+        "This is what stops the next reseller showing up six months from now.",
+    },
+  ];
 }
 
 function SectionDisclaimer() {
