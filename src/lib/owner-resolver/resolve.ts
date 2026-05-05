@@ -637,17 +637,18 @@ export async function enrichSelectedCandidatesWithApollo(
   }
 
   if (apolloRowsToInsert.length > 0) {
-    // Phase 34.4 — Defensive: even with the relaxed unique index that
-    // includes `candidate_source`, a single tier can return the same
-    // org twice (or two tiers can). Use upsert with ignoreDuplicates so
-    // surplus rows are silently dropped instead of crashing the run.
-    const { error: insErr } = await admin
-      .from("owner_candidates")
-      .upsert(apolloRowsToInsert, {
-        onConflict:
-          "resolution_run_id,candidate_company_name,candidate_domain,candidate_source",
-        ignoreDuplicates: true,
-      });
+    // Phase 34.7 — supabase-js `.upsert(..., { onConflict })` failed
+    // with SQLSTATE 42P10 because the unique index on owner_candidates
+    // is built over expressions (lower(name), COALESCE(...)), and
+    // PostgREST emits a plain `ON CONFLICT (cols)` target that doesn't
+    // match. We delegate to a SECURITY DEFINER plpgsql function whose
+    // raw INSERT spells out the exact ON CONFLICT expression list.
+    // Same dedup semantics as before (case-insensitive name + domain,
+    // source-aware) — duplicates are silently dropped.
+    const { error: insErr } = await admin.rpc(
+      "insert_owner_candidates_dedup",
+      { rows: apolloRowsToInsert as unknown as object[] },
+    );
     if (insErr) {
       auditEntries.push(...apollo.rawAuditEntries());
       return {
