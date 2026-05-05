@@ -232,7 +232,7 @@ export async function llmDossierRisk(
       required: ["risk_profile"],
     },
     userInstruction:
-      "Write a 150–200 word risk profile of this reseller. Classify them as one of: classic 3PL diverter, unauthorized importer, authorized but undercutting, or arbitrage seller — pick whichever fits the data. Explain the risk to the brand in plain English. End with the practical move (terminate, MAP-enforce, or buy them out). Do not invent facts about who owns the seller — work only from the data provided. If `country` is null, OMIT geographic language entirely (do not write 'from — not measured' or anything similar). Plain markdown, no headings.",
+      "Write a 150–200 word risk profile of this seller. Classify them as one of: classic 3PL diverter, third-party importer (authorization unknown), authorized but undercutting, or arbitrage seller — pick whichever fits the data. Use careful language: say 'appears', 'may', 'authorization unknown' rather than 'unauthorized'. Explain the risk to the brand in plain English. End with the practical move (transition, MAP-enforce, or buy them out). Do not invent facts about who owns the seller — work only from the data provided. If `country` is null, OMIT geographic language entirely (do not write 'from — not measured' or anything similar). Plain markdown, no headings.",
     userPayload: { dossier, brand_name: brand.name, brand_country_match: dossier.country },
     maxTokens: 500,
   });
@@ -252,7 +252,7 @@ function fallbackDossierRisk(
   const opLine = country
     ? `They operate from ${country} on a ${mix} model.`
     : `They operate on a ${mix} model.`;
-  return `${dossier.seller_name} is the dominant seller on ${brand.name}'s catalog, holding ${share} of buy-box wins (Keepa). ${opLine} Without a written authorization, they are running your channel without a contract — every margin point they keep is one you wrote off. The pattern fits a classic 3PL diverter: low overhead, no investment in the brand, undercutting MSRP to win the buy box. The practical move is one of three: (1) terminate and enforce MAP plus distribution-agreement controls, (2) bring them on as an authorized partner under written terms, or (3) buy them out on a one-time basis. We will run that decision tree with you in the first two weeks.`;
+  return `${dossier.seller_name} appears to be the dominant seller on ${brand.name}'s catalog, holding ${share} of observed buy-box wins (Keepa). ${opLine} Authorization status should be confirmed with your team — until written terms are confirmed, this seller may be running the channel outside of any contract, which can leak margin and weaken brand control. The pattern fits a classic 3PL diverter: low overhead, limited investment in the brand, often undercutting MSRP to win the buy box. The practical move is one of three: (1) transition them off the listings and enforce MAP plus distribution-agreement controls, (2) bring them on as an authorized partner under written terms, or (3) buy them out on a one-time basis. We will run that decision tree with you in the first two weeks.`;
 }
 
 // =====================================================================
@@ -534,7 +534,7 @@ export async function llmPlan(p: PlanInput): Promise<{
       required: ["intro", "columns"],
     },
     userInstruction:
-      "Write the 90-day takeover plan. Use 3 columns labeled exactly 'Days 1-30', 'Days 31-60', 'Days 61-90'. 4-5 bullets each, ≤ 18 words each. Cover: Audit, Set Up, Protect (Brand Registry / monitoring / enforcement), Transition / Remove Resellers, Build Team. If many resellers exist, lean reseller termination into Days 1-30. If Brand Registry status unknown, put it in Days 1-30.",
+      "Write the 90-day transition plan. Use 3 columns labeled exactly 'Days 1-30', 'Days 31-60', 'Days 61-90'. 4-5 bullets each, ≤ 18 words each. Cover: Audit, Set Up, Protect (Brand Registry / monitoring / enforcement), Transition Resellers, Build Team. Use careful language ('transition', 'sequence', 'authorized seller map'). Avoid 'termination' / 'terminate' / 'unauthorized'. If many resellers exist, lean reseller transition into Days 1-30. If Brand Registry status unknown, put it in Days 1-30.",
     userPayload: p,
     maxTokens: 700,
   });
@@ -665,7 +665,7 @@ function fallbackFiveStep(p: FiveStepInput): FiveStepOut {
       {
         number: 1,
         title: "Identify the Opportunity through an Account Audit",
-        body: `Step 1 is already underway — this very report is your audit. We've measured ${revenue} in trailing 12-month Amazon revenue with only ${brandPct} brand-controlled buy box and ${sellerCount} unauthorized resellers led by ${reseller}${share ? ` at ${share} share` : ""}. The recoverable opportunity: ${profit}/year in margin and ${value} in business value.`,
+        body: `Step 1 is already underway — this very report is your audit. We've measured ${revenue} in trailing 12-month Amazon revenue with only ${brandPct} brand-controlled buy box and ${sellerCount} third-party sellers (authorization unknown) led by ${reseller}${share ? ` at ${share} share` : ""}. The recoverable opportunity: ${profit}/year in margin and ${value} in business value.`,
       },
       {
         number: 2,

@@ -194,9 +194,9 @@ export function LegionMathSection(props: LegionMathSectionProps) {
   return (
     <section id="s-math" className="rv2-section">
       <div className="rv2-section-head">
-        <div className="rv2-eyebrow">The Math</div>
-        <h2 className="rv2-h2">Every number, every assumption</h2>
-        <div className="rv2-source">Editable per deal · saved on this device</div>
+        <div className="rv2-eyebrow">Estimated Financial Opportunity</div>
+        <h2 className="rv2-h2">What the channel could be worth under brand control</h2>
+        <div className="rv2-source">Directional estimates · transparent line-by-line bridge</div>
       </div>
 
       {/* Tier 1 — exactly 5 hero rows. */}
