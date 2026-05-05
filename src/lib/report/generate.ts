@@ -22,6 +22,22 @@ export interface GenerateInput {
   userId: string;
   brandId: string;
   contactEmail?: string | null;
+  /** Phase 39 — user-classified seller share buckets captured by the
+   *  SellerClassificationModal at the moment the user clicked Generate.
+   *  When provided these override the keepa name-overlap heuristic so
+   *  brand_owned + authorized + amazon are all excluded from
+   *  recoverable revenue. The brand-page financial model is also
+   *  refreshed against these shares (via persistBrandEconomics). */
+  classificationShares?: {
+    brand_owned_share_pct: number;
+    authorized_share_pct: number;
+    amazon_share_pct: number;
+    reseller_share_pct: number;
+    /** brand_owned + authorized + amazon — the slice NOT recoverable
+     *  through reseller removal. Equivalent to the legacy
+     *  `brand_controlled_pct` input on `computeLegionEconomics`. */
+    non_reseller_share_pct: number;
+  } | null;
 }
 
 function logStep(reportId: string, step: string, startedAt: number, extra?: Record<string, unknown>) {
@@ -73,6 +89,18 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       competitors: enrichResult.competitorSnapshots.length,
     });
 
+    // Phase 39 — when the user supplied a fresh classification snapshot
+    // via the modal, override the heuristic-derived
+    // `brand_controlled_pct` on the enrichment bundle with the
+    // user-derived "non-reseller" share (brand_owned + authorized +
+    // amazon). Everything downstream — math, dossier picks, fit
+    // decision — already reads from this field, so a single override is
+    // enough.
+    if (input.classificationShares) {
+      enrichResult.bundle.keepa.brand_controlled_pct =
+        input.classificationShares.non_reseller_share_pct;
+    }
+
     // Phase 23 — Amazon-1P disqualifier short-circuit. If Amazon retail
     // (ATVPDKIKX0DER) holds ≥ AMAZON_1P_THRESHOLD_PCT of buy boxes,
     // RCG's reseller-removal play doesn't apply (Amazon IS the channel
@@ -90,26 +118,38 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       const tags: string[] = Array.isArray(postBrand?.disqualifier_tags)
         ? (postBrand!.disqualifier_tags as string[])
         : [];
-      if (tags.includes("amazon_1p")) {
-        // Approximate amazon share from Keepa-stamped brand_sellers — the
-        // exact value already drove the tag in enrichBrandWithKeepa, but
-        // surfacing it on the report aids debugging and copy.
-        let amazonShare: number | null = null;
-        try {
-          const { data: sellers } = await admin
-            .from("brand_sellers")
-            .select("seller_id, share_pct")
-            .eq("brand_id", brandId);
-          const total = (sellers ?? []).reduce(
-            (a, s) => a + (typeof s.share_pct === "number" ? s.share_pct : 0),
-            0,
-          );
-          const amzn = (sellers ?? [])
-            .filter((s) => s.seller_id === "ATVPDKIKX0DER")
-            .reduce((a, s) => a + (typeof s.share_pct === "number" ? s.share_pct : 0), 0);
-          if (total > 0) amazonShare = amzn / total;
-        } catch {
-          // soft fail — share is best-effort
+      // Phase 39 — when the user classified ≥ 10% of share as Amazon,
+      // we treat the brand as Amazon-1P even if the keepa heuristic
+      // didn't tag it (heuristic only flips the tag when the
+      // ATVPDKIKX0DER seller_id is present and over threshold; manual
+      // classification covers cases where the seller_id resolution
+      // missed). The threshold mirrors AMAZON_1P_THRESHOLD_PCT which
+      // is also 0.10 in enrichBrandWithKeepa.
+      const userAmazonShare = input.classificationShares?.amazon_share_pct ?? 0;
+      const amazonOneP = tags.includes("amazon_1p") || userAmazonShare >= 0.1;
+      if (amazonOneP) {
+        // Phase 39 — prefer the user-classified amazon share when the
+        // modal supplied one; that's the snapshot we just stamped on
+        // the report row. Fall back to the heuristic on the legacy
+        // path (no classification snapshot available).
+        let amazonShare: number | null = input.classificationShares?.amazon_share_pct ?? null;
+        if (amazonShare == null) {
+          try {
+            const { data: sellers } = await admin
+              .from("brand_sellers")
+              .select("seller_id, share_pct")
+              .eq("brand_id", brandId);
+            const total = (sellers ?? []).reduce(
+              (a, s) => a + (typeof s.share_pct === "number" ? s.share_pct : 0),
+              0,
+            );
+            const amzn = (sellers ?? [])
+              .filter((s) => s.seller_id === "ATVPDKIKX0DER")
+              .reduce((a, s) => a + (typeof s.share_pct === "number" ? s.share_pct : 0), 0);
+            if (total > 0) amazonShare = amzn / total;
+          } catch {
+            // soft fail — share is best-effort
+          }
         }
         await markReportNotAFit(admin, {
           reportId,

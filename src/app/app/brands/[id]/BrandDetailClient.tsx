@@ -5,6 +5,9 @@ import { useRouter } from "next/navigation";
 import { formatNumber, formatMoney, formatDateTime } from "@/lib/utils";
 import BrandContactsCard from "./BrandContactsCard";
 import BrandOutreachCard from "./BrandOutreachCard";
+import SellerClassificationModal, {
+  type ClassificationSnapshotEntry,
+} from "./SellerClassificationModal";
 import type { BrandFinancialResult } from "@/lib/brand-detail/financial-model";
 
 interface Brand {
@@ -371,7 +374,12 @@ export default function BrandDetailClient({
       </div>
 
       <div className="mt-6">
-        <ReportsSection brandId={brand.id} brandName={brand.name} primaryContact={primaryContact} />
+        <ReportsSection
+          brandId={brand.id}
+          brandName={brand.name}
+          trailing12mo={brand.trailing_12_months ?? null}
+          primaryContact={primaryContact}
+        />
       </div>
     </div>
   );
@@ -644,10 +652,12 @@ interface BrandReportRow {
 function ReportsSection({
   brandId,
   brandName,
+  trailing12mo,
   primaryContact,
 }: {
   brandId: string;
   brandName: string;
+  trailing12mo: number | null;
   primaryContact: { id: string; full_name: string; first_name: string | null; title: string | null } | null;
 }) {
   const [reports, setReports] = useState<BrandReportRow[] | null>(null);
@@ -656,6 +666,8 @@ function ReportsSection({
   const [emailingId, setEmailingId] = useState<string | null>(null);
   const [emailedLinks, setEmailedLinks] = useState<Record<string, string>>({});
   const [outlookConnected, setOutlookConnected] = useState<boolean | null>(null);
+  // Phase 39 — required seller classification before generate.
+  const [showClassificationModal, setShowClassificationModal] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -719,14 +731,49 @@ function ReportsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [brandId, reports?.length]);
 
-  async function generate() {
+  // Phase 39 — clicking Generate opens the seller-classification modal
+  // first. The modal calls `runGenerationWithSnapshot` after the user
+  // confirms; that's the only path that actually POSTs to
+  // /api/reports/generate.
+  function openClassificationModal() {
+    setMsg(null);
+    setShowClassificationModal(true);
+  }
+
+  async function runGenerationWithSnapshot(snapshot: ClassificationSnapshotEntry[]) {
     setGenerating(true);
     setMsg(null);
     try {
+      // 1. Persist the classifications on brand_sellers so the brand-page
+      // financial model and reseller widgets pick up the user's verdict
+      // even if the report run is interrupted.
+      try {
+        await fetch(`/api/brands/${brandId}/sellers/classifications`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            classifications: snapshot.map((s) => ({
+              seller_id: s.seller_id,
+              seller_name: s.seller_name,
+              classification: s.classification,
+            })),
+          }),
+        });
+      } catch (e) {
+        // Non-fatal — the snapshot is also written by the generate route.
+        console.warn("[brand-detail] classification PATCH failed", e);
+      }
+
+      // 2. Generate the report with the snapshot in the body. The server
+      // stamps `reports.seller_classifications` + share_pct columns and
+      // overrides `brand_controlled_pct` for the math.
       const res = await fetch("/api/reports/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brand_id: brandId }),
+        body: JSON.stringify({
+          brand_id: brandId,
+          seller_classifications: snapshot,
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -740,11 +787,13 @@ function ReportsSection({
         setMsg("Generating…");
       }
       await load();
+      setShowClassificationModal(false);
     } catch (e) {
       // Client disconnect (long-running lambda) is normal — the row will
       // be finalized server-side and the poller will pick it up.
       setMsg(`Still generating in background — this can take up to 2 minutes.`);
       await load();
+      setShowClassificationModal(false);
     } finally {
       setGenerating(false);
     }
@@ -778,10 +827,22 @@ function ReportsSection({
 
   return (
     <div className="card p-4">
+      {showClassificationModal && (
+        <SellerClassificationModal
+          brandId={brandId}
+          brandName={brandName}
+          trailing12mo={trailing12mo}
+          isSubmitting={generating}
+          onCancel={() => {
+            if (!generating) setShowClassificationModal(false);
+          }}
+          onConfirm={runGenerationWithSnapshot}
+        />
+      )}
       <div className="flex items-baseline justify-between mb-3">
         <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Reports</div>
         {hasAny && (
-          <button className="btn btn-ghost text-xs" onClick={generate} disabled={generating || anyGenerating}>
+          <button className="btn btn-ghost text-xs" onClick={openClassificationModal} disabled={generating || anyGenerating}>
             {generating || anyGenerating ? "Generating…" : "Regenerate"}
           </button>
         )}
@@ -802,7 +863,7 @@ function ReportsSection({
             No reports yet for {brandName}. Generate a Channel Ownership Audit — a brand-specific PDF
             in the webinar narrative arc, ready to email.
           </div>
-          <button className="btn" onClick={generate} disabled={generating}>
+          <button className="btn" onClick={openClassificationModal} disabled={generating}>
             {generating ? "Generating…" : "Generate Channel Ownership Audit"}
           </button>
           {msg && <div className="text-xs text-[var(--text-muted)]">{msg}</div>}
@@ -835,7 +896,7 @@ function ReportsSection({
                   {r.status === "failed" && (
                     <button
                       className="btn btn-ghost text-xs"
-                      onClick={generate}
+                      onClick={openClassificationModal}
                       disabled={generating}
                       title="Retry generation"
                     >

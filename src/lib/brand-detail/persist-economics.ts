@@ -33,6 +33,7 @@ import {
   type RevenueEstimate,
 } from "@/lib/enrichment/revenue-estimator";
 import { resolveBrandRevenue } from "@/lib/math/resolve-brand-revenue";
+import { aggregateClassificationShares } from "./seller-classification-shares";
 
 export interface PersistEconomicsResult {
   ok: boolean;
@@ -148,11 +149,40 @@ export async function persistBrandEconomics(
     };
   }
 
-  const bcRaw = brand.keepa_brand_controlled_pct;
-  const brandControlledPct =
-    bcRaw == null || !Number.isFinite(Number(bcRaw))
-      ? null
-      : Math.max(0, Math.min(1, Number(bcRaw)));
+  // Phase 39 — when the user has classified at least one seller via the
+  // SellerClassificationModal, the user's verdict overrides the keepa
+  // name-overlap heuristic. The "non-reseller" share (brand_owned +
+  // authorized + amazon) maps onto the legacy `brand_controlled_pct`
+  // input so only the reseller slice is recoverable. When no row has
+  // been classified yet (legacy / pre-modal brands), fall back to the
+  // existing heuristic so behavior is unchanged.
+  let brandControlledPct: number | null = null;
+  let bcSource: "user_classified" | "keepa_heuristic" | "none" = "none";
+  const { data: sellerRows } = await admin
+    .from("brand_sellers")
+    .select("share_pct, classification, classified_at")
+    .eq("brand_id", brandId);
+  const anyClassified = (sellerRows ?? []).some((r: any) => r.classified_at != null);
+  if (anyClassified && sellerRows && sellerRows.length) {
+    const shares = aggregateClassificationShares(
+      sellerRows.map((r: any) => ({
+        share_pct: typeof r.share_pct === "number" ? r.share_pct : null,
+        classification: r.classification ?? null,
+      })),
+    );
+    if (shares.has_data) {
+      brandControlledPct = shares.non_reseller_share_pct;
+      bcSource = "user_classified";
+    }
+  }
+  if (brandControlledPct == null) {
+    const bcRaw = brand.keepa_brand_controlled_pct;
+    brandControlledPct =
+      bcRaw == null || !Number.isFinite(Number(bcRaw))
+        ? null
+        : Math.max(0, Math.min(1, Number(bcRaw)));
+    if (brandControlledPct != null) bcSource = "keepa_heuristic";
+  }
   const out = computeLegionEconomics({
     ...defaultLegionInputs(revenue),
     brand_controlled_pct: brandControlledPct,
@@ -176,7 +206,7 @@ export async function persistBrandEconomics(
     return { ok: false, reason: "update_failed", error: updErr.message };
   }
   console.log(
-    `[persist-economics] brand=${brandId} revenue=${revenue} source=${revenueSource} bc_pct=${brandControlledPct ?? "null"}`,
+    `[persist-economics] brand=${brandId} revenue=${revenue} source=${revenueSource} bc_pct=${brandControlledPct ?? "null"} bc_source=${bcSource}`,
   );
   return { ok: true, wrote: true, revenue, revenueSource };
 }
