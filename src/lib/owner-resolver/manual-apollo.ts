@@ -37,6 +37,8 @@ export interface ManualApolloRow {
   apollo_domain: string | null;
   apollo_employee_count: number | null;
   apollo_total_contacts: number | null;
+  /** Phase 38 — fallback proxy when contact count is unavailable. */
+  apollo_estimated_employees: number | null;
   apollo_hq_city: string | null;
   apollo_hq_country: string | null;
   apollo_industry: string | null;
@@ -93,6 +95,11 @@ export function buildManualRow(
     apollo_domain: org.primary_domain,
     apollo_employee_count: org.estimated_num_employees,
     apollo_total_contacts: totalContacts,
+    // Phase 38 — surface estimated_num_employees as a "~N employees"
+    // proxy when mixed_people/search returned null. Never mixed with
+    // apollo_total_contacts.
+    apollo_estimated_employees:
+      totalContacts == null ? org.estimated_num_employees ?? null : null,
     apollo_hq_city: org.organization_city,
     apollo_hq_country: org.organization_country,
     apollo_industry: org.industry,
@@ -131,6 +138,7 @@ export function buildManualNoMatchRow(
     apollo_domain: null,
     apollo_employee_count: null,
     apollo_total_contacts: null,
+    apollo_estimated_employees: null,
     apollo_hq_city: null,
     apollo_hq_country: null,
     apollo_industry: null,

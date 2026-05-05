@@ -13,6 +13,7 @@ import { uploadReportPdf } from "./storage";
 import { runV2Enrichment, EnrichmentStepError, type BrandRowMin } from "./v2/enrich";
 import { assembleV2 } from "./v2/assemble";
 import { renderAuditPdfV2 } from "./v2/pdf";
+import { persistBrandEconomics } from "@/lib/brand-detail/persist-economics";
 
 const FALLBACK_CONTACT = "contact@rolleconsulting.com";
 
@@ -189,6 +190,23 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       .eq("id", reportId);
     if (updErr) throw new Error(`report update failed: ${updErr.message}`);
     logStep(reportId, currentStep, t);
+
+    // Phase 38 — defensive write-through of the economics columns on
+    // the brand row. Keepa enrichment also persists these, but this
+    // covers the case where the report ran with stale Keepa input or
+    // where a manual revenue override hadn't yet flushed to the row.
+    try {
+      const persisted = await persistBrandEconomics(admin, brandId);
+      if (!persisted.ok) {
+        console.warn(
+          "[report.generate] persistBrandEconomics skipped/failed:",
+          persisted.reason ?? "unknown",
+          persisted.error ?? "",
+        );
+      }
+    } catch (e) {
+      console.warn("[report.generate] persistBrandEconomics threw:", e);
+    }
 
     console.log("[report.generate] completed", { reportId });
   } catch (e) {

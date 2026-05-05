@@ -19,6 +19,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { persistBrandEconomics } from "@/lib/brand-detail/persist-economics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,5 +77,23 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   if (!data) return NextResponse.json({ error: "not found" }, { status: 404 });
+
+  // Phase 38 — manual revenue override is one of the inputs that drives
+  // the financial-model dollar columns. Recompute and persist so the
+  // brand page renders the post-override values without a round-trip
+  // through the report or Keepa enrichment.
+  try {
+    const persisted = await persistBrandEconomics(supabase as any, params.id);
+    if (!persisted.ok) {
+      console.warn(
+        "[api/brands/revenue] persistBrandEconomics skipped/failed:",
+        persisted.reason ?? "unknown",
+        persisted.error ?? "",
+      );
+    }
+  } catch (e) {
+    console.warn("[api/brands/revenue] persistBrandEconomics threw:", e);
+  }
+
   return NextResponse.json({ brand: data });
 }
