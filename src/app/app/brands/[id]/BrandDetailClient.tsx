@@ -111,6 +111,23 @@ export default function BrandDetailClient({
   const [enrichErr, setEnrichErr] = useState<string | null>(null);
   const [dfsRunning, setDfsRunning] = useState(false);
   const [dfsErr, setDfsErr] = useState<string | null>(null);
+  // Phase 37 — suppress the persisted brand.enrichment_error banner the
+  // moment the user clicks Re-enrich. Without this, the DB-backed error
+  // from a prior failure stays painted until the server round-trip + RSC
+  // refresh completes, making the UI look like the click didn't take. The
+  // flag is reset on next successful refresh by the useEffect below.
+  const [keepaErrorSuppressed, setKeepaErrorSuppressed] = useState(false);
+  const [dfsErrorSuppressed, setDfsErrorSuppressed] = useState(false);
+
+  // When the brand prop changes (e.g. router.refresh() rehydrated the
+  // server component), drop our local "suppressed" + "in-flight error"
+  // flags so the banner faithfully reflects the latest persisted state.
+  useEffect(() => {
+    setKeepaErrorSuppressed(false);
+    setDfsErrorSuppressed(false);
+    setEnrichErr(null);
+    setDfsErr(null);
+  }, [brand.enrichment_error, brand.keepa_last_enriched_at, brand.dataforseo_last_enriched_at]);
   const [primaryContact, setPrimaryContact] = useState<{ id: string; full_name: string; first_name: string | null; title: string | null } | null>(null);
   // Phase 30 — "Run scan" button for deferred (bulk-imported) brands and
   // "Retry scan" for failed ones. Mirrors the report-generation polling
@@ -142,17 +159,26 @@ export default function BrandDetailClient({
 
   async function runEnrichment() {
     setEnriching(true);
+    // Phase 37 — optimistic clear: hide BOTH the local in-flight error
+    // and the stale brand.enrichment_error column the moment the user
+    // commits to a re-enrich. The suppression flag is dropped when the
+    // server round-trip completes (success → router.refresh, failure →
+    // explicit reset below).
     setEnrichErr(null);
+    setKeepaErrorSuppressed(true);
     try {
       const res = await fetch(`/api/enrichment/brands/${brand.id}/keepa`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) {
         setEnrichErr(data.error ?? `HTTP ${res.status}`);
+        // Surface the new error — undo the optimistic suppression.
+        setKeepaErrorSuppressed(false);
       } else {
         router.refresh();
       }
     } catch (e) {
       setEnrichErr(e instanceof Error ? e.message : String(e));
+      setKeepaErrorSuppressed(false);
     } finally {
       setEnriching(false);
     }
@@ -161,16 +187,19 @@ export default function BrandDetailClient({
   async function runDfsEnrichment() {
     setDfsRunning(true);
     setDfsErr(null);
+    setDfsErrorSuppressed(true);
     try {
       const res = await fetch(`/api/enrichment/brands/${brand.id}/dataforseo`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) {
         setDfsErr(data.error ?? `HTTP ${res.status}`);
+        setDfsErrorSuppressed(false);
       } else {
         router.refresh();
       }
     } catch (e) {
       setDfsErr(e instanceof Error ? e.message : String(e));
+      setDfsErrorSuppressed(false);
     } finally {
       setDfsRunning(false);
     }
@@ -329,9 +358,11 @@ export default function BrandDetailClient({
           dfsMetrics={dfsMetrics}
           enriching={enriching}
           enrichErr={enrichErr}
+          keepaErrorSuppressed={keepaErrorSuppressed}
           onEnrich={runEnrichment}
           dfsRunning={dfsRunning}
           dfsErr={dfsErr}
+          dfsErrorSuppressed={dfsErrorSuppressed}
           onDfsEnrich={runDfsEnrichment}
         />
       </div>
@@ -349,9 +380,11 @@ function EnrichmentSection({
   dfsMetrics,
   enriching,
   enrichErr,
+  keepaErrorSuppressed,
   onEnrich,
   dfsRunning,
   dfsErr,
+  dfsErrorSuppressed,
   onDfsEnrich,
 }: {
   brand: Brand;
@@ -359,9 +392,11 @@ function EnrichmentSection({
   dfsMetrics: DfsMetricsRow | null;
   enriching: boolean;
   enrichErr: string | null;
+  keepaErrorSuppressed: boolean;
   onEnrich: () => void;
   dfsRunning: boolean;
   dfsErr: string | null;
+  dfsErrorSuppressed: boolean;
   onDfsEnrich: () => void;
 }) {
   const score = brand.validation_score;
@@ -403,13 +438,23 @@ function EnrichmentSection({
         </div>
       </div>
 
-      {(brand.enrichment_error || enrichErr) && (
-        <div className="mb-4 p-3 rounded border" style={{ background: "#2a1415", borderColor: "#4a1e21", color: "#f87171" }}>
-          <div className="text-sm font-medium">Keepa enrichment error</div>
-          <div className="text-xs mt-1">{enrichErr ?? brand.enrichment_error}</div>
-        </div>
-      )}
-      {dfsErr && (
+      {(() => {
+        // Phase 37 — keepaErrorSuppressed hides a prior DB-persisted
+        // enrichment_error while the user's Re-enrich click is in flight
+        // (or until router.refresh wipes the column). enrichErr (the
+        // local in-flight error) ignores suppression — if the new call
+        // failed, the user needs to see it.
+        const persistedKeepaErr = keepaErrorSuppressed || enriching ? null : brand.enrichment_error;
+        const showKeepaErr = enrichErr ?? persistedKeepaErr;
+        if (!showKeepaErr) return null;
+        return (
+          <div className="mb-4 p-3 rounded border" style={{ background: "#2a1415", borderColor: "#4a1e21", color: "#f87171" }}>
+            <div className="text-sm font-medium">Keepa enrichment error</div>
+            <div className="text-xs mt-1">{showKeepaErr}</div>
+          </div>
+        );
+      })()}
+      {dfsErr && !dfsErrorSuppressed && !dfsRunning && (
         <div className="mb-4 p-3 rounded border" style={{ background: "#2a1415", borderColor: "#4a1e21", color: "#f87171" }}>
           <div className="text-sm font-medium">DataForSEO enrichment error</div>
           <div className="text-xs mt-1">{dfsErr}</div>

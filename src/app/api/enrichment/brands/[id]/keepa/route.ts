@@ -39,10 +39,18 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
       existing_disqualifier_tags: brand.disqualifier_tags ?? [],
     });
     const enrichedNow = !(summary.enrichment_error || summary.asin_count === 0);
+    // Phase 37 — belt-and-suspenders: when the enrich call succeeded,
+    // explicitly clear `enrichment_error` here in case the inner
+    // `enrichBrandWithKeepa` write didn't reach this column (e.g. a
+    // partial-success path). The enrichment card's banner reads from
+    // this column on RSC refresh, so a stale value would re-paint the
+    // "string did not match the expected pattern" message even though
+    // the call succeeded.
     await supabase
       .from("brands")
       .update({
         enrichment_state: enrichedNow ? "enriched" : "failed",
+        ...(enrichedNow ? { enrichment_error: null } : {}),
         updated_at: new Date().toISOString(),
       })
       .eq("id", brand.id)

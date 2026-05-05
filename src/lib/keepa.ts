@@ -201,6 +201,28 @@ const TOKEN_CACHE_TTL_MS = 30 * 1000;
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
+/**
+ * Phase 37 — Defensive Keepa-minute → ISO string. Keepa stores timestamps
+ * as `unix-minutes - 21564000`, so naive `new Date((m + 21564000) * 60_000)
+ * .toISOString()` throws `RangeError: Invalid time value` (the V8 message
+ * varies by version, sometimes surfacing as the platform "did not match
+ * the expected pattern" text) on out-of-range / non-numeric values. We
+ * return null on any failure so the caller can fall back cleanly.
+ */
+function safeKeepaMinuteToIso(minute: unknown): string | null {
+  if (typeof minute !== "number" || !Number.isFinite(minute)) return null;
+  try {
+    const ms = (minute + 21564000) * 60 * 1000;
+    if (!Number.isFinite(ms)) return null;
+    const d = new Date(ms);
+    const t = d.getTime();
+    if (!Number.isFinite(t)) return null;
+    return d.toISOString();
+  } catch {
+    return null;
+  }
+}
+
 function normalizeBrandQuery(name: string) {
   return name
     .replace(/[®™©]/g, "")
@@ -591,6 +613,7 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
     for (const p of products) {
       const asin = String(p?.asin ?? "");
       if (!asin) continue;
+      try {
       const { offers } = extractOffers(p);
       const bb = getBuyBoxSeller(p);
       const stats = p?.stats ?? {};
@@ -723,7 +746,7 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
         total_offers_count: total,
         fba_offers_count: fba,
         offers,
-        last_updated: p?.lastUpdate ? new Date((p.lastUpdate + 21564000) * 60 * 1000).toISOString() : new Date().toISOString(),
+        last_updated: safeKeepaMinuteToIso(p?.lastUpdate) ?? new Date().toISOString(),
         sales_rank_avg365: salesRankAvg365,
         sales_rank_current: salesRankCurrent,
         buy_box_avg365: bbAvg365Cents != null ? bbAvg365Cents / 100 : null,
@@ -747,6 +770,41 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
       };
       PRODUCT_CACHE.set(asin, { t: Date.now(), v: details });
       out.push(details);
+      } catch (err: any) {
+        // Phase 37 — defensive boundary around per-product Keepa parsing.
+        // Historically a single malformed field (e.g. an unparseable
+        // `lastUpdate` minute fed to `new Date(...).toISOString()`, or
+        // a percentage formatter that mishandled the raw float Keepa
+        // returned for top-seller share) would throw mid-loop and abort
+        // the whole brand enrichment. The "string did not match the
+        // expected pattern" SyntaxError variant is the platform's
+        // canonical message for that family of throws. We log a
+        // structured `keepa_parser_warning` line (greppable in Vercel
+        // logs to pinpoint which Keepa field is unparseable) and skip
+        // this product so the rest of the batch still lands.
+        const message = err instanceof Error ? err.message : String(err);
+        const errName = err instanceof Error ? err.name : "Error";
+        console.error(
+          JSON.stringify({
+            event: "keepa_parser_warning",
+            asin,
+            field_name: "product_record",
+            error_name: errName,
+            error_message: message,
+            // Compact peek at the inputs that most commonly trip parsers
+            // (URL constructors, percentage formatters, date parsers).
+            raw_value: {
+              title_len: typeof p?.title === "string" ? p.title.length : null,
+              monthly_sold_type: typeof (p as any)?.monthlySold,
+              last_update_type: typeof (p as any)?.lastUpdate,
+              variations_count: Array.isArray((p as any)?.variations)
+                ? (p as any).variations.length
+                : null,
+              variation_csv_type: typeof (p as any)?.variationCSV,
+            },
+          }),
+        );
+      }
     }
   }
   return out;
