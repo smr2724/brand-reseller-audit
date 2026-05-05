@@ -1024,15 +1024,11 @@ function ApolloSourceBadge({
 function ApolloCard({
   c,
   picked,
-  expanded,
   onToggleSelected,
-  onToggleExpanded,
 }: {
   c: BrandOwnerCandidate;
   picked: boolean;
-  expanded: boolean;
   onToggleSelected: (id: string) => void;
-  onToggleExpanded: (id: string) => void;
 }) {
   const sublineParts: string[] = [];
   if (c.apollo_industry) sublineParts.push(c.apollo_industry);
@@ -1080,15 +1076,13 @@ function ApolloCard({
               {sublineParts.join(" · ")}
             </div>
           )}
-          <button
-            type="button"
-            onClick={() => onToggleExpanded(c.id)}
-            className="text-xs text-[#7dd3fc] hover:underline mt-2"
-          >
-            {expanded ? "Hide why this match" : "Why this match"}
-          </button>
-          {expanded && (
+          {(c.extractor_reasoning ||
+            c.extractor_confidence != null ||
+            (Array.isArray(c.evidence_urls) && c.evidence_urls.length > 0)) && (
             <div className="mt-2 text-xs">
+              <div className="text-[var(--text-muted)] uppercase tracking-wide text-[10px] font-semibold mb-1">
+                Why this match
+              </div>
               {c.extractor_reasoning && (
                 <div className="text-[var(--text-muted)] whitespace-pre-wrap">
                   {c.extractor_reasoning}
@@ -1127,7 +1121,10 @@ function ApolloCard({
               color: "#4ade80",
             }}
           >
-            {formatNumber(c.apollo_total_contacts)} contacts
+            {c.apollo_total_contacts != null &&
+            Number.isFinite(c.apollo_total_contacts)
+              ? `${c.apollo_total_contacts.toLocaleString("en-US")} contacts`
+              : "Contacts unknown"}
           </div>
         </div>
       </div>
@@ -1319,9 +1316,7 @@ function CandidatesView({
                   key={c.id}
                   c={c}
                   picked={selectedIds.has(c.id)}
-                  expanded={expanded.has(c.id)}
                   onToggleSelected={onToggleSelected}
-                  onToggleExpanded={onToggleExpanded}
                 />
               ))}
             </div>
@@ -1337,9 +1332,7 @@ function CandidatesView({
                   key={c.id}
                   c={c}
                   picked={selectedIds.has(c.id)}
-                  expanded={expanded.has(c.id)}
                   onToggleSelected={onToggleSelected}
-                  onToggleExpanded={onToggleExpanded}
                 />
               ))}
             </div>
