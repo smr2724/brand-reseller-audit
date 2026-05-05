@@ -1160,10 +1160,15 @@ function ApolloCard({
             {c.apollo_total_contacts != null &&
             Number.isFinite(c.apollo_total_contacts)
               ? `${c.apollo_total_contacts.toLocaleString("en-US")} contacts`
-              : c.apollo_estimated_employees != null &&
-                  Number.isFinite(c.apollo_estimated_employees)
-                ? `~${c.apollo_estimated_employees.toLocaleString("en-US")} employees`
-                : "Contacts unknown"}
+              : c.apollo_employee_count != null &&
+                  Number.isFinite(c.apollo_employee_count) &&
+                  (c.apollo_employee_count as number) > 0
+                ? `~${(c.apollo_employee_count as number).toLocaleString("en-US")} employees`
+                : c.apollo_estimated_employees != null &&
+                    Number.isFinite(c.apollo_estimated_employees) &&
+                    (c.apollo_estimated_employees as number) > 0
+                  ? `~${(c.apollo_estimated_employees as number).toLocaleString("en-US")} employees`
+                  : "Contacts unknown"}
           </div>
         </div>
       </div>

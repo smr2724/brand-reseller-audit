@@ -138,11 +138,30 @@ export interface ApolloClient {
    * `apollo_source` so the caller can render the right badge. Stops at
    * the first tier that yields ≥ 1 hit across either endpoint, except
    * tier 4 (domain enrich) only fires if tiers 1-3 all returned zero.
+   *
+   * Phase 38.1 — After any non-empty tier, every returned org is
+   * automatically followed up with `organizations/enrich` (by domain,
+   * else by id). The enrich endpoint is the only one that reliably
+   * populates `estimated_num_employees` and other deep org fields, so
+   * the search-only payload is sparse and uninformative on its own.
+   * Enriched fields are merged into the org before it leaves this
+   * function. The `tier_used` returned is unchanged (domain_enrich is
+   * still reserved for the search-miss case).
    */
   searchOrganizationsTiered(
     name: string,
     domain: string | null,
   ): Promise<ApolloTieredSearchResult>;
+  /**
+   * Phase 38.1 — Direct organizations/enrich call. Returns the full
+   * Apollo organization payload (with `estimated_num_employees`
+   * populated) when the lookup hits. Use this for backfill workflows
+   * where we already have an org id or domain on a stored candidate.
+   */
+  enrichOrganization(args: {
+    domain?: string | null;
+    id?: string | null;
+  }): Promise<ApolloOrganization | null>;
   countContacts(organizationId: string): Promise<number | null>;
   /** For diagnostics — last raw payload per cache key. */
   rawSearches(): Record<string, unknown>;
@@ -365,6 +384,11 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
 
   // Phase 34.3 — Run a single tier against BOTH `mixed_companies/search`
   // and `accounts/search`. Returns the merged hits for that tier.
+  // Phase 38.1 — After accumulating hits, enrich each org via
+  // `organizations/enrich` so `estimated_num_employees` and the rest of
+  // the deep payload are populated. Without this follow-up the search
+  // endpoints return sparse rows where `estimated_num_employees` is
+  // always null.
   async function runTierBothEndpoints(
     tier: ApolloSearchTier,
     name: string | null,
@@ -404,7 +428,121 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
         orgs.push(o);
       }
     }
+
+    // Phase 38.1 — Follow each search hit with organizations/enrich so
+    // estimated_num_employees and friends are populated. Each enrich
+    // counts against the search budget; we still log the per-tier audit
+    // line because the merged org is what callers consume downstream.
+    for (let i = 0; i < orgs.length; i += 1) {
+      const o = orgs[i]!;
+      const enriched = await enrichOrganizationInternal({
+        domain: o.primary_domain ?? null,
+        id: o.id,
+        // Preserve apollo_source — enrich always returns "public", but a
+        // CRM-sourced hit should keep the CRM badge.
+        sourceHint: o.apollo_source,
+        tier,
+      });
+      if (enriched) {
+        orgs[i] = mergeOrg(o, enriched);
+        callsMade += 1;
+      }
+    }
     return { orgs, perTier, callsMade };
+  }
+
+  function mergeOrg(
+    base: ApolloOrganization,
+    enriched: ApolloOrganization,
+  ): ApolloOrganization {
+    return {
+      id: base.id || enriched.id,
+      name: base.name || enriched.name,
+      primary_domain: base.primary_domain ?? enriched.primary_domain,
+      estimated_num_employees:
+        enriched.estimated_num_employees ?? base.estimated_num_employees,
+      organization_city: base.organization_city ?? enriched.organization_city,
+      organization_country:
+        base.organization_country ?? enriched.organization_country,
+      industry: base.industry ?? enriched.industry,
+      // Search-side source wins so a CRM hit isn't relabeled "public".
+      apollo_source: base.apollo_source,
+    };
+  }
+
+  async function enrichOrganizationInternal(args: {
+    domain?: string | null;
+    id?: string | null;
+    sourceHint?: ApolloSource;
+    tier?: ApolloSearchTier;
+  }): Promise<ApolloOrganization | null> {
+    const domain = args.domain?.trim() || null;
+    const id = args.id?.trim() || null;
+    if (!domain && !id) return null;
+
+    const enrichBody: Record<string, unknown> = {};
+    // Apollo's enrich endpoint prefers `domain`. When absent, fall
+    // through to `id` so candidates with only an org id still get the
+    // full payload.
+    if (domain) {
+      enrichBody.domain = domain;
+    } else if (id) {
+      enrichBody.id = id;
+    }
+    const cacheKey = `enrich|followup|${(domain ?? "").toLowerCase()}|${(id ?? "").toLowerCase()}`;
+    const tier: ApolloSearchTier = args.tier ?? "domain_enrich";
+    const result = await rawSearch(tier, "enrich", enrichBody, cacheKey);
+    if (result.error) {
+      console.log(
+        JSON.stringify({
+          scope: "apollo.enrichOrganization",
+          domain,
+          id,
+          status: result.status,
+          error: result.error,
+        }),
+      );
+      return null;
+    }
+    if (result.status != null && (result.status < 200 || result.status >= 300)) {
+      console.log(
+        JSON.stringify({
+          scope: "apollo.enrichOrganization",
+          domain,
+          id,
+          status: result.status,
+          warning: "non_2xx",
+        }),
+      );
+      return null;
+    }
+    if (result.result.length === 0) {
+      console.log(
+        JSON.stringify({
+          scope: "apollo.enrichOrganization",
+          domain,
+          id,
+          status: result.status,
+          warning: "no_organization_in_payload",
+        }),
+      );
+      return null;
+    }
+    const first = result.result[0]!;
+    if (args.sourceHint) {
+      return { ...first, apollo_source: args.sourceHint };
+    }
+    return first;
+  }
+
+  async function enrichOrganization(args: {
+    domain?: string | null;
+    id?: string | null;
+  }): Promise<ApolloOrganization | null> {
+    return enrichOrganizationInternal({
+      domain: args.domain ?? null,
+      id: args.id ?? null,
+    });
   }
 
   async function searchOrganizationsTiered(
@@ -560,6 +698,7 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
   return {
     searchOrganizations,
     searchOrganizationsTiered,
+    enrichOrganization,
     countContacts,
     rawSearches,
     rawAuditEntries,
