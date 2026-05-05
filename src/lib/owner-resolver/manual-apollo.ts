@@ -53,6 +53,8 @@ export function buildManualRow(
   totalContacts: number | null,
   tierUsed: ApolloSearchTier | null,
 ): ManualApolloRow {
+  const sourceSuffix =
+    org.apollo_source === "crm" ? " [Your Apollo CRM]" : "";
   return {
     brand_id: brandId,
     resolution_run_id: runId,
@@ -62,8 +64,8 @@ export function buildManualRow(
     evidence_text: `Manual Apollo search for "${companyName}"`,
     evidence_url: null,
     match_reason: tierUsed
-      ? `Manual Apollo match (tier=${tierUsed}) for "${companyName}"`
-      : `Manual Apollo match for "${companyName}"`,
+      ? `Manual Apollo match (tier=${tierUsed}) for "${companyName}"${sourceSuffix}`
+      : `Manual Apollo match for "${companyName}"${sourceSuffix}`,
     trademark_serial_number: null,
     trademark_status: null,
     trademark_registration_date: null,
@@ -73,7 +75,14 @@ export function buildManualRow(
     heuristic_label: "unscored",
     needs_manual_review: false,
     is_manual_apollo: true,
-    raw_payload: { manual_query: companyName, apollo: org, tier: tierUsed },
+    // Phase 34.3 — `apollo_source` rides in raw_payload so the UI can
+    // render the right "Your Apollo CRM" / "Apollo Public" badge.
+    raw_payload: {
+      manual_query: companyName,
+      apollo: org,
+      apollo_source: org.apollo_source,
+      tier: tierUsed,
+    },
     apollo_organization_id: org.id,
     apollo_organization_name: org.name,
     apollo_domain: org.primary_domain,
@@ -152,10 +161,13 @@ export async function runManualApolloSearch(
     return { rows: [], tier_used: null, no_match: true };
   }
   const rows: ManualApolloRow[] = [];
+  // Phase 34.3 — Dedup on id+source so the same company surfacing as
+  // both CRM account and public org yields two rows.
   const seenIds = new Set<string>();
   for (const org of tiered.orgs) {
-    if (seenIds.has(org.id)) continue;
-    seenIds.add(org.id);
+    const k = `${org.id}|${org.apollo_source}`;
+    if (seenIds.has(k)) continue;
+    seenIds.add(k);
     const total = await apollo.countContacts(org.id);
     rows.push(
       buildManualRow(brandId, "__pending__", companyName, org, total, tiered.tier_used),

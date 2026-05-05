@@ -84,6 +84,22 @@ export interface BrandOwnerCandidate {
   // Phase 34.2 — transparency checkpoint fields.
   derived_from_candidate_id?: string | null;
   apollo_search_attempted_at?: string | null;
+  // Phase 34.3 — `raw_payload.apollo_source` (`crm` | `public`) lets the
+  // UI render the right "Your Apollo CRM" / "Apollo Public" badge.
+  raw_payload?: Record<string, unknown> | null;
+}
+
+/**
+ * Phase 34.3 — Read `raw_payload.apollo_source` ("crm" | "public") off
+ * a candidate. Returns null for non-Apollo rows or pre-34.3 rows that
+ * never had the field set.
+ */
+function getApolloSource(c: BrandOwnerCandidate): "crm" | "public" | null {
+  const rp = c.raw_payload;
+  if (!rp || typeof rp !== "object") return null;
+  const v = (rp as Record<string, unknown>).apollo_source;
+  if (v === "crm" || v === "public") return v;
+  return null;
 }
 
 const OWNER_TYPES = [
@@ -258,6 +274,11 @@ export default function BrandOwnerSection({
   // request that may have been aborted while the work continued
   // server-side. (router.refresh() can abort the in-flight fetch which
   // surfaces as "TypeError: Load failed" on Safari.)
+  //
+  // Phase 34.3 — also clear the green "Looking up X candidates..."
+  // status banner the moment we leave `enriching_apollo`. Previously
+  // this banner stuck around into `candidates_ready` and rendered
+  // alongside the empty-state message, confusing the user.
   useEffect(() => {
     if (
       brand.owner_resolution_state !== "running" &&
@@ -265,6 +286,9 @@ export default function BrandOwnerSection({
     ) {
       setErrorMsg((prev) =>
         prev && /load failed|fetch|aborted/i.test(prev) ? null : prev,
+      );
+      setStatusMsg((prev) =>
+        prev && /looking up|searching|enriching/i.test(prev) ? null : prev,
       );
     }
   }, [brand.owner_resolution_state]);
@@ -730,6 +754,7 @@ export default function BrandOwnerSection({
           manualMatches={manualMatches}
           noMatches={noMatches}
           legacyHits={legacyHits}
+          extractorCandidates={extractorCandidates}
           selectedIds={selectedIds}
           ownerType={ownerType}
           notes={notes}
@@ -849,6 +874,44 @@ function RunningView({
   );
 }
 
+function ApolloSourceBadge({
+  source,
+}: {
+  source: "crm" | "public" | null;
+}) {
+  if (source === "crm") {
+    return (
+      <span
+        className="inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-medium"
+        style={{
+          background: "#102a2a",
+          borderColor: "#1e4a4a",
+          color: "#5eead4",
+        }}
+        title="Found in your saved Apollo CRM accounts"
+      >
+        Your Apollo CRM
+      </span>
+    );
+  }
+  if (source === "public") {
+    return (
+      <span
+        className="inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-medium"
+        style={{
+          background: "#1a2233",
+          borderColor: "#2c3a55",
+          color: "#bcd0ee",
+        }}
+        title="Found in Apollo's public organizations directory"
+      >
+        Apollo Public
+      </span>
+    );
+  }
+  return null;
+}
+
 function ApolloCard({
   c,
   picked,
@@ -901,6 +964,7 @@ function ApolloCard({
                 {c.apollo_domain}
               </a>
             )}
+            <ApolloSourceBadge source={getApolloSource(c)} />
           </div>
           {sublineParts.length > 0 && (
             <div className="text-xs text-[var(--text-muted)] mt-1">
@@ -1051,6 +1115,7 @@ function CandidatesView({
   manualMatches,
   noMatches,
   legacyHits,
+  extractorCandidates,
   selectedIds,
   ownerType,
   notes,
@@ -1075,6 +1140,7 @@ function CandidatesView({
   manualMatches: BrandOwnerCandidate[];
   noMatches: BrandOwnerCandidate[];
   legacyHits: BrandOwnerCandidate[];
+  extractorCandidates: BrandOwnerCandidate[];
   selectedIds: Set<string>;
   ownerType: string;
   notes: string;
@@ -1098,13 +1164,39 @@ function CandidatesView({
   const selectedCount = selectedIds.size;
   const totalShown =
     apolloMatches.length + manualMatches.length + noMatches.length;
+  // Phase 34.3 — Surface the extractor rows that we attempted in Apollo
+  // but got 0 hits, so the user can see "we tried 4 strategies, got
+  // nothing — try the manual search below".
+  const extractorAttempted = extractorCandidates.filter(
+    (c) => c.apollo_search_attempted_at != null,
+  );
 
   return (
     <div>
       {totalShown === 0 && legacyHits.length === 0 ? (
-        <div className="text-sm text-[var(--text-muted)] py-4">
-          The resolver finished but no candidates were inserted. You can re-run
-          it or mark this brand as needing manual research.
+        <div
+          className="p-3 rounded border text-sm mb-4"
+          style={{
+            background: "#1a1f2a",
+            borderColor: "#2c3a55",
+            color: "#bcd0ee",
+          }}
+        >
+          <div className="font-medium mb-1">
+            Apollo had no public listing or saved account for{" "}
+            {extractorAttempted.length > 0
+              ? extractorAttempted.length === 1
+                ? `"${extractorAttempted[0]?.candidate_company_name ?? "this name"}"`
+                : `these ${extractorAttempted.length} names`
+              : "these names"}
+            .
+          </div>
+          <div className="text-xs text-[var(--text-muted)]">
+            We searched Apollo with 4 strategies (name+domain, domain
+            only, cleaned name, and domain enrich) across both your CRM
+            accounts and Apollo&apos;s public directory. Try the manual
+            search below or revise your selection.
+          </div>
         </div>
       ) : (
         <>
