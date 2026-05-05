@@ -1,21 +1,27 @@
 /**
- * Phase 33 / 34 — Brand Owner Resolver orchestrator.
+ * Phase 33 / 34 / 34.2 — Brand Owner Resolver orchestrator.
  *
- * Phase 33 pipeline:
- *   1. CAS-claim the brand.
- *   2. Insert an owner_resolution_runs row (status=running).
- *   3. Run USPTO + web-search adapters in parallel (soft-fail).
- *   4. Score candidates with the deterministic heuristic (kept for logging /
- *      sanity checks only — not persisted in Phase 34).
+ * Phase 34.2 splits the pipeline at a transparency checkpoint:
  *
- * Phase 34 additions:
- *   5. Feed all raw hits to the OpenAI reasoning extractor (gpt-5-mini) to
- *      get up to 3 canonical owner candidates with confidence + reasoning.
- *   6. For each canonical candidate, look it up in Apollo (org search) and
- *      count contacts. Dedupe Apollo orgs across candidates.
- *   7. Insert one row per Apollo org found. For canonical candidates with
- *      no Apollo match, insert one apollo_no_match row.
- *   8. If extractor returns 0 candidates, mark the run failed.
+ *   pending
+ *     -> running                    (USPTO + web + extractor)
+ *     -> awaiting_apollo_selection  (user reviews extractor candidates)
+ *     -> enriching_apollo           (selected candidates -> Apollo)
+ *     -> candidates_ready
+ *     -> selected
+ *
+ * `resolveBrandOwner` runs Phase 1 only (USPTO + web + extractor) and
+ * stops at `awaiting_apollo_selection`. Apollo enrichment is now driven
+ * by `enrichSelectedCandidatesWithApollo`, called from
+ * `/api/owner-resolver/run-apollo` after the user picks which candidates
+ * to look up.
+ *
+ * Phase 1 inserts the extractor candidates as `extractor` rows (Apollo
+ * fields NULL). Phase 2 inserts new `apollo` rows linked back to the
+ * originating extractor via `derived_from_candidate_id`, or stamps the
+ * extractor row's `apollo_search_attempted_at` when no Apollo hits were
+ * found (so the UI can show "we tried Apollo and got nothing" without
+ * losing the original extractor candidate).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { searchUsptoTrademarks } from "./uspto";
@@ -29,6 +35,7 @@ import {
 } from "./extractor-openai";
 import {
   createApolloClient,
+  type ApolloAuditEntry,
   type ApolloClient,
   type ApolloOrganization,
   type ApolloSearchTier,
@@ -47,8 +54,6 @@ export interface ResolveBrandOwnerOptions {
   webSearchFn?: typeof searchWebForOwners;
   /** Override the extractor — used by tests. */
   extractorFn?: typeof extractOwnerCandidates;
-  /** Override the Apollo client factory — used by tests. */
-  apolloClient?: ApolloClient | null;
   /** Bypass CAS guard — used by tests. */
   skipCasGuard?: boolean;
 }
@@ -58,10 +63,14 @@ export interface ResolveBrandOwnerResult {
   run_id: string | null;
   candidates_count: number;
   top_score: number | null;
-  state: "candidates_ready" | "failed" | "skipped";
+  state:
+    | "awaiting_apollo_selection"
+    | "candidates_ready"
+    | "failed"
+    | "skipped";
   error?: string;
-  apollo_match_count?: number;
-  apollo_no_match_count?: number;
+  /** Extractor candidate count (Phase 1). Apollo counts come later. */
+  extractor_candidate_count?: number;
 }
 
 const TOP_PRODUCT_TITLE_LIMIT = 20;
@@ -139,12 +148,80 @@ function dedupeRawCandidates(
   return Array.from(seen.values());
 }
 
+interface PersistedExtractorRow {
+  brand_id: string;
+  resolution_run_id: string;
+  candidate_company_name: string;
+  candidate_domain: string | null;
+  candidate_source: "extractor";
+  evidence_text: string | null;
+  evidence_url: string | null;
+  match_reason: string | null;
+  trademark_serial_number: null;
+  trademark_status: null;
+  trademark_registration_date: null;
+  trademark_owner_address: null;
+  goods_services_text: null;
+  heuristic_score: number;
+  heuristic_label: string;
+  needs_manual_review: boolean;
+  raw_payload: unknown;
+  apollo_organization_id: null;
+  apollo_organization_name: null;
+  apollo_domain: null;
+  apollo_employee_count: null;
+  apollo_total_contacts: null;
+  apollo_hq_city: null;
+  apollo_hq_country: null;
+  apollo_industry: null;
+  extractor_confidence: number | null;
+  extractor_reasoning: string | null;
+  evidence_urls: string[] | null;
+}
+
+function buildExtractorRow(
+  brandId: string,
+  runId: string,
+  extracted: ExtractedCandidate,
+): PersistedExtractorRow {
+  return {
+    brand_id: brandId,
+    resolution_run_id: runId,
+    candidate_company_name: extracted.canonical_company_name,
+    candidate_domain: extracted.domain,
+    candidate_source: "extractor",
+    evidence_text: extracted.reasoning || null,
+    evidence_url: extracted.evidence_urls[0] ?? null,
+    match_reason: "Extractor candidate (awaiting Apollo lookup)",
+    trademark_serial_number: null,
+    trademark_status: null,
+    trademark_registration_date: null,
+    trademark_owner_address: null,
+    goods_services_text: null,
+    heuristic_score: 0,
+    heuristic_label: "unscored",
+    needs_manual_review: false,
+    raw_payload: { extracted },
+    apollo_organization_id: null,
+    apollo_organization_name: null,
+    apollo_domain: null,
+    apollo_employee_count: null,
+    apollo_total_contacts: null,
+    apollo_hq_city: null,
+    apollo_hq_country: null,
+    apollo_industry: null,
+    extractor_confidence: extracted.confidence,
+    extractor_reasoning: extracted.reasoning || null,
+    evidence_urls: extracted.evidence_urls,
+  };
+}
+
 interface PersistedApolloMatchRow {
   brand_id: string;
   resolution_run_id: string;
   candidate_company_name: string;
   candidate_domain: string | null;
-  candidate_source: "apollo" | "apollo_no_match";
+  candidate_source: "apollo";
   evidence_text: string | null;
   evidence_url: string | null;
   match_reason: string | null;
@@ -168,12 +245,13 @@ interface PersistedApolloMatchRow {
   extractor_confidence: number | null;
   extractor_reasoning: string | null;
   evidence_urls: string[] | null;
+  derived_from_candidate_id: string | null;
 }
 
 function buildApolloRow(
   brandId: string,
   runId: string,
-  extracted: ExtractedCandidate,
+  extractorRow: ExtractorCandidateRow,
   org: ApolloOrganization,
   totalContacts: number | null,
   tierUsed: ApolloSearchTier | null,
@@ -185,9 +263,13 @@ function buildApolloRow(
     candidate_company_name: org.name,
     candidate_domain: org.primary_domain,
     candidate_source: "apollo",
-    evidence_text: extracted.reasoning || null,
-    evidence_url: extracted.evidence_urls[0] ?? null,
-    match_reason: `Apollo match for "${extracted.canonical_company_name}"${tierSuffix}`,
+    evidence_text: extractorRow.extractor_reasoning,
+    evidence_url:
+      Array.isArray(extractorRow.evidence_urls) &&
+      extractorRow.evidence_urls.length > 0
+        ? extractorRow.evidence_urls[0] ?? null
+        : null,
+    match_reason: `Apollo match for "${extractorRow.candidate_company_name}"${tierSuffix}`,
     trademark_serial_number: null,
     trademark_status: null,
     trademark_registration_date: null,
@@ -196,7 +278,7 @@ function buildApolloRow(
     heuristic_score: 0,
     heuristic_label: "unscored",
     needs_manual_review: false,
-    raw_payload: { extracted, apollo: org },
+    raw_payload: { source_candidate_id: extractorRow.id, apollo: org },
     apollo_organization_id: org.id,
     apollo_organization_name: org.name,
     apollo_domain: org.primary_domain,
@@ -205,120 +287,10 @@ function buildApolloRow(
     apollo_hq_city: org.organization_city,
     apollo_hq_country: org.organization_country,
     apollo_industry: org.industry,
-    extractor_confidence: extracted.confidence,
-    extractor_reasoning: extracted.reasoning || null,
-    evidence_urls: extracted.evidence_urls,
-  };
-}
-
-function buildNoMatchRow(
-  brandId: string,
-  runId: string,
-  extracted: ExtractedCandidate,
-): PersistedApolloMatchRow {
-  return {
-    brand_id: brandId,
-    resolution_run_id: runId,
-    candidate_company_name: extracted.canonical_company_name,
-    candidate_domain: extracted.domain,
-    candidate_source: "apollo_no_match",
-    evidence_text: extracted.reasoning || null,
-    evidence_url: extracted.evidence_urls[0] ?? null,
-    match_reason: "No Apollo match — extracted from raw hits",
-    trademark_serial_number: null,
-    trademark_status: null,
-    trademark_registration_date: null,
-    trademark_owner_address: null,
-    goods_services_text: null,
-    heuristic_score: 0,
-    heuristic_label: "unscored",
-    needs_manual_review: true,
-    raw_payload: { extracted },
-    apollo_organization_id: null,
-    apollo_organization_name: null,
-    apollo_domain: null,
-    apollo_employee_count: null,
-    apollo_total_contacts: null,
-    apollo_hq_city: null,
-    apollo_hq_country: null,
-    apollo_industry: null,
-    extractor_confidence: extracted.confidence,
-    extractor_reasoning: extracted.reasoning || null,
-    evidence_urls: extracted.evidence_urls,
-  };
-}
-
-interface ApolloPipelineResult {
-  rows: PersistedApolloMatchRow[];
-  matchCount: number;
-  noMatchCount: number;
-  apolloRaw: Record<string, unknown>;
-}
-
-/**
- * Run extractor + Apollo enrichment pipeline. Returns the rows to persist
- * (Apollo-matched + apollo_no_match) and a raw payload for the run row.
- */
-export async function runApolloPipeline(
-  brandId: string,
-  runId: string,
-  extracted: ReadonlyArray<ExtractedCandidate>,
-  apollo: ApolloClient | null,
-): Promise<ApolloPipelineResult> {
-  const rows: PersistedApolloMatchRow[] = [];
-  const seenApolloIds = new Set<string>();
-  let matchCount = 0;
-  let noMatchCount = 0;
-
-  if (!apollo) {
-    // No Apollo key — every extracted candidate becomes a no-match row.
-    for (const ext of extracted) {
-      rows.push(buildNoMatchRow(brandId, runId, ext));
-      noMatchCount += 1;
-    }
-    return {
-      rows,
-      matchCount,
-      noMatchCount,
-      apolloRaw: { error: "APOLLO_API_KEY not configured" },
-    };
-  }
-
-  for (const ext of extracted) {
-    const tiered = await apollo.searchOrganizationsTiered(
-      ext.canonical_company_name,
-      ext.domain,
-    );
-    const orgs = tiered.orgs;
-    if (orgs.length === 0) {
-      rows.push(buildNoMatchRow(brandId, runId, ext));
-      noMatchCount += 1;
-      continue;
-    }
-    let appendedAnyForExt = false;
-    for (const org of orgs) {
-      if (seenApolloIds.has(org.id)) continue;
-      seenApolloIds.add(org.id);
-      const total = await apollo.countContacts(org.id);
-      rows.push(
-        buildApolloRow(brandId, runId, ext, org, total, tiered.tier_used),
-      );
-      matchCount += 1;
-      appendedAnyForExt = true;
-    }
-    if (!appendedAnyForExt) {
-      // All Apollo hits already deduped against another extracted candidate;
-      // record the extracted name as no_match so the user still sees it.
-      rows.push(buildNoMatchRow(brandId, runId, ext));
-      noMatchCount += 1;
-    }
-  }
-
-  return {
-    rows,
-    matchCount,
-    noMatchCount,
-    apolloRaw: apollo.rawSearches(),
+    extractor_confidence: extractorRow.extractor_confidence,
+    extractor_reasoning: extractorRow.extractor_reasoning,
+    evidence_urls: extractorRow.evidence_urls ?? null,
+    derived_from_candidate_id: extractorRow.id,
   };
 }
 
@@ -416,8 +388,6 @@ export async function resolveBrandOwner(
   ]);
 
   // 4. Heuristic scoring on raw hits — kept for logs / debugging only.
-  // Phase 34: we do NOT persist these heuristic rows; the rows we insert
-  // are produced by the extractor + Apollo pipeline below.
   const merged = dedupeRawCandidates([
     ...usptoResult.candidates,
     ...webResult.candidates,
@@ -446,49 +416,41 @@ export async function resolveBrandOwner(
     webResult.per_query_answers ?? [],
   );
 
-  // 6. Apollo pipeline: org search + people-count for each extracted name.
-  const apollo =
-    opts.apolloClient !== undefined
-      ? opts.apolloClient
-      : createApolloClient();
-  const pipeline = await runApolloPipeline(
-    brandId,
-    runId,
-    extractorResult.candidates,
-    apollo,
+  // 6. Persist extractor candidates as `extractor` rows (Apollo fields
+  // remain NULL). Phase 34.2 stops here and waits for the user to choose.
+  const extractorRows: PersistedExtractorRow[] = extractorResult.candidates.map(
+    (c) => buildExtractorRow(brandId, runId, c),
   );
 
-  // 7. Bulk insert candidates. Surface PG errors to brand state (B7).
   let insertedCount = 0;
   let persistError: string | null = null;
-  if (pipeline.rows.length > 0) {
+  if (extractorRows.length > 0) {
     try {
       const { error: insErr, count } = await admin
         .from("owner_candidates")
-        .insert(pipeline.rows, { count: "exact" });
+        .insert(extractorRows, { count: "exact" });
       if (insErr) {
-        persistError = `Failed to persist candidates: ${insErr.message}`;
+        persistError = `Failed to persist extractor candidates: ${insErr.message}`;
       } else {
-        insertedCount = count ?? pipeline.rows.length;
-        if (insertedCount < pipeline.rows.length) {
-          persistError = `Persisted ${insertedCount}/${pipeline.rows.length} candidates — ${pipeline.rows.length - insertedCount} failed`;
+        insertedCount = count ?? extractorRows.length;
+        if (insertedCount < extractorRows.length) {
+          persistError = `Persisted ${insertedCount}/${extractorRows.length} extractor candidates`;
         }
       }
     } catch (e) {
-      persistError = `Failed to persist candidates: ${e instanceof Error ? e.message : String(e)}`;
+      persistError = `Failed to persist extractor candidates: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
 
-  // 8. Determine final state.
+  // 7. Determine final state.
   const bothFailed = usptoResult.error != null && webResult.error != null;
-  const noExtractedCandidates =
-    extractorResult.candidates.length === 0 && pipeline.rows.length === 0;
-  let finalState: "candidates_ready" | "failed";
+  const noExtractedCandidates = extractorResult.candidates.length === 0;
+  let finalState: "awaiting_apollo_selection" | "failed";
   let errorMessage: string | null = null;
   if (persistError) {
     finalState = "failed";
     errorMessage = truncate(persistError, 1000);
-  } else if (bothFailed && insertedCount === 0 && noExtractedCandidates) {
+  } else if (bothFailed && noExtractedCandidates) {
     finalState = "failed";
     errorMessage = [usptoResult.error, webResult.error]
       .filter(Boolean)
@@ -500,16 +462,19 @@ export async function resolveBrandOwner(
         ? `extractor failed: ${extractorResult.error}`
         : "extractor produced no candidates above confidence threshold";
   } else {
-    finalState = "candidates_ready";
+    finalState = "awaiting_apollo_selection";
     errorMessage = null;
   }
 
-  // 9. Persist run row.
+  // 8. Persist run row.
   await admin
     .from("owner_resolution_runs")
     .update({
-      status: finalState === "failed" ? "failed" : "succeeded",
-      completed_at: new Date().toISOString(),
+      // Phase 34.2: Phase 1 success leaves the run as `running` (Apollo
+      // step still pending). The run is only marked `succeeded` after
+      // Apollo enrichment lands. Failed-at-extractor still marks failed.
+      status: finalState === "failed" ? "failed" : "running",
+      completed_at: finalState === "failed" ? new Date().toISOString() : null,
       error_message: errorMessage,
       uspto_query: usptoResult.query,
       uspto_results_count: usptoResult.results_count,
@@ -536,14 +501,141 @@ export async function resolveBrandOwner(
   }
 
   return {
-    ok: finalState === "candidates_ready",
+    ok: finalState === "awaiting_apollo_selection",
     run_id: runId,
     candidates_count: insertedCount,
     top_score: null,
     state: finalState,
     error: errorMessage ?? undefined,
-    apollo_match_count: pipeline.matchCount,
-    apollo_no_match_count: pipeline.noMatchCount,
+    extractor_candidate_count: extractorResult.candidates.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 34.2 — Apollo enrichment phase, called from
+// /api/owner-resolver/run-apollo after the user selects which extractor
+// candidates to look up.
+
+export interface ExtractorCandidateRow {
+  id: string;
+  brand_id: string;
+  resolution_run_id: string;
+  candidate_company_name: string;
+  candidate_domain: string | null;
+  extractor_confidence: number | null;
+  extractor_reasoning: string | null;
+  evidence_urls: string[] | null;
+}
+
+export interface EnrichApolloOptions {
+  apolloClient?: ApolloClient | null;
+}
+
+export interface EnrichApolloResult {
+  ok: boolean;
+  inserted_apollo_count: number;
+  no_match_count: number;
+  audit_entries: ApolloAuditEntry[];
+  error?: string;
+}
+
+/**
+ * Run Apollo's 3-tier search for each selected extractor candidate, INSERT
+ * matching organizations as `apollo` rows, and stamp
+ * `apollo_search_attempted_at` on the source extractor row when no hits.
+ */
+export async function enrichSelectedCandidatesWithApollo(
+  admin: SupabaseClient,
+  brandId: string,
+  runId: string,
+  candidates: ReadonlyArray<ExtractorCandidateRow>,
+  opts: EnrichApolloOptions = {},
+): Promise<EnrichApolloResult> {
+  const apollo =
+    opts.apolloClient !== undefined ? opts.apolloClient : createApolloClient();
+  const auditEntries: ApolloAuditEntry[] = [];
+
+  if (!apollo) {
+    const nowIso = new Date().toISOString();
+    for (const c of candidates) {
+      await admin
+        .from("owner_candidates")
+        .update({ apollo_search_attempted_at: nowIso })
+        .eq("id", c.id);
+    }
+    return {
+      ok: true,
+      inserted_apollo_count: 0,
+      no_match_count: candidates.length,
+      audit_entries: auditEntries,
+      error: "APOLLO_API_KEY not configured",
+    };
+  }
+
+  const apolloRowsToInsert: PersistedApolloMatchRow[] = [];
+  const seenApolloIds = new Set<string>();
+  let inserted = 0;
+  let noMatch = 0;
+
+  for (const c of candidates) {
+    const tiered = await apollo.searchOrganizationsTiered(
+      c.candidate_company_name,
+      c.candidate_domain ?? null,
+    );
+    const orgs = tiered.orgs;
+    if (orgs.length === 0) {
+      // Stamp attempted_at on the extractor row so the UI can show
+      // "we tried Apollo and got nothing" — but keep the source row.
+      await admin
+        .from("owner_candidates")
+        .update({ apollo_search_attempted_at: new Date().toISOString() })
+        .eq("id", c.id);
+      noMatch += 1;
+      continue;
+    }
+    let appendedAnyForExt = false;
+    for (const org of orgs) {
+      if (seenApolloIds.has(org.id)) continue;
+      seenApolloIds.add(org.id);
+      const total = await apollo.countContacts(org.id);
+      apolloRowsToInsert.push(
+        buildApolloRow(brandId, runId, c, org, total, tiered.tier_used),
+      );
+      inserted += 1;
+      appendedAnyForExt = true;
+    }
+    // Stamp attempted_at regardless so we can show "Apollo tried" badge.
+    await admin
+      .from("owner_candidates")
+      .update({ apollo_search_attempted_at: new Date().toISOString() })
+      .eq("id", c.id);
+    if (!appendedAnyForExt) {
+      noMatch += 1;
+    }
+  }
+
+  if (apolloRowsToInsert.length > 0) {
+    const { error: insErr } = await admin
+      .from("owner_candidates")
+      .insert(apolloRowsToInsert);
+    if (insErr) {
+      auditEntries.push(...apollo.rawAuditEntries());
+      return {
+        ok: false,
+        inserted_apollo_count: 0,
+        no_match_count: noMatch,
+        audit_entries: auditEntries,
+        error: `Failed to insert apollo rows: ${insErr.message}`,
+      };
+    }
+  }
+
+  auditEntries.push(...apollo.rawAuditEntries());
+  return {
+    ok: true,
+    inserted_apollo_count: inserted,
+    no_match_count: noMatch,
+    audit_entries: auditEntries,
   };
 }
 

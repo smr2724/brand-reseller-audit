@@ -1,13 +1,28 @@
 /**
- * Phase 34 / 34.1 — Apollo client for organization search + contact counting.
+ * Phase 34 / 34.1 / 34.2 — Apollo client for organization search + contact
+ * counting.
  *
  * Used by the owner resolver to attach Apollo organization metadata to
  * extracted owner candidates. Two endpoints:
  *
  *   POST https://api.apollo.io/v1/mixed_companies/search
- *     { q_organization_name, q_organization_domains?, page, per_page }
+ *     (form-encoded body)  q_organization_name, q_organization_domains[]?, page, per_page
  *   POST https://api.apollo.io/v1/mixed_people/search
- *     { organization_ids: [id], page, per_page }
+ *     (form-encoded body)  organization_ids[], page, per_page
+ *
+ * Phase 34.2 ROOT CAUSE FIX — `mixed_companies/search` was being called with
+ * a JSON body and `Content-Type: application/json`. Apollo's documented
+ * contract for this endpoint is form-encoded POST: when sent JSON, Apollo's
+ * gateway returns 200 OK with an empty `organizations: []` array (it
+ * silently ignores unrecognized parameters), which manifested as
+ * `apollo_no_match` for companies that very much exist in the user's
+ * account (e.g. "Diversified Hospitality Solutions, Ltd.").
+ *
+ * The fix: send the body as `application/x-www-form-urlencoded`, with
+ * array fields encoded as repeated `q_organization_domains[]=...`. Same
+ * for `mixed_people/search` (organization_ids[]=...). API key still goes
+ * in the `X-Api-Key` header (Apollo accepts either header or `api_key`
+ * body field; header keeps it out of access logs).
  *
  * Phase 34.1 — `searchOrganizationsTiered` walks a 3-tier fallback so we
  * stop bailing out on `apollo_no_match` whenever the first query returned
@@ -23,6 +38,10 @@
  * Per-run cache keyed by `name|domain` so re-runs and dedup don't re-charge
  * against rate quota. Modest concurrency (2) and small backoff on
  * 429 / 5xx.
+ *
+ * Phase 34.2 also exposes `rawAuditEntries()` so the orchestrator can
+ * persist the full request/response trail to
+ * `owner_resolution_runs.raw_apollo_payload` for ongoing observability.
  */
 import { rateLimit } from "./rate-limit";
 
@@ -64,6 +83,17 @@ export interface ApolloClientOptions {
   searchBudget?: number;
 }
 
+export interface ApolloAuditEntry {
+  tier: ApolloSearchTier | "people_count";
+  candidate_name: string | null;
+  request: { url: string; body: Record<string, unknown> };
+  response:
+    | { status: number; body: unknown }
+    | { status: null; error: string };
+  hit_count: number | null;
+  attempted_at: string;
+}
+
 export interface ApolloClient {
   searchOrganizations(name: string, domain?: string | null): Promise<ApolloOrganization[]>;
   /**
@@ -78,6 +108,12 @@ export interface ApolloClient {
   countContacts(organizationId: string): Promise<number | null>;
   /** For diagnostics — last raw payload per cache key. */
   rawSearches(): Record<string, unknown>;
+  /**
+   * Phase 34.2 — Full request/response audit trail for every Apollo call
+   * this client made (org search + people count). Persisted to
+   * `owner_resolution_runs.raw_apollo_payload`.
+   */
+  rawAuditEntries(): ApolloAuditEntry[];
   /** Phase 34.1 — How many search-budget calls remain. */
   searchBudgetRemaining(): number;
 }
@@ -85,10 +121,38 @@ export interface ApolloClient {
 interface CachedSearch {
   result: ApolloOrganization[];
   raw: unknown;
+  status: number | null;
+  error?: string;
 }
 
 interface CachedCount {
   count: number | null;
+}
+
+/**
+ * Phase 34.2 — Encode a body of mixed scalar / array values as
+ * application/x-www-form-urlencoded. Apollo expects array params as
+ * repeated `key[]=value` pairs (PHP-style brackets). This is the form
+ * Apollo's PHP/Rails gateway parses correctly; sending a JSON body to
+ * `mixed_companies/search` returns a generic empty result instead of
+ * the matching organizations.
+ */
+export function encodeApolloFormBody(body: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(body)) {
+    if (value === null || value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const v of value) {
+        if (v === null || v === undefined) continue;
+        parts.push(
+          `${encodeURIComponent(`${key}[]`)}=${encodeURIComponent(String(v))}`,
+        );
+      }
+      continue;
+    }
+    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+  }
+  return parts.join("&");
 }
 
 /**
@@ -128,6 +192,7 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
 
   const orgCache = new Map<string, CachedSearch>();
   const countCache = new Map<string, CachedCount>();
+  const auditEntries: ApolloAuditEntry[] = [];
 
   const orgKey = (
     tier: string,
@@ -146,8 +211,21 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
       const stub: CachedSearch = {
         result: [],
         raw: { error: "apollo search budget exhausted", tier },
+        status: null,
+        error: "apollo search budget exhausted",
       };
       orgCache.set(cacheKey, stub);
+      auditEntries.push({
+        tier,
+        candidate_name:
+          typeof body.q_organization_name === "string"
+            ? body.q_organization_name
+            : null,
+        request: { url: `${APOLLO_BASE}${ORG_SEARCH_PATH}`, body },
+        response: { status: null, error: "apollo search budget exhausted" },
+        hit_count: 0,
+        attempted_at: new Date().toISOString(),
+      });
       return stub;
     }
     searchBudget -= 1;
@@ -161,6 +239,20 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
       () => searchOrganizationsImpl(body, apiKey, fetchImpl),
     );
     orgCache.set(cacheKey, result);
+    auditEntries.push({
+      tier,
+      candidate_name:
+        typeof body.q_organization_name === "string"
+          ? body.q_organization_name
+          : null,
+      request: { url: `${APOLLO_BASE}${ORG_SEARCH_PATH}`, body },
+      response:
+        result.status != null
+          ? { status: result.status, body: result.raw }
+          : { status: null, error: result.error ?? "fetch failed" },
+      hit_count: result.result.length,
+      attempted_at: new Date().toISOString(),
+    });
     return result;
   }
 
@@ -271,7 +363,7 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
     if (!cleanId) return null;
     const cached = countCache.get(cleanId);
     if (cached) return cached.count;
-    const count = await rateLimit(
+    const result = await rateLimit(
       {
         key: "apollo",
         maxConcurrent: 2,
@@ -280,8 +372,22 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
       },
       () => countContactsImpl(cleanId, apiKey, fetchImpl),
     );
-    countCache.set(cleanId, { count });
-    return count;
+    countCache.set(cleanId, { count: result.count });
+    auditEntries.push({
+      tier: "people_count",
+      candidate_name: null,
+      request: {
+        url: `${APOLLO_BASE}${PEOPLE_SEARCH_PATH}`,
+        body: { organization_ids: [cleanId], page: 1, per_page: 1 },
+      },
+      response:
+        result.status != null
+          ? { status: result.status, body: result.raw }
+          : { status: null, error: result.error ?? "fetch failed" },
+      hit_count: result.count ?? 0,
+      attempted_at: new Date().toISOString(),
+    });
+    return result.count;
   }
 
   function rawSearches(): Record<string, unknown> {
@@ -290,6 +396,10 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
       out[k] = v.raw;
     }
     return out;
+  }
+
+  function rawAuditEntries(): ApolloAuditEntry[] {
+    return auditEntries.slice();
   }
 
   function searchBudgetRemaining(): number {
@@ -301,13 +411,14 @@ export function createApolloClient(opts: ApolloClientOptions = {}): ApolloClient
     searchOrganizationsTiered,
     countContacts,
     rawSearches,
+    rawAuditEntries,
     searchBudgetRemaining,
   };
 }
 
 async function fetchWithRetry(
   url: string,
-  body: unknown,
+  body: Record<string, unknown>,
   apiKey: string,
   fetchImpl: typeof fetch,
 ): Promise<Response | null> {
@@ -317,12 +428,16 @@ async function fetchWithRetry(
       res = await fetchImpl(url, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          // Phase 34.2 — Apollo's `mixed_companies/search` and
+          // `mixed_people/search` expect form-encoded bodies. Sending JSON
+          // returned 200 with empty `organizations: []`.
+          "Content-Type": "application/x-www-form-urlencoded",
           Accept: "application/json",
+          "Cache-Control": "no-cache",
           // Apollo accepts api_key in body or X-Api-Key header.
           "X-Api-Key": apiKey,
         },
-        body: JSON.stringify(body),
+        body: encodeApolloFormBody(body),
         cache: "no-store",
       } as RequestInit);
     } catch {
@@ -351,24 +466,59 @@ async function searchOrganizationsImpl(
     apiKey,
     fetchImpl,
   );
-  if (!res || !res.ok) {
-    return { result: [], raw: { error: res ? `apollo ${res.status}` : "fetch failed" } };
+  if (!res) {
+    return {
+      result: [],
+      raw: { error: "fetch failed" },
+      status: null,
+      error: "fetch failed",
+    };
+  }
+  if (!res.ok) {
+    let errBody: unknown = null;
+    try {
+      errBody = await res.json();
+    } catch {
+      try {
+        errBody = await res.text();
+      } catch {
+        errBody = null;
+      }
+    }
+    return {
+      result: [],
+      raw: { error: `apollo ${res.status}`, body: errBody },
+      status: res.status,
+      error: `apollo ${res.status}`,
+    };
   }
   let json: unknown = null;
   try {
     json = await res.json();
   } catch {
-    return { result: [], raw: { error: "invalid JSON" } };
+    return {
+      result: [],
+      raw: { error: "invalid JSON" },
+      status: res.status,
+      error: "invalid JSON",
+    };
   }
   const orgs = parseOrganizations(json);
-  return { result: orgs, raw: json };
+  return { result: orgs, raw: json, status: res.status };
+}
+
+interface CountImplResult {
+  count: number | null;
+  raw: unknown;
+  status: number | null;
+  error?: string;
 }
 
 async function countContactsImpl(
   organizationId: string,
   apiKey: string,
   fetchImpl: typeof fetch,
-): Promise<number | null> {
+): Promise<CountImplResult> {
   const body = {
     organization_ids: [organizationId],
     page: 1,
@@ -380,14 +530,33 @@ async function countContactsImpl(
     apiKey,
     fetchImpl,
   );
-  if (!res || !res.ok) return null;
+  if (!res) {
+    return { count: null, raw: null, status: null, error: "fetch failed" };
+  }
+  if (!res.ok) {
+    return {
+      count: null,
+      raw: { error: `apollo ${res.status}` },
+      status: res.status,
+      error: `apollo ${res.status}`,
+    };
+  }
   let json: unknown = null;
   try {
     json = await res.json();
   } catch {
-    return null;
+    return {
+      count: null,
+      raw: { error: "invalid JSON" },
+      status: res.status,
+      error: "invalid JSON",
+    };
   }
-  return parseTotalEntries(json);
+  return {
+    count: parseTotalEntries(json),
+    raw: json,
+    status: res.status,
+  };
 }
 
 export function parseOrganizations(json: unknown): ApolloOrganization[] {

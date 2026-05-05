@@ -1,12 +1,20 @@
 "use client";
 
 /**
- * Phase 33.1 / 34 — Brand Owner Resolver section, rendered at the top of
- * the user-facing brand page (/app/brands/[id]).
+ * Phase 33.1 / 34 / 34.2 — Brand Owner Resolver section, rendered at the
+ * top of the user-facing brand page (/app/brands/[id]).
  *
- * Phase 34: candidates are Apollo-matched (or apollo_no_match) — the user
- * picks an actual Apollo organization with a contact count, not a raw
- * search hit. The old 13-row web-search list is hidden.
+ * Phase 34.2: a transparency checkpoint sits between the extractor and
+ * Apollo. When the brand is in `awaiting_apollo_selection` we render the
+ * extractor candidates with checkboxes + a free-text "add another
+ * candidate" form + "Look up selected" / "Pick for me" buttons. Apollo
+ * fires only when the user clicks one of those.
+ *
+ * The polling effect now also watches for the `enriching_apollo` state
+ * (Apollo running in the background) and clears any stale errorMsg the
+ * moment the brand state transitions away from `running` so the red
+ * "Load failed" banner can't stick around after a fetch was aborted by
+ * router.refresh().
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -73,6 +81,9 @@ export interface BrandOwnerCandidate {
   evidence_urls?: string[] | null;
   // Phase 34.1 — manual Apollo override marker.
   is_manual_apollo?: boolean | null;
+  // Phase 34.2 — transparency checkpoint fields.
+  derived_from_candidate_id?: string | null;
+  apollo_search_attempted_at?: string | null;
 }
 
 const OWNER_TYPES = [
@@ -152,6 +163,17 @@ export default function BrandOwnerSection({
   const [manualBusy, setManualBusy] = useState(false);
   const [manualMsg, setManualMsg] = useState<string | null>(null);
 
+  // Phase 34.2 — transparency checkpoint state. Selection of which
+  // extractor candidates to forward to Apollo + a free-text "add another"
+  // form.
+  const [checkpointSelected, setCheckpointSelected] = useState<Set<string>>(
+    new Set(),
+  );
+  const [extractorAddName, setExtractorAddName] = useState<string>("");
+  const [extractorAddDomain, setExtractorAddDomain] = useState<string>("");
+  const [extractorAddBusy, setExtractorAddBusy] = useState(false);
+  const [extractorAddMsg, setExtractorAddMsg] = useState<string | null>(null);
+
   useEffect(() => {
     setBrand(initialBrand);
     setRun(initialRun);
@@ -165,8 +187,17 @@ export default function BrandOwnerSection({
 
   const pollCountRef = useRef(0);
 
+  // Phase 34.2 — poll while the resolver is doing work in the background.
+  // `running` covers Phase 1 (USPTO + web + extractor). `enriching_apollo`
+  // covers Phase 2 (Apollo). Once we leave either state we clear the
+  // `errorMsg` (which can otherwise carry a stale "Load failed" from a
+  // fetch that got aborted by router.refresh()) and refresh the page.
+  const isPolling =
+    brand.owner_resolution_state === "running" ||
+    brand.owner_resolution_state === "enriching_apollo";
+
   useEffect(() => {
-    if (brand.owner_resolution_state !== "running") {
+    if (!isPolling) {
       pollCountRef.current = 0;
       setPollExhausted(false);
       return;
@@ -193,7 +224,12 @@ export default function BrandOwnerSection({
         setBrand(json.brand);
         setRun(json.run);
         setCandidates(json.candidates ?? []);
-        if (json.brand.owner_resolution_state !== "running") {
+        const nextState = json.brand.owner_resolution_state;
+        if (nextState !== "running" && nextState !== "enriching_apollo") {
+          // Clear any stale "Load failed" left over from an aborted
+          // trigger fetch — at this point we have fresh data so the
+          // banner is misleading.
+          setErrorMsg(null);
           router.refresh();
           return;
         }
@@ -215,20 +251,47 @@ export default function BrandOwnerSection({
     return () => {
       cancelled = true;
     };
-  }, [brand.id, brand.owner_resolution_state, router]);
+  }, [brand.id, isPolling, router]);
 
-  // Phase 34 — only show Apollo / apollo_no_match candidates. Older raw
-  // candidates from a pre-Phase-34 run still render at the bottom for
-  // back-compat, but we collapse them.
-  const { apolloMatches, manualMatches, noMatches, legacyHits } = useMemo(() => {
+  // Belt-and-suspenders: any time the brand state moves out of `running` /
+  // `enriching_apollo`, clear an error banner left over from the trigger
+  // request that may have been aborted while the work continued
+  // server-side. (router.refresh() can abort the in-flight fetch which
+  // surfaces as "TypeError: Load failed" on Safari.)
+  useEffect(() => {
+    if (
+      brand.owner_resolution_state !== "running" &&
+      brand.owner_resolution_state !== "enriching_apollo"
+    ) {
+      setErrorMsg((prev) =>
+        prev && /load failed|fetch|aborted/i.test(prev) ? null : prev,
+      );
+    }
+  }, [brand.owner_resolution_state]);
+
+  // Phase 34 / 34.2 — bucket candidates by source. Extractor rows appear
+  // at the transparency checkpoint; apollo / apollo_manual rows after.
+  const {
+    apolloMatches,
+    manualMatches,
+    noMatches,
+    legacyHits,
+    extractorCandidates,
+  } = useMemo(() => {
     const apolloMatches: BrandOwnerCandidate[] = [];
     const manualMatches: BrandOwnerCandidate[] = [];
     const noMatches: BrandOwnerCandidate[] = [];
     const legacyHits: BrandOwnerCandidate[] = [];
+    const extractorCandidates: BrandOwnerCandidate[] = [];
     for (const c of candidates) {
       if (c.candidate_source === "apollo_manual") manualMatches.push(c);
       else if (c.candidate_source === "apollo") apolloMatches.push(c);
       else if (c.candidate_source === "apollo_no_match") noMatches.push(c);
+      else if (
+        c.candidate_source === "extractor" ||
+        c.candidate_source === "extractor_manual"
+      )
+        extractorCandidates.push(c);
       else legacyHits.push(c);
     }
     const byContacts = (a: BrandOwnerCandidate, b: BrandOwnerCandidate) => {
@@ -244,7 +307,14 @@ export default function BrandOwnerSection({
     noMatches.sort(
       (a, b) => (b.extractor_confidence ?? 0) - (a.extractor_confidence ?? 0),
     );
-    return { apolloMatches, manualMatches, noMatches, legacyHits };
+    extractorCandidates.sort((a, b) => {
+      // extractor_manual rows always first (user-added), then by confidence.
+      const am = a.candidate_source === "extractor_manual" ? 1 : 0;
+      const bm = b.candidate_source === "extractor_manual" ? 1 : 0;
+      if (am !== bm) return bm - am;
+      return (b.extractor_confidence ?? 0) - (a.extractor_confidence ?? 0);
+    });
+    return { apolloMatches, manualMatches, noMatches, legacyHits, extractorCandidates };
   }, [candidates]);
 
   const callApi = useCallback(
@@ -317,14 +387,17 @@ export default function BrandOwnerSection({
       brand_id: brand.id,
     });
     if (result) {
-      const matches = Number(result.apollo_match_count ?? 0);
-      const noMatch = Number(result.apollo_no_match_count ?? 0);
-      const haveCounts = result.apollo_match_count != null;
-      setStatusMsg(
-        haveCounts
-          ? `Resolver run complete — ${matches} Apollo matches, ${noMatch} no-match`
-          : `Resolver run complete — ${String(result.candidates_count ?? 0)} candidates inserted`,
-      );
+      const extractorCount = Number(result.extractor_candidate_count ?? 0);
+      const state = String(result.state ?? "");
+      if (state === "awaiting_apollo_selection") {
+        setStatusMsg(
+          `Found ${extractorCount} candidate${extractorCount === 1 ? "" : "s"} — review below and pick which to look up in Apollo.`,
+        );
+      } else {
+        setStatusMsg(
+          `Resolver run complete — ${String(result.candidates_count ?? 0)} candidates inserted`,
+        );
+      }
       router.refresh();
     } else {
       router.refresh();
@@ -453,6 +526,113 @@ export default function BrandOwnerSection({
     });
   }, []);
 
+  const toggleCheckpointSelected = useCallback((id: string) => {
+    setCheckpointSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const onAddExtractorCandidate = useCallback(async () => {
+    const name = extractorAddName.trim();
+    if (name.length === 0) {
+      setExtractorAddMsg("Enter a company name first.");
+      return;
+    }
+    setExtractorAddBusy(true);
+    setExtractorAddMsg(null);
+    setErrorMsg(null);
+    try {
+      const res = await fetch("/api/owner-resolver/add-extractor-candidate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          brand_id: brand.id,
+          company_name: name,
+          domain: extractorAddDomain.trim() || undefined,
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) {
+        setExtractorAddMsg(
+          typeof json.error === "string" ? json.error : `failed (${res.status})`,
+        );
+        return;
+      }
+      const cand = json.candidate as BrandOwnerCandidate | undefined;
+      if (cand?.id) {
+        setCandidates((prev) => [...prev, cand]);
+        setCheckpointSelected((prev) => {
+          const next = new Set(prev);
+          next.add(cand.id);
+          return next;
+        });
+      }
+      setExtractorAddName("");
+      setExtractorAddDomain("");
+      setExtractorAddMsg(`Added "${name}".`);
+    } catch (e) {
+      setExtractorAddMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExtractorAddBusy(false);
+    }
+  }, [brand.id, extractorAddDomain, extractorAddName]);
+
+  const optimisticToEnrichingApollo = useCallback(() => {
+    setBrand((b) => ({
+      ...b,
+      owner_resolution_state: "enriching_apollo",
+      owner_resolution_error: null,
+    }));
+  }, []);
+
+  const onLookupSelectedInApollo = useCallback(
+    async (allIds: string[]) => {
+      const ids =
+        allIds.length > 0
+          ? allIds
+          : Array.from(checkpointSelected);
+      if (ids.length === 0) {
+        setErrorMsg("Pick at least one candidate first.");
+        return;
+      }
+      optimisticToEnrichingApollo();
+      const result = await callApi("/api/owner-resolver/run-apollo", {
+        brand_id: brand.id,
+        candidate_ids: ids,
+      });
+      if (result) {
+        setStatusMsg(
+          `Looking up ${ids.length} candidate${ids.length === 1 ? "" : "s"} in Apollo…`,
+        );
+        setCheckpointSelected(new Set());
+        router.refresh();
+      } else {
+        // Roll back optimistic state by polling.
+        router.refresh();
+      }
+    },
+    [
+      brand.id,
+      callApi,
+      checkpointSelected,
+      optimisticToEnrichingApollo,
+      router,
+    ],
+  );
+
+  const onPickForMe = useCallback(() => {
+    const allIds = extractorCandidates.map((c) => c.id);
+    void onLookupSelectedInApollo(allIds);
+  }, [extractorCandidates, onLookupSelectedInApollo]);
+
+  const onLookupChecked = useCallback(() => {
+    void onLookupSelectedInApollo([]);
+  }, [onLookupSelectedInApollo]);
+
   const toggleExpanded = useCallback((id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -510,6 +690,35 @@ export default function BrandOwnerSection({
       {state === "running" && (
         <RunningView
           run={run}
+          pollExhausted={pollExhausted}
+          onRefresh={() => router.refresh()}
+        />
+      )}
+
+      {state === "awaiting_apollo_selection" && (
+        <CheckpointView
+          extractorCandidates={extractorCandidates}
+          checkpointSelected={checkpointSelected}
+          expanded={expanded}
+          onToggleSelected={toggleCheckpointSelected}
+          onToggleExpanded={toggleExpanded}
+          extractorAddName={extractorAddName}
+          extractorAddDomain={extractorAddDomain}
+          onExtractorAddNameChange={setExtractorAddName}
+          onExtractorAddDomainChange={setExtractorAddDomain}
+          extractorAddBusy={extractorAddBusy}
+          extractorAddMsg={extractorAddMsg}
+          onAddExtractorCandidate={onAddExtractorCandidate}
+          onLookupChecked={onLookupChecked}
+          onPickForMe={onPickForMe}
+          onRerun={onTrigger}
+          triggerBusy={triggerBusy}
+          busy={busy}
+        />
+      )}
+
+      {state === "enriching_apollo" && (
+        <EnrichingApolloView
           pollExhausted={pollExhausted}
           onRefresh={() => router.refresh()}
         />
@@ -1171,6 +1380,297 @@ function FailedView({
       >
         {triggerBusy ? "Trying…" : "Try again"}
       </button>
+    </div>
+  );
+}
+
+function ExtractorCandidateCard({
+  c,
+  picked,
+  expanded,
+  onToggleSelected,
+  onToggleExpanded,
+}: {
+  c: BrandOwnerCandidate;
+  picked: boolean;
+  expanded: boolean;
+  onToggleSelected: (id: string) => void;
+  onToggleExpanded: (id: string) => void;
+}) {
+  const conf = c.extractor_confidence;
+  const isManual = c.candidate_source === "extractor_manual";
+  const sublineParts: string[] = [];
+  if (conf != null) sublineParts.push(`Confidence: ${conf.toFixed(2)}`);
+  if (isManual) sublineParts.push("User-added");
+  return (
+    <div
+      className="rounded border p-3 mb-2"
+      style={{
+        background: "var(--bg-2)",
+        borderColor: "var(--border-soft)",
+      }}
+    >
+      <div className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          checked={picked}
+          onChange={() => onToggleSelected(c.id)}
+          className="mt-1"
+        />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="font-semibold text-base">
+              {c.candidate_company_name}
+            </span>
+            {c.candidate_domain && (
+              <a
+                href={`https://${c.candidate_domain}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-[#7dd3fc] hover:underline"
+              >
+                {c.candidate_domain}
+              </a>
+            )}
+          </div>
+          {sublineParts.length > 0 && (
+            <div className="text-xs text-[var(--text-muted)] mt-1">
+              {sublineParts.join(" · ")}
+            </div>
+          )}
+          {c.extractor_reasoning && (
+            <div className="text-xs text-[var(--text-muted)] mt-1 whitespace-pre-wrap">
+              {c.extractor_reasoning}
+            </div>
+          )}
+          {Array.isArray(c.evidence_urls) && c.evidence_urls.length > 0 && (
+            <button
+              type="button"
+              onClick={() => onToggleExpanded(c.id)}
+              className="text-xs text-[#7dd3fc] hover:underline mt-2"
+            >
+              {expanded ? "Hide evidence" : "Show evidence"}
+            </button>
+          )}
+          {expanded &&
+            Array.isArray(c.evidence_urls) &&
+            c.evidence_urls.length > 0 && (
+              <ul className="list-disc pl-5 mt-1 text-xs">
+                {c.evidence_urls.slice(0, 5).map((u) => (
+                  <li key={u}>
+                    <a
+                      href={u}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[#7dd3fc] hover:underline break-all"
+                    >
+                      {u}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CheckpointView({
+  extractorCandidates,
+  checkpointSelected,
+  expanded,
+  onToggleSelected,
+  onToggleExpanded,
+  extractorAddName,
+  extractorAddDomain,
+  onExtractorAddNameChange,
+  onExtractorAddDomainChange,
+  extractorAddBusy,
+  extractorAddMsg,
+  onAddExtractorCandidate,
+  onLookupChecked,
+  onPickForMe,
+  onRerun,
+  triggerBusy,
+  busy,
+}: {
+  extractorCandidates: BrandOwnerCandidate[];
+  checkpointSelected: Set<string>;
+  expanded: Set<string>;
+  onToggleSelected: (id: string) => void;
+  onToggleExpanded: (id: string) => void;
+  extractorAddName: string;
+  extractorAddDomain: string;
+  onExtractorAddNameChange: (v: string) => void;
+  onExtractorAddDomainChange: (v: string) => void;
+  extractorAddBusy: boolean;
+  extractorAddMsg: string | null;
+  onAddExtractorCandidate: () => void;
+  onLookupChecked: () => void;
+  onPickForMe: () => void;
+  onRerun: () => void;
+  triggerBusy: boolean;
+  busy: string | null;
+}) {
+  const apolloBusy = busy === "/api/owner-resolver/run-apollo";
+  const checkedCount = checkpointSelected.size;
+  return (
+    <div>
+      <div
+        className="mb-3 p-3 rounded border text-sm"
+        style={{
+          background: "#1a2233",
+          borderColor: "#2c3a55",
+          color: "#bcd0ee",
+        }}
+      >
+        <div className="font-medium mb-1">
+          Extractor found these candidates — review and select which to look
+          up in Apollo
+        </div>
+        <div className="text-xs text-[var(--text-muted)]">
+          We searched USPTO and the web, then asked a reasoning model to
+          extract the owning company. Pick which of these to look up in
+          Apollo to attach contact counts and organization metadata.
+        </div>
+      </div>
+
+      {extractorCandidates.length === 0 ? (
+        <div className="text-sm text-[var(--text-muted)] py-4">
+          No extractor candidates above the confidence threshold. You can add
+          one below or re-run the resolver.
+        </div>
+      ) : (
+        extractorCandidates.map((c) => (
+          <ExtractorCandidateCard
+            key={c.id}
+            c={c}
+            picked={checkpointSelected.has(c.id)}
+            expanded={expanded.has(c.id)}
+            onToggleSelected={onToggleSelected}
+            onToggleExpanded={onToggleExpanded}
+          />
+        ))
+      )}
+
+      <div
+        className="mt-4 p-3 rounded border"
+        style={{
+          background: "var(--bg-2)",
+          borderColor: "var(--border-soft)",
+        }}
+      >
+        <div className="text-xs uppercase tracking-wide text-[var(--text-muted)] mb-2">
+          Add another candidate
+        </div>
+        <div className="text-xs text-[var(--text-muted)] mb-2">
+          Know the owner already? Type a company name (and optional domain).
+          We&apos;ll add it to the list below pre-checked, ready to forward
+          to Apollo.
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={extractorAddName}
+            onChange={(e) => onExtractorAddNameChange(e.target.value)}
+            placeholder="Company name"
+            className="input flex-1 min-w-[200px]"
+            disabled={extractorAddBusy}
+          />
+          <input
+            type="text"
+            value={extractorAddDomain}
+            onChange={(e) => onExtractorAddDomainChange(e.target.value)}
+            placeholder="Domain (optional)"
+            className="input flex-1 min-w-[160px]"
+            disabled={extractorAddBusy}
+          />
+          <button
+            type="button"
+            className="btn btn-ghost text-sm"
+            onClick={onAddExtractorCandidate}
+            disabled={extractorAddBusy || extractorAddName.trim().length === 0}
+          >
+            {extractorAddBusy ? "Adding…" : "+ Add"}
+          </button>
+        </div>
+        {extractorAddMsg && (
+          <div className="text-xs text-[var(--text-muted)] mt-2">
+            {extractorAddMsg}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <div className="text-sm">
+          <span className="font-medium">{checkedCount}</span> selected
+        </div>
+        <button
+          type="button"
+          className="btn btn-primary text-sm"
+          onClick={onLookupChecked}
+          disabled={apolloBusy || checkedCount === 0}
+        >
+          {apolloBusy ? "Looking up…" : "Look up selected in Apollo"}
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost text-sm"
+          onClick={onPickForMe}
+          disabled={apolloBusy || extractorCandidates.length === 0}
+        >
+          Pick for me — look up all of them
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost text-sm ml-auto"
+          onClick={onRerun}
+          disabled={triggerBusy}
+        >
+          {triggerBusy ? "Re-running…" : "Re-run resolver"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function EnrichingApolloView({
+  pollExhausted,
+  onRefresh,
+}: {
+  pollExhausted: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <div
+      className="p-3 rounded border flex items-center gap-3 flex-wrap"
+      style={{
+        background: "#1a2233",
+        borderColor: "#2c3a55",
+        color: "#bcd0ee",
+      }}
+    >
+      <span className="inline-block w-3 h-3 rounded-full border-2 border-[#bcd0ee] border-t-transparent animate-spin" />
+      <div className="flex-1 min-w-[200px]">
+        <div className="text-sm font-medium">
+          Looking up selected candidates in Apollo…
+        </div>
+        <div className="text-xs text-[var(--text-muted)] mt-1">
+          {pollExhausted
+            ? "Taking longer than expected — try refreshing."
+            : "This usually takes a few seconds."}
+        </div>
+      </div>
+      {pollExhausted && (
+        <button
+          type="button"
+          className="btn btn-ghost text-xs"
+          onClick={onRefresh}
+        >
+          Refresh
+        </button>
+      )}
     </div>
   );
 }
