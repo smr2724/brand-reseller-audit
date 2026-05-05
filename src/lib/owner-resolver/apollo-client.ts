@@ -694,12 +694,39 @@ async function countContactsImpl(
     fetchImpl,
   );
   if (!res) {
+    console.log(
+      JSON.stringify({
+        scope: "apollo.countContacts",
+        organization_id: organizationId,
+        status: null,
+        error: "fetch failed",
+      }),
+    );
     return { count: null, raw: null, status: null, error: "fetch failed" };
   }
   if (!res.ok) {
+    let errBody: unknown = null;
+    try {
+      errBody = await res.json();
+    } catch {
+      try {
+        errBody = await res.text();
+      } catch {
+        errBody = null;
+      }
+    }
+    console.log(
+      JSON.stringify({
+        scope: "apollo.countContacts",
+        organization_id: organizationId,
+        status: res.status,
+        error: `apollo ${res.status}`,
+        body: errBody,
+      }),
+    );
     return {
       count: null,
-      raw: { error: `apollo ${res.status}` },
+      raw: { error: `apollo ${res.status}`, body: errBody },
       status: res.status,
       error: `apollo ${res.status}`,
     };
@@ -708,6 +735,14 @@ async function countContactsImpl(
   try {
     json = await res.json();
   } catch {
+    console.log(
+      JSON.stringify({
+        scope: "apollo.countContacts",
+        organization_id: organizationId,
+        status: res.status,
+        error: "invalid JSON",
+      }),
+    );
     return {
       count: null,
       raw: { error: "invalid JSON" },
@@ -715,8 +750,38 @@ async function countContactsImpl(
       error: "invalid JSON",
     };
   }
+  const parsed = parseTotalEntries(json);
+  if (parsed == null) {
+    // Successful 2xx but Apollo did not return a parseable
+    // pagination.total_entries (e.g. people: [], no pagination block).
+    // Treat that as 0 hits rather than null so the UI shows a real
+    // number; log the response shape so we can debug from Vercel.
+    const root =
+      json && typeof json === "object" ? (json as Record<string, unknown>) : {};
+    const peopleArr = Array.isArray(root.people) ? root.people : null;
+    console.log(
+      JSON.stringify({
+        scope: "apollo.countContacts",
+        organization_id: organizationId,
+        status: res.status,
+        warning: "missing total_entries",
+        has_pagination: root.pagination != null,
+        pagination_keys:
+          root.pagination && typeof root.pagination === "object"
+            ? Object.keys(root.pagination as Record<string, unknown>)
+            : null,
+        people_length: peopleArr ? peopleArr.length : null,
+        top_level_keys: Object.keys(root),
+      }),
+    );
+    return {
+      count: peopleArr ? peopleArr.length : 0,
+      raw: json,
+      status: res.status,
+    };
+  }
   return {
-    count: parseTotalEntries(json),
+    count: parsed,
     raw: json,
     status: res.status,
   };

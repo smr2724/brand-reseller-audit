@@ -1024,11 +1024,15 @@ function ApolloSourceBadge({
 function ApolloCard({
   c,
   picked,
+  expanded,
   onToggleSelected,
+  onToggleExpanded,
 }: {
   c: BrandOwnerCandidate;
   picked: boolean;
+  expanded: boolean;
   onToggleSelected: (id: string) => void;
+  onToggleExpanded: (id: string) => void;
 }) {
   const sublineParts: string[] = [];
   if (c.apollo_industry) sublineParts.push(c.apollo_industry);
@@ -1037,6 +1041,21 @@ function ApolloCard({
   if (c.apollo_employee_count != null) {
     sublineParts.push(`${formatNumber(c.apollo_employee_count)} employees`);
   }
+  const confidencePct =
+    c.extractor_confidence != null
+      ? Math.round(c.extractor_confidence * 100)
+      : null;
+  const confidenceColor =
+    confidencePct == null
+      ? "#94a3b8"
+      : confidencePct >= 80
+      ? "#4ade80"
+      : confidencePct >= 50
+      ? "#fbbf24"
+      : "#f87171";
+  const hasWhyDetails =
+    !!c.extractor_reasoning ||
+    (Array.isArray(c.evidence_urls) && c.evidence_urls.length > 0);
   return (
     <div
       className={`rounded border p-3 mb-2 ${
@@ -1070,46 +1089,61 @@ function ApolloCard({
               </a>
             )}
             <ApolloSourceBadge source={getApolloSource(c)} />
+            {confidencePct != null && (
+              <span
+                className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]"
+                title="Extractor confidence in this match"
+              >
+                <span
+                  aria-hidden
+                  className="inline-block w-1.5 h-1.5 rounded-full"
+                  style={{ background: confidenceColor }}
+                />
+                {confidencePct}% confidence
+              </span>
+            )}
           </div>
           {sublineParts.length > 0 && (
             <div className="text-xs text-[var(--text-muted)] mt-1">
               {sublineParts.join(" · ")}
             </div>
           )}
-          {(c.extractor_reasoning ||
-            c.extractor_confidence != null ||
-            (Array.isArray(c.evidence_urls) && c.evidence_urls.length > 0)) && (
-            <div className="mt-2 text-xs">
-              <div className="text-[var(--text-muted)] uppercase tracking-wide text-[10px] font-semibold mb-1">
-                Why this match
-              </div>
-              {c.extractor_reasoning && (
-                <div className="text-[var(--text-muted)] whitespace-pre-wrap">
-                  {c.extractor_reasoning}
+          {hasWhyDetails && (
+            <>
+              <button
+                type="button"
+                onClick={() => onToggleExpanded(c.id)}
+                className="text-xs text-[#7dd3fc] hover:underline mt-2"
+              >
+                {expanded ? "Hide why this match" : "Why this match"}
+              </button>
+              {expanded && (
+                <div className="mt-2 text-xs">
+                  {c.extractor_reasoning && (
+                    <div className="text-[var(--text-muted)] whitespace-pre-wrap">
+                      {c.extractor_reasoning}
+                    </div>
+                  )}
+                  {Array.isArray(c.evidence_urls) &&
+                    c.evidence_urls.length > 0 && (
+                      <ul className="list-disc pl-5 mt-1">
+                        {c.evidence_urls.slice(0, 5).map((u) => (
+                          <li key={u}>
+                            <a
+                              href={u}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[#7dd3fc] hover:underline break-all"
+                            >
+                              {u}
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                 </div>
               )}
-              {c.extractor_confidence != null && (
-                <div className="text-[var(--text-muted)] mt-1">
-                  Confidence: {(c.extractor_confidence * 100).toFixed(0)}%
-                </div>
-              )}
-              {Array.isArray(c.evidence_urls) && c.evidence_urls.length > 0 && (
-                <ul className="list-disc pl-5 mt-1">
-                  {c.evidence_urls.slice(0, 5).map((u) => (
-                    <li key={u}>
-                      <a
-                        href={u}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-[#7dd3fc] hover:underline break-all"
-                      >
-                        {u}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+            </>
           )}
         </div>
         <div className="text-right shrink-0">
@@ -1316,7 +1350,9 @@ function CandidatesView({
                   key={c.id}
                   c={c}
                   picked={selectedIds.has(c.id)}
+                  expanded={expanded.has(c.id)}
                   onToggleSelected={onToggleSelected}
+                  onToggleExpanded={onToggleExpanded}
                 />
               ))}
             </div>
@@ -1332,7 +1368,9 @@ function CandidatesView({
                   key={c.id}
                   c={c}
                   picked={selectedIds.has(c.id)}
+                  expanded={expanded.has(c.id)}
                   onToggleSelected={onToggleSelected}
+                  onToggleExpanded={onToggleExpanded}
                 />
               ))}
             </div>
