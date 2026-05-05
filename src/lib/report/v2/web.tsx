@@ -289,10 +289,15 @@ export function PublicReportV2({
             />
             {/* 4. Customer Experience Problem */}
             <SectionCustomerExperience brand={brand} />
+            {/* 5. Evidence — top products surfaces ASINs in the main body
+                before the dossier dives into a single seller. Per the
+                executive spec, the reader should see the top 5–10 ASINs
+                right after CX, then the reseller landscape, then the
+                single-seller dossier. */}
+            <SectionTopProducts narrative={narrative} />
             <SectionResellerReality narrative={narrative} bundle={bundle} derived={derived} />
             <SectionResellerDossier narrative={narrative} derived={derived} />
-            <SectionTopProducts narrative={narrative} />
-            {/* 5. Financial Opportunity (line-by-line bridge) */}
+            {/* 6. Financial Opportunity (line-by-line bridge) */}
             <LegionMathSection
               reportToken={reportToken}
               reportGeneratedAt={narrative.generated_at ?? null}
@@ -422,9 +427,9 @@ function SideNav({ mode }: { mode: ReportLayoutMode }) {
             ["s-summary", "Executive summary"],
             ["s-channel-control", "Channel control"],
             ["s-cx", "Customer experience"],
+            ["s-products", "Top products"],
             ["s-reseller-reality", "Reseller reality"],
             ["s-dossier", "Reseller dossier"],
-            ["s-products", "Top products"],
             ["s-math", "Financial opportunity"],
             ["s-transition", "Safe transition"],
             ["s-plan", "Five-step framework"],
@@ -1211,12 +1216,15 @@ function SectionResellerDossier({
                 Sellers to confirm authorization on
               </div>
               <ul>
-                {resellerSellers.slice(0, 8).map((s, i) => (
-                  <li key={`auth-${i}`}>
-                    <span className="rv2-q">?</span>
-                    <span>{friendlySellerName(s.seller_name)}</span>
-                  </li>
-                ))}
+                {resellerSellers.slice(0, 8).map((s, i) => {
+                  const friendly = friendlySellerName(s.seller_name);
+                  return (
+                    <li key={`auth-${i}`}>
+                      <SellerInitialBadge name={friendly} />
+                      <span>{friendly}</span>
+                    </li>
+                  );
+                })}
               </ul>
               <div className="rv2-checklist-note">
                 Authorization status should be confirmed with your team. We&apos;ll review which sellers are authorized, which relationships matter, and which accounts should be transitioned, restricted, or monitored.
@@ -1239,12 +1247,15 @@ function SectionResellerDossier({
           </p>
           <div className="rv2-checklist">
             <ul>
-              {resellerSellers.slice(0, 8).map((s, i) => (
-                <li key={`auth2-${i}`}>
-                  <span className="rv2-q">?</span>
-                  <span>{friendlySellerName(s.seller_name)}</span>
-                </li>
-              ))}
+              {resellerSellers.slice(0, 8).map((s, i) => {
+                const friendly = friendlySellerName(s.seller_name);
+                return (
+                  <li key={`auth2-${i}`}>
+                    <SellerInitialBadge name={friendly} />
+                    <span>{friendly}</span>
+                  </li>
+                );
+              })}
             </ul>
             <div className="rv2-checklist-note">
               Authorization status should be confirmed with your team.
@@ -1287,7 +1298,7 @@ function SectionTopProducts({
   return (
     <section id="s-products" className="rv2-section rv2-section-alt">
       <SectionHead
-        eyebrow="Top Products & Listing Health"
+        eyebrow="Evidence Snapshot · Top Marketplace Signals"
         title="Where the demand sits — and what each listing looks like"
         source={
           hasVariations
@@ -1295,6 +1306,12 @@ function SectionTopProducts({
             : "Keepa /product · BSR + price · 365-day avg"
         }
       />
+
+      {sorted.length > 0 && (
+        <p className="rv2-prose rv2-prose-callout">
+          The top {sorted.length} ASINs ranked by estimated TTM revenue. Per-ASIN economics, listing health, and seller signals — full ASIN list lives in the methodology appendix.
+        </p>
+      )}
 
       {sorted.length > 0 ? (
         <div className="rv2-asin-scores rv2-asin-scores-wide">
@@ -2437,6 +2454,28 @@ function friendlySellerName(name: string | null | undefined): string {
   return n;
 }
 
+/**
+ * Phase 41b — circular initial badge for the reseller checklist.
+ * Replaces the literal "?" decoration that read as a missing-icon
+ * fallback. Strips a leading "Unknown 3P" prefix so the initial reflects
+ * the actual seller name when available; falls back to "?" if the name
+ * is empty.
+ */
+function sellerInitial(name: string): string {
+  const cleaned = name.replace(/^Unknown 3P seller(?:\s*\(ID:.*\))?$/i, "").trim();
+  const source = cleaned || name;
+  const ch = source.replace(/[^A-Za-z0-9]/g, "").charAt(0);
+  return ch ? ch.toUpperCase() : "?";
+}
+
+function SellerInitialBadge({ name }: { name: string }) {
+  return (
+    <span className="rv2-seller-initial" aria-hidden>
+      {sellerInitial(name)}
+    </span>
+  );
+}
+
 const COUNTRY_NAMES: Record<string, string> = {
   US: "United States",
   GB: "United Kingdom",
@@ -2754,6 +2793,15 @@ function V2Styles() {
         display: inline-flex; align-items: center; justify-content: center;
         width: 20px; height: 20px; border-radius: 4px;
         background: rgba(224,123,94,0.15); color: var(--red); font-weight: 700;
+      }
+      /* Phase 41b — circular initial badge replaces the literal "?" */
+      .rv2-seller-initial {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; border-radius: 50%; flex: 0 0 26px;
+        background: rgba(201,169,106,0.15);
+        color: var(--gold);
+        font-weight: 700; font-size: 12px; letter-spacing: 0.02em;
+        border: 1px solid rgba(201,169,106,0.32);
       }
       .rv2-checklist-note { color: var(--text-muted); font-size: 12px; margin-top: 10px; font-style: italic; }
 
