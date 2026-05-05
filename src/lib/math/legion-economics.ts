@@ -185,6 +185,40 @@ export function computeLegionEconomics(inputs: LegionInputs): LegionOutputs {
 }
 
 /**
+ * Phase 41a — Benchmark snapshot for the short / tight-channel report
+ * layout. When the brand already controls ~95% of its own buy box there
+ * is no "recapture" story to tell, but we still want to share the same
+ * profit / business-value picture we'd compute for any brand. This is a
+ * flat benchmark (revenue × current_profit_margin_pct × ebitda_multiple)
+ * — the recapture math in `computeLegionEconomics` doesn't apply.
+ *
+ * Lives in the same module so all economics math stays here.
+ */
+export interface BenchmarkEconomicsInputs {
+  revenue: number;
+  current_profit_margin_pct: number;
+  ebitda_multiple: number;
+}
+
+export interface BenchmarkEconomicsOutputs {
+  /** Estimated annual profit at the brand's current margin assumption. */
+  current_profit_annual: number;
+  /** Estimated business value at the configured EBITDA multiple. */
+  business_value: number;
+}
+
+export function computeBenchmarkEconomics(
+  inputs: BenchmarkEconomicsInputs,
+): BenchmarkEconomicsOutputs {
+  const revenue = Math.max(0, Number(inputs.revenue) || 0);
+  const margin = Math.max(0, Number(inputs.current_profit_margin_pct) || 0);
+  const mult = Math.max(0, Number(inputs.ebitda_multiple) || 0);
+  const current_profit_annual = revenue * margin;
+  const business_value = current_profit_annual * mult;
+  return { current_profit_annual, business_value };
+}
+
+/**
  * Normalize a percent input that may arrive as 103, 1.03, or "103%".
  * Heuristic: any number ≥ 5 is treated as a literal percent (so 103 →
  * 1.03), and anything below is treated as already-decimal. Used by the

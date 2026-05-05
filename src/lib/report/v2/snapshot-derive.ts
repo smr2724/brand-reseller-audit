@@ -19,6 +19,23 @@
  */
 import type { ResellerRow } from "./types";
 
+/**
+ * Phase 41a — Threshold constants for the short / tight-channel report
+ * layout. Centralised so both the tight-channel decision in the
+ * renderer and any backend caller use the same numbers.
+ *
+ * A brand qualifies for the short layout when the persisted
+ * classification snapshot shows reseller share < 5% AND brand-owned +
+ * authorized share >= 90%. Legacy reports without a snapshot do NOT
+ * qualify (the renderer falls through to the long opportunity layout).
+ */
+export const TIGHT_CHANNEL_THRESHOLDS = {
+  /** Maximum reseller share (0-1) for the channel to count as tight. */
+  max_reseller_share: 0.05,
+  /** Minimum brand-owned + authorized share (0-1). */
+  min_controlled_share: 0.9,
+} as const;
+
 export type EffectiveClassification =
   | "brand_owned"
   | "authorized"
@@ -169,13 +186,26 @@ export function deriveSnapshot(args: {
   );
   const reseller_share = clamp01(shares.reseller);
 
+  // Phase 41a — tight-channel detection requires a real snapshot. We
+  // do NOT enter the short layout for legacy reports that fall back to
+  // the keepa heuristic, since the heuristic can mis-bucket the brand's
+  // own LLC and silently flip a recovery report into a benchmark one.
+  // Brand_owned + authorized only (per spec) — Amazon retail counts as
+  // non-reseller for the bar but not for the tight-channel decision.
+  const brand_plus_authorized = clamp01(
+    shares.brand_owned + shares.authorized,
+  );
+  const is_tight_channel =
+    shares.has_snapshot &&
+    reseller_share < TIGHT_CHANNEL_THRESHOLDS.max_reseller_share &&
+    brand_plus_authorized >= TIGHT_CHANNEL_THRESHOLDS.min_controlled_share;
+
   return {
     classification_by_key,
     shares,
     non_reseller_share,
     reseller_share,
-    is_tight_channel:
-      reseller_share < 0.05 && non_reseller_share >= 0.9,
+    is_tight_channel,
     is_strongly_controlled: non_reseller_share >= 0.5,
   };
 }
