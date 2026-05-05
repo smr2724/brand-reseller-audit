@@ -308,8 +308,21 @@ export default function BrandOwnerSection({
     const legacyHits: BrandOwnerCandidate[] = [];
     const extractorCandidates: BrandOwnerCandidate[] = [];
     for (const c of candidates) {
-      if (c.candidate_source === "apollo_manual") manualMatches.push(c);
-      else if (c.candidate_source === "apollo") apolloMatches.push(c);
+      // Phase 34.4 — `apollo_crm` and `apollo_manual_crm` rows are the
+      // CRM (`accounts/search`) variants of the same records that come
+      // back from `mixed_companies/search`. They classify into the same
+      // buckets as their public counterparts; the UI badge is keyed off
+      // `raw_payload.apollo_source`, not `candidate_source`.
+      if (
+        c.candidate_source === "apollo_manual" ||
+        c.candidate_source === "apollo_manual_crm"
+      )
+        manualMatches.push(c);
+      else if (
+        c.candidate_source === "apollo" ||
+        c.candidate_source === "apollo_crm"
+      )
+        apolloMatches.push(c);
       else if (c.candidate_source === "apollo_no_match") noMatches.push(c);
       else if (
         c.candidate_source === "extractor" ||

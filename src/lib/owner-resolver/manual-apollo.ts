@@ -18,7 +18,7 @@ export interface ManualApolloRow {
   resolution_run_id: string;
   candidate_company_name: string;
   candidate_domain: string | null;
-  candidate_source: "apollo_manual";
+  candidate_source: "apollo_manual" | "apollo_manual_crm";
   evidence_text: string | null;
   evidence_url: string | null;
   match_reason: string;
@@ -55,12 +55,17 @@ export function buildManualRow(
 ): ManualApolloRow {
   const sourceSuffix =
     org.apollo_source === "crm" ? " [Your Apollo CRM]" : "";
+  // Phase 34.4 — Distinct `candidate_source` for manual CRM hits so the
+  // unique index doesn't reject the second insert when the same manual
+  // search surfaces an org from both endpoints.
+  const candidateSource: "apollo_manual" | "apollo_manual_crm" =
+    org.apollo_source === "crm" ? "apollo_manual_crm" : "apollo_manual";
   return {
     brand_id: brandId,
     resolution_run_id: runId,
     candidate_company_name: org.name,
     candidate_domain: org.primary_domain,
-    candidate_source: "apollo_manual",
+    candidate_source: candidateSource,
     evidence_text: `Manual Apollo search for "${companyName}"`,
     evidence_url: null,
     match_reason: tierUsed

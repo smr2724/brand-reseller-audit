@@ -153,54 +153,35 @@ async function main() {
   assert(isLive("PUBLISHED FOR OPPOSITION") === false, "PUBLISHED rejected");
   assert(isLive("DEAD/CANCELLED") === false, "DEAD rejected");
 
-  // searchUsptoTrademarks end-to-end — TESS hit feeds TSDR lookup.
+  // Phase 34.4 — searchUsptoTrademarks end-to-end via the lookup endpoint.
+  // The new path is a single GET that returns owner info inline (no
+  // second TSDR round-trip per serial).
   {
     let calls = 0;
     const fakeFetch = ((url: string, init?: RequestInit) => {
       calls += 1;
-      if (calls === 1) {
-        // tmsearch POST
-        assert(init?.method === "POST", "tmsearch uses POST");
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          statusText: "OK",
-          json: () =>
-            Promise.resolve({
-              results: [
-                {
-                  serial_number: "97000001",
-                  markVerbalElement: "TERRA PURE",
-                  status: "LIVE/REGISTRATION",
-                },
-              ],
-            }),
-        } as unknown as Response);
-      }
-      // TSDR GET
-      assert(typeof url === "string" && url.includes("/sn97000001/info.json"), "TSDR url uses serial");
+      assert(init?.method === "GET", "tmsearch lookup uses GET");
+      assert(
+        typeof url === "string" && url.includes("/api/lookup/"),
+        "lookup endpoint hit",
+      );
+      assert(
+        typeof url === "string" && url.includes("searchType=mark"),
+        "lookup includes searchType=mark",
+      );
       return Promise.resolve({
         ok: true,
         status: 200,
         statusText: "OK",
         json: () =>
           Promise.resolve({
-            trademarks: [
+            results: [
               {
                 serialNumber: "97000001",
                 registrationNumber: "6500000",
-                markVerbalElement: "TERRA PURE",
-                status: { statusDescription: "REGISTERED" },
-                parties: {
-                  owners: [
-                    {
-                      partyName: "Diversified Hospitality Solutions, Ltd.",
-                      legalEntityType: "LIMITED COMPANY",
-                      city: "San Diego",
-                      geoCode: "CA",
-                    },
-                  ],
-                },
+                markIdentification: "TERRA PURE",
+                status: "REGISTERED",
+                ownerInformation: "Diversified Hospitality Solutions, Ltd.",
               },
             ],
           }),
@@ -212,13 +193,13 @@ async function main() {
       skipRetries: true,
     });
     assert(r.error === null, "happy path no error");
-    assert(r.candidates.length === 1, "single TSDR-backed candidate");
+    assert(r.candidates.length === 1, "single lookup-backed candidate");
     assert(
       r.candidates[0]?.candidate_company_name ===
         "Diversified Hospitality Solutions, Ltd.",
       "registered owner extracted",
     );
-    assert(calls === 2, "exactly 1 tmsearch + 1 TSDR call");
+    assert(calls === 1, "exactly 1 lookup call (no TSDR follow-up needed)");
   }
 
   console.log("\n=== Web-search adapter — full message text ===");

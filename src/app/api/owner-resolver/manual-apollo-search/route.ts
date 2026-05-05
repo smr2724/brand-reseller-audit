@@ -132,9 +132,16 @@ export async function POST(req: Request) {
       ? [buildManualNoMatchRow(brand_id, latestRunId, company_name)]
       : search.rows.map((r) => ({ ...r, resolution_run_id: latestRunId }));
 
+  // Phase 34.4 — Defensive upsert: if the same manual search returns
+  // duplicate (run_id, name, domain, source) tuples, drop the surplus
+  // rows instead of crashing.
   const { data: insRows, error: insErr } = await admin
     .from("owner_candidates")
-    .insert(rowsToInsert)
+    .upsert(rowsToInsert, {
+      onConflict:
+        "resolution_run_id,candidate_company_name,candidate_domain,candidate_source",
+      ignoreDuplicates: true,
+    })
     .select("id, apollo_organization_name, apollo_organization_id");
   if (insErr) {
     return NextResponse.json(

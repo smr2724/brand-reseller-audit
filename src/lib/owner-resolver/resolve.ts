@@ -221,7 +221,7 @@ interface PersistedApolloMatchRow {
   resolution_run_id: string;
   candidate_company_name: string;
   candidate_domain: string | null;
-  candidate_source: "apollo";
+  candidate_source: "apollo" | "apollo_crm";
   evidence_text: string | null;
   evidence_url: string | null;
   match_reason: string | null;
@@ -259,12 +259,18 @@ function buildApolloRow(
   const tierSuffix = tierUsed ? ` (tier=${tierUsed})` : "";
   const sourceSuffix =
     org.apollo_source === "crm" ? " [Your Apollo CRM]" : "";
+  // Phase 34.4 — Distinct `candidate_source` for CRM hits so the
+  // (run_id, name, domain, source) unique index doesn't reject the
+  // second insert when the same org surfaces from both
+  // `mixed_companies/search` (public) and `accounts/search` (CRM).
+  const candidateSource: "apollo" | "apollo_crm" =
+    org.apollo_source === "crm" ? "apollo_crm" : "apollo";
   return {
     brand_id: brandId,
     resolution_run_id: runId,
     candidate_company_name: org.name,
     candidate_domain: org.primary_domain,
-    candidate_source: "apollo",
+    candidate_source: candidateSource,
     evidence_text: extractorRow.extractor_reasoning,
     evidence_url:
       Array.isArray(extractorRow.evidence_urls) &&
@@ -631,9 +637,17 @@ export async function enrichSelectedCandidatesWithApollo(
   }
 
   if (apolloRowsToInsert.length > 0) {
+    // Phase 34.4 — Defensive: even with the relaxed unique index that
+    // includes `candidate_source`, a single tier can return the same
+    // org twice (or two tiers can). Use upsert with ignoreDuplicates so
+    // surplus rows are silently dropped instead of crashing the run.
     const { error: insErr } = await admin
       .from("owner_candidates")
-      .insert(apolloRowsToInsert);
+      .upsert(apolloRowsToInsert, {
+        onConflict:
+          "resolution_run_id,candidate_company_name,candidate_domain,candidate_source",
+        ignoreDuplicates: true,
+      });
     if (insErr) {
       auditEntries.push(...apollo.rawAuditEntries());
       return {
