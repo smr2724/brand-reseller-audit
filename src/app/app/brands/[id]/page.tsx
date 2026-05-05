@@ -8,6 +8,10 @@ import BrandOwnerSection, {
   type BrandOwnerRun,
 } from "./BrandOwnerSection";
 import { computeBrandDetailFinancials } from "@/lib/brand-detail/financial-model";
+import {
+  normalizeRunEvidence,
+  type EvidenceSummary,
+} from "@/lib/owner-resolver/evidence";
 
 export const dynamic = "force-dynamic";
 
@@ -48,16 +52,47 @@ export default async function BrandDetail({ params }: { params: { id: string } }
   const adminDb = createSupabaseAdminClient();
   let ownerRun: BrandOwnerRun | null = null;
   let ownerCandidates: BrandOwnerCandidate[] = [];
+  let ownerEvidence: EvidenceSummary | null = null;
   if (adminDb) {
+    // Phase 34.5 — pull `raw_uspto_payload` / `raw_web_search_payload`
+    // alongside the existing run summary fields so we can normalize an
+    // evidence snapshot for the brand-page evidence panel server-side.
+    // The raw payloads are consumed in-process and never returned to the
+    // client.
     const { data: runs } = await adminDb
       .from("owner_resolution_runs")
       .select(
-        "id, brand_id, triggered_by, started_at, completed_at, status, error_message, uspto_query, uspto_results_count, web_search_queries, web_search_results_count, candidates_inserted",
+        "id, brand_id, triggered_by, started_at, completed_at, status, error_message, uspto_query, uspto_results_count, raw_uspto_payload, web_search_queries, web_search_results_count, raw_web_search_payload, candidates_inserted",
       )
       .eq("brand_id", brand.id)
       .order("started_at", { ascending: false })
       .limit(1);
-    ownerRun = ((runs ?? [])[0] ?? null) as BrandOwnerRun | null;
+    const rawOwnerRun = ((runs ?? [])[0] ?? null) as
+      | (BrandOwnerRun & {
+          raw_uspto_payload?: unknown;
+          raw_web_search_payload?: unknown;
+        })
+      | null;
+    if (rawOwnerRun) {
+      ownerEvidence = normalizeRunEvidence({
+        uspto_query: rawOwnerRun.uspto_query ?? null,
+        uspto_results_count: rawOwnerRun.uspto_results_count ?? 0,
+        raw_uspto_payload: rawOwnerRun.raw_uspto_payload ?? null,
+        web_search_queries: rawOwnerRun.web_search_queries ?? [],
+        web_search_results_count: rawOwnerRun.web_search_results_count ?? 0,
+        raw_web_search_payload: rawOwnerRun.raw_web_search_payload ?? null,
+        error_message: rawOwnerRun.error_message ?? null,
+      });
+      // Strip raw payloads before passing to the client component.
+      const {
+        raw_uspto_payload: _u,
+        raw_web_search_payload: _w,
+        ...rest
+      } = rawOwnerRun;
+      void _u;
+      void _w;
+      ownerRun = rest as BrandOwnerRun;
+    }
     if (ownerRun) {
       const { data: cands } = await adminDb
         .from("owner_candidates")
@@ -115,6 +150,7 @@ export default async function BrandDetail({ params }: { params: { id: string } }
         brand={ownerBrand}
         run={ownerRun}
         candidates={ownerCandidates}
+        evidence={ownerEvidence}
       />
       <BrandDetailClient
         brand={brand}
