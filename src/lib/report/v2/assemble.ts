@@ -16,6 +16,7 @@ import {
   computeMath,
   computeResellerReality,
 } from "./compute";
+import { DIVERSIFIED_HOSPITALITY_CASE_STUDY } from "./case-studies";
 import type { CompetitorSnapshot, KeepaAsinDetail } from "./enrich";
 import type { RevenueEstimate } from "@/lib/enrichment/revenue-estimator";
 import type { SpApiTrailingResult } from "@/lib/enrichment/sp-api-override";
@@ -495,14 +496,12 @@ function buildCoverKpis(
 
 function buildWhyRcg(): NarrativeV2["why_rcg"] {
   return {
-    bio:
-      "Steve Rolle ran Diversified Hospitality on Amazon as the operator before he ran it as a consultant. He took the brand from a reseller-saturated catalog to a $10M/year brand-controlled channel, then doubled enterprise value at exit. RCG now runs the same playbook for other manufacturers.",
+    bio: DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.whyRcgBio,
     case_studies: [
       {
         name: "Diversified Hospitality",
-        summary:
-          "Reclaimed the catalog from a long tail of unauthorized resellers and rebuilt brand-controlled distribution.",
-        metric: "$10M/year brand-controlled · 2× enterprise value at exit",
+        summary: DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.cardSummary,
+        metric: DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.cardMetric,
       },
       {
         name: "Legion Chemicals",

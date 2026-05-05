@@ -25,6 +25,11 @@ import type {
 } from "./types";
 import { DEFAULT_ASSUMPTIONS } from "./types";
 import { LegionMathSection } from "./LegionMathSection";
+import {
+  CASE_STUDY_ANCHOR_ID,
+  DIVERSIFIED_CASE_STUDY_HREF,
+  DIVERSIFIED_HOSPITALITY_CASE_STUDY,
+} from "./case-studies";
 import { computeBenchmarkEconomics } from "@/lib/math/legion-economics";
 import {
   confidenceForBusinessValue,
@@ -321,6 +326,8 @@ export function PublicReportV2({
             <SectionPlan narrative={narrative} />
             {/* 9. Why Steve / RMG */}
             <SectionWhySteveRolle />
+            {/* 9.5 Phase 44 — Diversified Hospitality case study (opportunity-only) */}
+            <SectionCaseStudyDiversifiedHospitality brand={brand} />
             <SectionFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
             {/* 10. Methodology Appendix (collapsible, low) */}
             <SectionMethodology narrative={narrative} brand={brand} />
@@ -434,6 +441,7 @@ function SideNav({ mode }: { mode: ReportLayoutMode }) {
             ["s-transition", "Safe transition"],
             ["s-plan", "Five-step framework"],
             ["s-why", "Why Steve / RMG"],
+            [CASE_STUDY_ANCHOR_ID, "Case study"],
             ["s-cta", "Recommended next step"],
             ["s-methodology", "Methodology appendix"],
           ];
@@ -1529,7 +1537,10 @@ function PlanStepCard({
           kicker="Case study"
           body={
             <>
-              When we did this for Diversified Hospitality, customer experience metrics improved immediately and Amazon sales went from <strong>$8.34M (2022)</strong> to <strong>$9.02M (2023)</strong> — without adding a single new customer. They also paid down $5M in AP from the recovered margin.
+              {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep4}{" "}
+              <a href={DIVERSIFIED_CASE_STUDY_HREF} className="rv2-case-study-link">
+                {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.referenceLinkLabel}
+              </a>.
             </>
           }
         />
@@ -1539,7 +1550,10 @@ function PlanStepCard({
           kicker="Team model"
           body={
             <>
-              Your team will typically be <strong>1-2 US-based members</strong> supported by offshore for logistics, ops, customer service, and listing management — the same model that runs Diversified Hospitality today.
+              {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep5}{" "}
+              <a href={DIVERSIFIED_CASE_STUDY_HREF} className="rv2-case-study-link">
+                {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.referenceLinkLabel}
+              </a>.
             </>
           }
         />
@@ -1999,7 +2013,10 @@ function SectionCustomerExperience({ brand }: { brand: PublicReportV2Brand }) {
       </div>
 
       <p className="rv2-prose rv2-prose-callout">
-        At Diversified Hospitality, the biggest unlock was not only capturing reseller margin. The bigger unlock was that the brand owner finally controlled the customer experience, listings, packaging, inventory, pricing, reviews, and long-term channel strategy. That is what allowed the Amazon channel to scale — relevant for {brand.name} too.
+        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.customerExperience} That is what allowed the Amazon channel to scale — relevant for {brand.name} too.{" "}
+        <a href={DIVERSIFIED_CASE_STUDY_HREF} className="rv2-case-study-link">
+          {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.referenceLinkLabel}
+        </a>.
       </p>
     </section>
   );
@@ -2047,7 +2064,10 @@ function SectionWhySteveRolle() {
         title="Operator-led, not agency"
       />
       <p className="rv2-prose">
-        Steve Rolle has lived this problem as a brand owner, not just as a consultant. At Diversified Hospitality, reseller-controlled Amazon activity created inconsistent listings, pricing issues, and margin leakage. Once the channel was brought under brand control, Amazon became a roughly <strong>$9M/year</strong> revenue channel.
+        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.whySteveBio}{" "}
+        <a href={DIVERSIFIED_CASE_STUDY_HREF} className="rv2-case-study-link">
+          {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.referenceLinkLabel}
+        </a>.
       </p>
       <p className="rv2-prose">
         More recently, Steve helped <strong>Legion Chemicals</strong> grow from $0 to roughly a <strong>$1M ARR</strong> Amazon run rate in less than 10 months.
@@ -2070,6 +2090,187 @@ function SectionWhySteveRolle() {
       <p className="rv2-muted-small">
         Engagements are structured around the size of the opportunity. In many cases, we combine a fixed implementation fee with performance-based upside tied to incremental profit. If the opportunity is not large enough to justify our involvement, we&apos;ll tell you.
       </p>
+    </section>
+  );
+}
+
+// ====================================================================
+// Phase 44 — Diversified Hospitality case study (full appendix)
+// Renders only in opportunity mode. Collapsed-by-default <details>
+// element so the page stays compact; the in-page anchor uses
+// `:target` to auto-expand when the reader follows a snippet link.
+// ====================================================================
+
+function SectionCaseStudyDiversifiedHospitality({
+  brand,
+}: {
+  brand: PublicReportV2Brand;
+}) {
+  const cs = DIVERSIFIED_HOSPITALITY_CASE_STUDY;
+  return (
+    <section
+      id={CASE_STUDY_ANCHOR_ID}
+      className="rv2-section rv2-section-case-study"
+    >
+      <SectionHead
+        eyebrow="Case Study"
+        title={`How Diversified Hospitality turned Amazon from a reseller-controlled channel into a $10M brand-owned revenue stream`}
+      />
+      <p className="rv2-prose">
+        <em>
+          Why we share this: when a brand owner takes Amazon back from
+          resellers, the unlock is not just margin recapture — it is the
+          ability to invest in listings, packaging, customer experience,
+          and long-term channel strategy in a way resellers never will.
+          That same shift is the opportunity in front of {brand.name}.
+        </em>
+      </p>
+      <details className="rv2-case-study-details">
+        <summary className="rv2-case-study-summary">
+          <span className="rv2-case-study-summary-label">
+            Read the full Diversified Hospitality case study
+          </span>
+          <span className="rv2-case-study-summary-hint">
+            Click to expand
+          </span>
+        </summary>
+        <div className="rv2-case-study-body">
+          <p className="rv2-prose rv2-case-study-preface">{cs.preface}</p>
+
+          <h3 className="rv2-h3 rv2-case-study-h3">The Situation</h3>
+          {cs.sections.situation.paragraphs?.map((p, i) => (
+            <p key={`s-p-${i}`} className="rv2-prose">
+              {p}
+            </p>
+          ))}
+          {cs.sections.situation.bullets && (
+            <ul className="rv2-case-study-list">
+              {cs.sections.situation.bullets.map((b, i) => (
+                <li key={`s-b-${i}`}>{b}</li>
+              ))}
+            </ul>
+          )}
+          {cs.sections.situation.tail?.map((p, i) => (
+            <p key={`s-t-${i}`} className="rv2-prose">
+              {p}
+            </p>
+          ))}
+
+          <h3 className="rv2-h3 rv2-case-study-h3">The Decision</h3>
+          {cs.sections.decision.paragraphs?.map((p, i) => (
+            <p key={`d-p-${i}`} className="rv2-prose">
+              {p}
+            </p>
+          ))}
+          {cs.sections.decision.bullets && (
+            <ul className="rv2-case-study-list">
+              {cs.sections.decision.bullets.map((b, i) => (
+                <li key={`d-b-${i}`}>{b}</li>
+              ))}
+            </ul>
+          )}
+
+          <h3 className="rv2-h3 rv2-case-study-h3">The Execution</h3>
+          <p className="rv2-prose">{cs.sections.execution.lead}</p>
+          <ol className="rv2-case-study-steps">
+            {cs.sections.execution.steps.map((step, i) => (
+              <li key={`e-${i}`}>
+                <div className="rv2-case-study-step-title">
+                  {i + 1}. {step.title}
+                </div>
+                <div className="rv2-case-study-step-body">{step.body}</div>
+              </li>
+            ))}
+          </ol>
+
+          <h3 className="rv2-h3 rv2-case-study-h3">The Results</h3>
+          {cs.sections.results.paragraphs?.map((p, i) => (
+            <p key={`r-p-${i}`} className="rv2-prose">
+              {p}
+            </p>
+          ))}
+          {cs.sections.results.bullets && (
+            <ul className="rv2-case-study-list">
+              {cs.sections.results.bullets.map((b, i) => (
+                <li key={`r-b-${i}`}>{b}</li>
+              ))}
+            </ul>
+          )}
+          {cs.sections.results.tail?.map((p, i) => (
+            <p key={`r-t-${i}`} className="rv2-prose">
+              {p}
+            </p>
+          ))}
+          <ul className="rv2-case-study-list">
+            <li>Amazon became a major profit center</li>
+            <li>Customer experience became more consistent</li>
+            <li>
+              Cash flow improved significantly because Amazon paid faster
+              than reseller terms
+            </li>
+            <li>
+              Diversified paid down more than $5 million in accounts
+              payable across 2022 and 2023
+            </li>
+            <li>The increased profitability materially improved the value of the business</li>
+          </ul>
+
+          <h3 className="rv2-h3 rv2-case-study-h3">The Lesson</h3>
+          {cs.sections.lesson.paragraphs?.map((p, i) => (
+            <p key={`l-p-${i}`} className="rv2-prose">
+              {p}
+            </p>
+          ))}
+          {cs.sections.lesson.bullets && (
+            <ul className="rv2-case-study-list">
+              {cs.sections.lesson.bullets.map((b, i) => (
+                <li key={`l-b-${i}`}>{b}</li>
+              ))}
+            </ul>
+          )}
+          {cs.sections.lesson.tail?.map((p, i) => (
+            <p key={`l-t-${i}`} className="rv2-prose">
+              {p}
+            </p>
+          ))}
+
+          <h3 className="rv2-h3 rv2-case-study-h3">
+            Why This Matters for Your Brand
+          </h3>
+          {cs.sections.whyThisMatters.paragraphs?.map((p, i) => (
+            <p key={`w-p-${i}`} className="rv2-prose">
+              {p}
+            </p>
+          ))}
+
+          <p className="rv2-muted-small rv2-case-study-footnote">
+            {cs.footnote}
+          </p>
+        </div>
+      </details>
+      {/* Auto-expand + smooth-scroll when the user follows an in-page
+         snippet link. SSR-safe: runs once on load and on hashchange. */}
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `(function(){
+            function openIfHash(){
+              if (typeof window === 'undefined') return;
+              if (window.location.hash !== '#${CASE_STUDY_ANCHOR_ID}') return;
+              var el = document.getElementById('${CASE_STUDY_ANCHOR_ID}');
+              if (!el) return;
+              var d = el.querySelector('.rv2-case-study-details');
+              if (d && !d.open) d.open = true;
+              try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch(e) {}
+            }
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', openIfHash);
+            } else {
+              openIfHash();
+            }
+            window.addEventListener('hashchange', openIfHash);
+          })();`,
+        }}
+      />
     </section>
   );
 }
@@ -3558,6 +3759,111 @@ function V2Styles() {
         color: var(--gold);
       }
 
+      /* Phase 44 — Diversified Hospitality case study */
+      .rv2-section-case-study { padding: clamp(36px, 7vw, 56px) 0; }
+      .rv2-case-study-link {
+        color: var(--gold);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+        font-weight: 500;
+      }
+      .rv2-case-study-link:hover { color: var(--gold-soft); }
+      .rv2-case-study-details {
+        margin-top: 8px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.02);
+        scroll-margin-top: 96px;
+      }
+      .rv2-case-study-summary {
+        padding: 14px 20px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        list-style: none;
+      }
+      .rv2-case-study-summary::-webkit-details-marker { display: none; }
+      .rv2-case-study-summary::after {
+        content: "▾";
+        color: var(--gold);
+        font-size: 14px;
+        transition: transform 0.15s ease;
+      }
+      .rv2-case-study-details[open] .rv2-case-study-summary::after {
+        transform: rotate(180deg);
+      }
+      .rv2-case-study-summary-label {
+        font-weight: 600;
+        color: var(--text);
+        font-size: 14px;
+      }
+      .rv2-case-study-summary-hint {
+        color: var(--text-muted);
+        font-size: 12px;
+        margin-left: auto;
+        margin-right: 8px;
+      }
+      .rv2-case-study-details[open] .rv2-case-study-summary-hint {
+        display: none;
+      }
+      .rv2-case-study-body {
+        padding: 8px 20px 24px;
+        border-top: 1px solid var(--border-soft);
+      }
+      .rv2-case-study-preface {
+        font-style: italic;
+        color: var(--text-muted);
+      }
+      .rv2-h3, .rv2-case-study-h3 {
+        font-family: 'Fraunces', 'Inter', serif;
+        font-weight: 600;
+        font-size: 18px;
+        color: var(--gold-soft);
+        margin: 22px 0 6px;
+        letter-spacing: -0.01em;
+      }
+      .rv2-case-study-list {
+        list-style: disc;
+        padding-left: 22px;
+        margin: 6px 0 12px;
+        display: grid;
+        gap: 4px;
+      }
+      .rv2-case-study-list li { font-size: 15px; line-height: 1.6; }
+      .rv2-case-study-steps {
+        list-style: none;
+        padding: 0;
+        margin: 8px 0 12px;
+        display: grid;
+        gap: 12px;
+      }
+      .rv2-case-study-step-title {
+        font-weight: 600;
+        color: var(--text);
+        font-size: 15px;
+        margin-bottom: 4px;
+      }
+      .rv2-case-study-step-body {
+        font-size: 15px;
+        line-height: 1.65;
+        color: var(--text);
+      }
+      .rv2-case-study-footnote {
+        margin-top: 18px;
+        padding-top: 12px;
+        border-top: 1px dashed var(--border-soft);
+      }
+      /* Auto-expand the details element when the user lands on the
+         section anchor via an in-page snippet link. */
+      .rv2-section-case-study:target .rv2-case-study-details {
+        border-color: var(--gold);
+      }
+      .rv2-section-case-study:target .rv2-case-study-details:not([open]) .rv2-case-study-body {
+        display: block;
+      }
+
       /* Disclaimer */
       .rv2-section-disclaimer {
         padding: 32px 0 48px;
@@ -3585,6 +3891,11 @@ function V2Styles() {
       .rv2-disclaimer p:last-child { margin: 0; }
 
       @media print {
+        .rv2-case-study-details[open] .rv2-case-study-summary::after,
+        .rv2-case-study-summary::after { display: none; }
+        .rv2-case-study-details { border-color: #ddd !important; }
+        .rv2-case-study-summary-hint { display: none !important; }
+        .rv2-case-study-body { display: block !important; }
         .rv2-summary-box, .rv2-channel-card, .rv2-channel-block, .rv2-cx-list,
         .rv2-positioning, .rv2-disclaimer, .rv2-cover-secondary-stat {
           background: #fafafa !important; border-color: #ddd !important;

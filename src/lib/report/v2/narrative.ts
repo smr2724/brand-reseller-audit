@@ -13,6 +13,7 @@
 import OpenAI from "openai";
 import type { BrandEnrichmentBundle } from "@/lib/enrichment";
 import type { BrandForReport } from "@/lib/report/narrative";
+import { DIVERSIFIED_HOSPITALITY_CASE_STUDY } from "./case-studies";
 import type { CompetitorSnapshot } from "./enrich";
 import type {
   NarrativeCompetitorBenchmark,
@@ -685,7 +686,7 @@ function fallbackFiveStep(p: FiveStepInput): FiveStepOut {
       {
         number: 5,
         title: "Build and Train an In-House Team",
-        body: `Your team will typically be 1-2 US-based members supported by offshore for logistics, ops, customer service, and listing management — same model that runs Diversified Hospitality today. By month 12, ${p.brandName} owns the channel: the playbook, the team, the buy box.`,
+        body: `${DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.narrativeStep5} By month 12, ${p.brandName} owns the channel: the playbook, the team, the buy box.`,
       },
     ],
     closing: PLAN_CLOSING,
