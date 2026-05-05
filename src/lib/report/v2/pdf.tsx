@@ -617,8 +617,8 @@ function MathPage({ narrative }: { narrative: NarrativeV2 }) {
   return (
     <Page size="LETTER" style={styles.page}>
       <Text style={styles.eyebrow}>The Math</Text>
-      <Text style={styles.h2}>Every number, every assumption</Text>
-      <Text style={styles.source}>Editable per deal</Text>
+      <Text style={styles.h2}>Estimated Financial Opportunity</Text>
+      <Text style={styles.source}>Directional estimates · transparent line-by-line bridge</Text>
       <View style={styles.table}>
         <View style={[styles.tableRow, { backgroundColor: "#EFEBDF" }]}>
           <Text style={[styles.tableCell, styles.tableHead, { flex: 3 }]}>Line</Text>

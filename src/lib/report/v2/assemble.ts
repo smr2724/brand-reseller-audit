@@ -512,7 +512,7 @@ function buildWhyRcg(): NarrativeV2["why_rcg"] {
       },
     ],
     risk_reversal:
-      "We work performance-based on the additional first-year profit we generate. No upfront retainer, no long contracts — if we don't add profit, we don't get paid.",
+      "Engagements are structured around the size of the opportunity. In many cases, we combine a fixed implementation fee with performance-based upside tied to incremental profit. If the opportunity is not large enough to justify our involvement, we'll tell you.",
   };
 }
 

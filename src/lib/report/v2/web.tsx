@@ -18,7 +18,6 @@ import type { BrandEnrichmentBundle } from "@/lib/enrichment";
 import type {
   CxAuditAsinScore,
   DiyStep,
-  MathLine,
   NarrativeV2,
   PlanStep,
   ReportAssumptions,
@@ -26,6 +25,18 @@ import type {
 } from "./types";
 import { DEFAULT_ASSUMPTIONS } from "./types";
 import { LegionMathSection } from "./LegionMathSection";
+import {
+  confidenceForBusinessValue,
+  confidenceForProfitRecapture,
+  confidenceForRevenue,
+  confidenceForSellerControl,
+  deriveSnapshot,
+  lookupClassification,
+  type ConfidenceLabel,
+  type DerivedSnapshot,
+  type EffectiveClassification,
+  type SellerClassificationSnapshotEntry,
+} from "./snapshot-derive";
 
 export interface PublicReportV2Brand {
   id: string;
@@ -45,6 +56,18 @@ export interface PublicReportV2Props {
   /** Persisted ReportAssumptions for this report; falls back to
    * `DEFAULT_ASSUMPTIONS` when missing/legacy. */
   assumptions: ReportAssumptions | null;
+  /** Phase 40 — persisted classification snapshot from
+   * `reports.seller_classifications`. Null on legacy reports → renderer
+   * falls back to `bundle.keepa.brand_controlled_pct`. */
+  classificationSnapshot?: SellerClassificationSnapshotEntry[] | null;
+  /** Phase 40 — four `*_share_pct` columns persisted on the report row.
+   * All null on legacy rows → falls back to legacy heuristic. */
+  shareCols?: {
+    brand_owned: number | null;
+    authorized: number | null;
+    amazon: number | null;
+    reseller: number | null;
+  } | null;
 }
 
 const STRATEGY_CALL_MAILTO_SUBJECT = "Amazon%20opportunity%20call";
@@ -57,12 +80,38 @@ function strategyCallHref(narrative: NarrativeV2, brandName: string): string {
   return `mailto:${STEVE_EMAIL}?subject=${subj}`;
 }
 
-export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, assumptions }: PublicReportV2Props) {
+export function PublicReportV2({
+  narrative,
+  brand,
+  bundle,
+  pdfUrl,
+  reportToken,
+  assumptions,
+  classificationSnapshot,
+  shareCols,
+}: PublicReportV2Props) {
   const callHref = strategyCallHref(narrative, brand.name);
 
   // Phase 24 — Report mode controls which sections render. Older reports
   // omit `report_mode`; treat as the default high_fit pitch.
   const isDiy = narrative.report_mode === "diy_fit";
+
+  // Phase 40 — Derive the classification-aware snapshot view.
+  // Falls back to bundle.keepa.brand_controlled_pct when neither the
+  // snapshot nor share_pct cols are populated (legacy reports).
+  const derived: DerivedSnapshot = deriveSnapshot({
+    share_pcts: shareCols ?? {
+      brand_owned: null,
+      authorized: null,
+      amazon: null,
+      reseller: null,
+    },
+    snapshot: classificationSnapshot ?? null,
+    legacyBrandControlledPct:
+      bundle?.keepa?.brand_controlled_pct ??
+      narrative.brand_controlled_pct ??
+      null,
+  });
 
   // Pull the seed values for the editable math input panel out of
   // narrative_json + the persisted ReportAssumptions row. Anything
@@ -88,6 +137,12 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
     labor_cost_override: a.labor_cost_override ?? null,
   };
 
+  // Confidence labels per spec section 13.
+  const confRevenue = confidenceForRevenue(revenueBadge);
+  const confSellerControl = confidenceForSellerControl(derived);
+  const confProfit = confidenceForProfitRecapture(derived, revenueBadge);
+  const confValue = confidenceForBusinessValue();
+
   return (
     <div className="rv2">
       <V2Styles />
@@ -98,16 +153,45 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
         {isDiy ? (
           <SectionDiyCover narrative={narrative} brand={brand} />
         ) : (
-          <SectionCover narrative={narrative} brand={brand} callHref={callHref} />
+          <>
+            {/* 1. Hero / Executive Punch */}
+            <SectionCover
+              narrative={narrative}
+              brand={brand}
+              callHref={callHref}
+              derived={derived}
+              confRevenue={confRevenue}
+              confSellerControl={confSellerControl}
+              confProfit={confProfit}
+              confValue={confValue}
+            />
+            {/* 2. Executive Summary Box */}
+            <SectionExecutiveSummary
+              narrative={narrative}
+              brand={brand}
+              derived={derived}
+            />
+            {/* 3. Channel Control Problem */}
+            <SectionChannelControl
+              narrative={narrative}
+              brand={brand}
+              bundle={bundle}
+              derived={derived}
+              confSellerControl={confSellerControl}
+            />
+            {/* 4. Customer Experience Problem */}
+            <SectionCustomerExperience brand={brand} />
+          </>
         )}
-        <SectionMethodology narrative={narrative} brand={brand} />
-        <SectionResellerReality narrative={narrative} bundle={bundle} />
-        <SectionResellerDossier narrative={narrative} />
+        {/* 6. Evidence — top products (kept under reseller reality and CX) */}
+        {!isDiy && <SectionResellerReality narrative={narrative} bundle={bundle} derived={derived} />}
+        {!isDiy && <SectionResellerDossier narrative={narrative} derived={derived} />}
         <SectionTopProducts narrative={narrative} />
         {isDiy ? (
           <SectionDiySteps narrative={narrative} />
         ) : (
           <>
+            {/* 5. Financial Opportunity (line-by-line bridge) */}
             <LegionMathSection
               reportToken={reportToken}
               reportGeneratedAt={narrative.generated_at ?? null}
@@ -117,11 +201,20 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
               revenueBadge={revenueBadge ?? null}
               revenueFootnote={extractRevenueFootnote(narrative.math.notes ?? "")}
               notes={cleanMathNotes(narrative.math.notes ?? "") || null}
-              brandControlledPct={narrative.brand_controlled_pct ?? null}
+              brandControlledPct={
+                derived.shares.has_snapshot
+                  ? derived.non_reseller_share
+                  : narrative.brand_controlled_pct ?? null
+              }
               revenueConfirmedSource={revenueConfirmedSource}
               revenueEstimatorSuggestion={revenueEstimatorSuggestion}
             />
+            {/* 7. Safe Transition Plan */}
+            <SectionSafeTransition />
+            {/* 8. Five-Step Framework */}
             <SectionPlan narrative={narrative} />
+            {/* 9. Why Steve / RMG */}
+            <SectionWhySteveRolle />
           </>
         )}
         {isDiy ? (
@@ -129,6 +222,10 @@ export function PublicReportV2({ narrative, brand, bundle, pdfUrl, reportToken, 
         ) : (
           <SectionFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
         )}
+        {/* 10. Methodology Appendix (collapsible, low) */}
+        <SectionMethodology narrative={narrative} brand={brand} />
+        {/* 11. Disclaimer */}
+        <SectionDisclaimer />
       </main>
 
       <footer className="rv2-footer">
@@ -210,14 +307,19 @@ function SideNav({ isDiy }: { isDiy?: boolean }) {
         ["s-cta", "Want help later?"],
       ]
     : [
-        ["s-cover", "The opportunity"],
-        ["s-methodology", "Audit scope"],
+        ["s-cover", "Executive punch"],
+        ["s-summary", "Executive summary"],
+        ["s-channel-control", "Channel control"],
+        ["s-cx", "Customer experience"],
         ["s-reseller-reality", "Reseller reality"],
         ["s-dossier", "Reseller dossier"],
         ["s-products", "Top products"],
-        ["s-math", "The math"],
-        ["s-plan", "Capture plan"],
-        ["s-cta", "Book a call"],
+        ["s-math", "Financial opportunity"],
+        ["s-transition", "Safe transition"],
+        ["s-plan", "Five-step framework"],
+        ["s-why", "Why Steve / RMG"],
+        ["s-cta", "Recommended next step"],
+        ["s-methodology", "Methodology appendix"],
       ];
   return (
     <nav className="rv2-sidenav" aria-label="Sections">
@@ -240,23 +342,51 @@ function SectionCover({
   narrative,
   brand,
   callHref,
+  derived,
+  confRevenue,
+  confSellerControl,
+  confProfit,
+  confValue,
 }: {
   narrative: NarrativeV2;
   brand: PublicReportV2Brand;
   callHref: string;
+  derived: DerivedSnapshot;
+  confRevenue: ConfidenceLabel;
+  confSellerControl: ConfidenceLabel;
+  confProfit: ConfidenceLabel;
+  confValue: ConfidenceLabel;
 }) {
   const c = narrative.cover;
   const profit = c.delta_profit ?? null;
   const value = c.exit_lift ?? null;
+  const revenueLine = narrative.math.lines.find((l) => l.key === "revenue");
+  const revenue =
+    typeof revenueLine?.value === "number" ? revenueLine.value : null;
+  const ebitdaLine = narrative.math.lines.find((l) => l.key === "exit_lift");
+  const ebitdaMultiple = ebitdaLine?.label?.match(/^(\d+(?:\.\d+)?)/)?.[1] ?? "7";
 
-  // Always render the new opportunity-first headline at render time, even
-  // for legacy narrative_json rows whose `cover.headline` was generated
-  // under the old "you're losing $X" template.
-  const headline = renderOpportunityHeadline(brand.name, profit, value);
+  const brandControlledPct = Math.round(derived.non_reseller_share * 100);
+  const headline = renderHeroHeadline({
+    brandName: brand.name,
+    revenue,
+    brandControlledPct,
+  });
+  const subheadline = renderHeroSubheadline({
+    brandName: brand.name,
+    auditScope: narrative.audit_scope ?? null,
+    topReseller: pickTopReseller(narrative, derived),
+    topResellerSharePct: pickTopResellerShare(narrative, derived),
+  });
+  const valueLine = renderValueLine({
+    profit,
+    value,
+    ebitdaMultiple,
+  });
 
   return (
     <section id="s-cover" className="rv2-section rv2-section-cover">
-      <div className="rv2-eyebrow">Channel Ownership Audit</div>
+      <div className="rv2-eyebrow">Amazon Channel Ownership Audit</div>
       <div className="rv2-cover-meta">
         <div className="rv2-cover-meta-line">Prepared for {brand.name}</div>
         <div className="rv2-cover-meta-line rv2-muted">
@@ -264,59 +394,164 @@ function SectionCover({
         </div>
       </div>
       <h1 className="rv2-h1">{headline}</h1>
+      <p className="rv2-prose rv2-cover-subhead">{subheadline}</p>
+      <p className="rv2-prose rv2-cover-valueline">{valueLine}</p>
 
-      <div className="rv2-kpi-grid rv2-kpi-grid-2">
+      <div className="rv2-kpi-grid rv2-kpi-grid-3">
         <BigStat
-          label="Annual profit recovered"
-          value={profit != null ? money(profit) : "— not measured"}
-          sub="Recoverable margin + ops + fulfillment, transparent math below"
+          label="Estimated annual Amazon revenue"
+          value={revenue != null ? money(revenue) : "— not measured"}
+          sub="Based on available marketplace data"
+          confidence={confRevenue}
         />
         <BigStat
-          label="Business value created"
+          label="Estimated annual profit recapture"
+          value={profit != null ? money(profit) : "— not measured"}
+          sub="Directional estimate · transparent bridge below"
+          confidence={confProfit}
+        />
+        <BigStat
+          label={`Estimated business value lift (${ebitdaMultiple}× EBITDA)`}
           value={value != null ? money(value) : "— not measured"}
-          sub="7× EBITDA on the new annual profit"
+          sub="Assumption-based · pressure-tested on a call"
+          confidence={confValue}
         />
       </div>
 
-      <RcgCallout
-        kicker="Track record"
-        body={
-          <>
-            Steve, RCG's founder, took <strong>Diversified Hospitality Solutions</strong> from a reseller-fragmented brand to <strong>$8.34M (2022) → $9.02M (2023)</strong> in Amazon revenue and <strong>~2× business valuation</strong> — by capturing existing demand and removing resellers, with no new customer acquisition.
-          </>
-        }
-      />
+      <div className="rv2-cover-secondary">
+        <div className="rv2-cover-secondary-stat">
+          <span className="rv2-cover-secondary-lbl">Brand-controlled buy box</span>
+          <span className="rv2-cover-secondary-val">
+            {brandControlledPct}%
+            <ConfidencePill level={confSellerControl} />
+          </span>
+        </div>
+      </div>
 
       <div className="rv2-cover-actions">
         <a className="rv2-btn rv2-btn-primary" href={callHref}>
-          Book a strategy call
+          Book a 15-minute review
         </a>
       </div>
     </section>
   );
 }
 
-function renderOpportunityHeadline(
-  brandName: string,
-  profit: number | null,
-  value: number | null,
-): string {
-  if (profit != null && value != null) {
-    return `${brandName}, you can recapture ${money(profit)} in annual profit and ${money(value)} in business value — without adding a single new customer.`;
+function renderHeroHeadline(args: {
+  brandName: string;
+  revenue: number | null;
+  brandControlledPct: number;
+}): string {
+  if (args.revenue != null) {
+    return `${args.brandName} may already have a ${money(args.revenue)} Amazon channel — but based on our audit, ${args.brandControlledPct}% of the buy box appears to be brand-controlled.`;
   }
-  if (profit != null) {
-    return `${brandName}, you can recapture ${money(profit)} in annual profit — without adding a single new customer.`;
-  }
-  return `${brandName}, you can recapture significant profit and business value from your Amazon channel — without adding a single new customer.`;
+  return `${args.brandName} appears to have a meaningful Amazon channel — but based on our audit, ${args.brandControlledPct}% of the buy box appears to be brand-controlled.`;
 }
 
-function BigStat({ label, value, sub }: { label: string; value: string; sub: string }) {
+function renderHeroSubheadline(args: {
+  brandName: string;
+  auditScope: NarrativeV2["audit_scope"] | null;
+  topReseller: string | null;
+  topResellerSharePct: number | null;
+}): string {
+  const totalAsins = args.auditScope?.asins_found_total ?? null;
+  const includedAsins = args.auditScope?.asins_included_count ?? null;
+  const reseller = args.topReseller;
+  const resellerShare =
+    args.topResellerSharePct != null
+      ? `${Math.round(args.topResellerSharePct * 100)}%`
+      : null;
+
+  if (totalAsins != null && includedAsins != null && reseller && resellerShare) {
+    return `Our analysis found ${totalAsins.toLocaleString("en-US")} ASINs associated with ${args.brandName}, with ${includedAsins.toLocaleString("en-US")} included in this audit. Across those listings, third-party sellers appear to control the Amazon channel, including ${reseller}, which accounts for roughly ${resellerShare} of observed buy-box activity.`;
+  }
+  if (reseller && resellerShare) {
+    return `Across the audited listings, third-party sellers appear to control the Amazon channel, including ${reseller}, which accounts for roughly ${resellerShare} of observed buy-box activity.`;
+  }
+  return `Across the audited listings, third-party sellers appear to be involved in the Amazon channel for ${args.brandName}.`;
+}
+
+function renderValueLine(args: {
+  profit: number | null;
+  value: number | null;
+  ebitdaMultiple: string;
+}): string {
+  if (args.profit != null && args.value != null) {
+    return `Based on conservative marketplace estimates, bringing this channel under brand control could create approximately ${money(args.profit)} in annual profit recapture and up to ${money(args.value)} in business value at a ${args.ebitdaMultiple}× EBITDA multiple.`;
+  }
+  return `Based on conservative marketplace estimates, bringing this channel under brand control could create meaningful annual profit recapture and business value — see the financial bridge below.`;
+}
+
+function pickTopReseller(
+  narrative: NarrativeV2,
+  derived: DerivedSnapshot,
+): string | null {
+  const sellers = narrative.reseller_reality.top_sellers ?? [];
+  for (const s of sellers) {
+    const cls = lookupClassification(derived, s);
+    if (cls === "reseller" || (cls == null && s.is_brand_controlled === false)) {
+      return friendlySellerName(s.seller_name);
+    }
+  }
+  return null;
+}
+
+function pickTopResellerShare(
+  narrative: NarrativeV2,
+  derived: DerivedSnapshot,
+): number | null {
+  const sellers = narrative.reseller_reality.top_sellers ?? [];
+  for (const s of sellers) {
+    const cls = lookupClassification(derived, s);
+    if (cls === "reseller" || (cls == null && s.is_brand_controlled === false)) {
+      return s.share_pct ?? null;
+    }
+  }
+  return null;
+}
+
+function BigStat({
+  label,
+  value,
+  sub,
+  confidence,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  confidence?: ConfidenceLabel;
+}) {
   return (
     <div className="rv2-bigstat">
       <div className="rv2-bigstat-num">{value}</div>
       <div className="rv2-bigstat-lbl">{label}</div>
       <div className="rv2-bigstat-sub">{sub}</div>
+      {confidence && (
+        <div className="rv2-bigstat-conf">
+          <ConfidencePill level={confidence} />
+        </div>
+      )}
     </div>
+  );
+}
+
+function ConfidencePill({ level }: { level: ConfidenceLabel }) {
+  const tone =
+    level === "High"
+      ? "high"
+      : level === "Medium"
+        ? "med"
+        : level === "Low"
+          ? "low"
+          : "assumption";
+  return (
+    <span
+      className={`rv2-conf rv2-conf-${tone}`}
+      title="Confidence level — see methodology appendix for how these are assigned."
+    >
+      <span className="rv2-conf-dot" aria-hidden />
+      <span className="rv2-conf-label">{level} confidence</span>
+    </span>
   );
 }
 
@@ -503,54 +738,135 @@ function MethodStat({ label, value }: { label: string; value: string }) {
 function SectionResellerReality({
   narrative,
   bundle,
+  derived,
 }: {
   narrative: NarrativeV2;
   bundle: BrandEnrichmentBundle | null;
+  derived: DerivedSnapshot;
 }) {
   const r = narrative.reseller_reality;
   const sellers = r.top_sellers;
-  const maxShare = sellers.reduce((m, s) => Math.max(m, s.share_pct ?? 0), 0) || 1;
+
+  // Phase 40 — Goal A2. Split brand-controlled rows OUT of the reseller
+  // table into a separate positive sub-heading. Only classification =
+  // 'reseller' rows (or legacy is_brand_controlled === false) belong in
+  // the reseller table.
+  const resellerRows: ResellerRow[] = [];
+  const brandControlledRows: ResellerRow[] = [];
+  for (const s of sellers) {
+    const cls = lookupClassification(derived, s);
+    if (cls === "reseller") {
+      resellerRows.push(s);
+    } else if (cls === "brand_owned" || cls === "authorized") {
+      brandControlledRows.push(s);
+    } else if (cls === "amazon") {
+      // Amazon retail isn't a reseller in the threat sense — show in
+      // brand-controlled section to keep the reseller table tight.
+      brandControlledRows.push(s);
+    } else if (cls == null) {
+      // No snapshot data → fall back to legacy boolean.
+      if (s.is_brand_controlled === true) brandControlledRows.push(s);
+      else resellerRows.push(s);
+    }
+  }
+
+  const maxResellerShare =
+    resellerRows.reduce((m, s) => Math.max(m, s.share_pct ?? 0), 0) || 1;
+  const maxBrandShare =
+    brandControlledRows.reduce((m, s) => Math.max(m, s.share_pct ?? 0), 0) || 1;
+
+  // Tone selector: tight channel vs strong control vs default reseller-heavy.
+  const tone: "tight" | "strong" | "default" = derived.is_tight_channel
+    ? "tight"
+    : derived.is_strongly_controlled
+      ? "strong"
+      : "default";
 
   return (
     <section id="s-reseller-reality" className="rv2-section rv2-section-alt">
-      <SectionHead eyebrow="Reseller Reality" title="Who actually sells your brand on Amazon" source="Keepa · 90-day window" />
+      <SectionHead
+        eyebrow="Reseller Reality"
+        title="Who actually sells your brand on Amazon"
+        source="Keepa · 90-day window · classification confirmed by you"
+      />
 
-      {sellers.length > 0 ? (
-        <>
-          <div className="rv2-bars">
-            {sellers.map((s, i) => (
-              <ResellerBar key={`${s.seller_name}-${i}`} row={s} maxShare={maxShare} />
-            ))}
-          </div>
-          <p className="rv2-prose">{r.one_liner}</p>
-
-          <div className="rv2-checklist">
-            <div className="rv2-checklist-title">Did you authorize these sellers?</div>
-            <ul>
-              {sellers.slice(0, 5).map((s, i) => (
-                <li key={`auth-${i}`}>
-                  <span className="rv2-q">?</span>
-                  <span>{friendlySellerName(s.seller_name)}</span>
-                </li>
-              ))}
-            </ul>
-            <div className="rv2-checklist-note">
-              Mark each as authorized or not in the kickoff session — that drives the termination list.
-            </div>
-          </div>
-
-          {bundle?.keepa?.brand_controlled_pct != null && (
-            <BuyBoxPanel pct={bundle.keepa.brand_controlled_pct} />
-          )}
-        </>
-      ) : (
+      {sellers.length === 0 ? (
         <p className="rv2-muted">{r.note ?? "Reseller landscape — not measured this run."}</p>
+      ) : (
+        <>
+          {tone === "tight" && (
+            <div className="rv2-banner rv2-banner-good">
+              <strong>Tight channel detected.</strong> Based on your classification, you appear to already control this channel. The estimated reseller leakage is small, and there may be limited recovery opportunity here. We&apos;d still want to confirm your authorization on the remaining sellers below.
+            </div>
+          )}
+          {tone === "strong" && !derived.is_tight_channel && (
+            <div className="rv2-banner rv2-banner-warn">
+              <strong>This channel may already be tightly controlled.</strong> Brand-controlled, authorized, and Amazon retail together appear to account for {Math.round(derived.non_reseller_share * 100)}% of buy-box activity — there may be limited recoverable revenue from reseller removal here. Worth pressure-testing on a short call.
+            </div>
+          )}
+
+          {brandControlledRows.length > 0 && (
+            <div className="rv2-channel-block rv2-channel-good">
+              <div className="rv2-channel-block-title">
+                Sellers you&apos;ve identified as brand-controlled
+              </div>
+              <p className="rv2-prose rv2-channel-sub">
+                These are the sellers you&apos;ve confirmed represent the brand. They appear in this section so the channel-control picture stays accurate.
+              </p>
+              <div className="rv2-bars">
+                {brandControlledRows.map((s, i) => (
+                  <ResellerBar
+                    key={`bc-${s.seller_name}-${i}`}
+                    row={s}
+                    maxShare={maxBrandShare}
+                    tone="good"
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {resellerRows.length > 0 ? (
+            <div className="rv2-channel-block">
+              <div className="rv2-channel-block-title">
+                Third-party sellers (authorization unknown)
+              </div>
+              <div className="rv2-bars">
+                {resellerRows.map((s, i) => (
+                  <ResellerBar
+                    key={`r-${s.seller_name}-${i}`}
+                    row={s}
+                    maxShare={maxResellerShare}
+                  />
+                ))}
+              </div>
+              <p className="rv2-prose">{r.one_liner}</p>
+            </div>
+          ) : (
+            <p className="rv2-muted rv2-prose">
+              No third-party reseller activity to investigate based on your classifications.
+            </p>
+          )}
+
+          <BuyBoxPanel
+            derived={derived}
+            legacyPct={bundle?.keepa?.brand_controlled_pct ?? null}
+          />
+        </>
       )}
     </section>
   );
 }
 
-function ResellerBar({ row, maxShare }: { row: ResellerRow; maxShare: number }) {
+function ResellerBar({
+  row,
+  maxShare,
+  tone,
+}: {
+  row: ResellerRow;
+  maxShare: number;
+  tone?: "good" | undefined;
+}) {
   const pct = row.share_pct ?? 0;
   const widthPct = Math.max(2, Math.round((pct / maxShare) * 100));
   const name = friendlySellerName(row.seller_name);
@@ -561,7 +877,11 @@ function ResellerBar({ row, maxShare }: { row: ResellerRow; maxShare: number }) 
         {name}
       </div>
       <div className="rv2-bar-track">
-        <div className="rv2-bar-fill" style={{ width: `${widthPct}%` }} aria-hidden />
+        <div
+          className={tone === "good" ? "rv2-bar-fill rv2-bar-fill-good" : "rv2-bar-fill"}
+          style={{ width: `${widthPct}%` }}
+          aria-hidden
+        />
       </div>
       <div className="rv2-bar-val">
         {row.share_pct != null ? `${Math.round(row.share_pct * 100)}%` : "—"}
@@ -573,21 +893,89 @@ function ResellerBar({ row, maxShare }: { row: ResellerRow; maxShare: number }) 
   );
 }
 
-function BuyBoxPanel({ pct }: { pct: number }) {
-  const brandPct = Math.max(0, Math.min(1, pct));
-  const resellerPct = 1 - brandPct;
+/**
+ * Phase 40 Goal A1 — 4-bucket buy-box ownership bar driven by the
+ * persisted classification snapshot. Falls back to a 2-bucket bar
+ * (brand_owned vs reseller) when the snapshot is missing.
+ */
+function BuyBoxPanel({
+  derived,
+  legacyPct,
+}: {
+  derived: DerivedSnapshot;
+  legacyPct: number | null;
+}) {
+  const brandOwned = derived.shares.brand_owned;
+  const authorized = derived.shares.authorized;
+  const amazon = derived.shares.amazon;
+  const reseller = derived.shares.reseller;
+
+  const fmt = (n: number) => `${Math.round(n * 100)}%`;
+  const widthFor = (n: number) => `${Math.max(0, Math.min(100, n * 100))}%`;
+
+  const note = derived.shares.has_snapshot
+    ? "Source: Keepa buy-box share split across your seller classifications."
+    : legacyPct != null
+      ? "Source: Keepa · brand-controlled share derived from seller-name overlap (legacy heuristic). Re-classify sellers for an exact 4-bucket split."
+      : "Source: Keepa · share of buy-box wins on the audited ASINs.";
+
   return (
     <div className="rv2-bbpanel">
       <div className="rv2-bbpanel-title">Buy-box ownership over the last 90 days</div>
-      <div className="rv2-bbpanel-bar">
-        <div className="rv2-bbpanel-brand" style={{ width: `${Math.round(brandPct * 100)}%` }}>
-          <span>{Math.round(brandPct * 100)}% brand-controlled</span>
-        </div>
-        <div className="rv2-bbpanel-reseller" style={{ width: `${Math.round(resellerPct * 100)}%` }}>
-          <span>{Math.round(resellerPct * 100)}% resellers</span>
-        </div>
+      <div className="rv2-bbpanel-bar rv2-bbpanel-bar-4">
+        {brandOwned > 0 && (
+          <div
+            className="rv2-bbpanel-seg rv2-bbpanel-brand"
+            style={{ width: widthFor(brandOwned) }}
+          >
+            <span>{fmt(brandOwned)} brand-owned</span>
+          </div>
+        )}
+        {authorized > 0 && (
+          <div
+            className="rv2-bbpanel-seg rv2-bbpanel-authorized"
+            style={{ width: widthFor(authorized) }}
+          >
+            <span>{fmt(authorized)} authorized</span>
+          </div>
+        )}
+        {amazon > 0 && (
+          <div
+            className="rv2-bbpanel-seg rv2-bbpanel-amazon"
+            style={{ width: widthFor(amazon) }}
+          >
+            <span>{fmt(amazon)} Amazon</span>
+          </div>
+        )}
+        {reseller > 0 && (
+          <div
+            className="rv2-bbpanel-seg rv2-bbpanel-reseller"
+            style={{ width: widthFor(reseller) }}
+          >
+            <span>{fmt(reseller)} reseller</span>
+          </div>
+        )}
+        {brandOwned + authorized + amazon + reseller === 0 && (
+          <div className="rv2-bbpanel-seg rv2-bbpanel-empty" style={{ width: "100%" }}>
+            <span>— not measured</span>
+          </div>
+        )}
       </div>
-      <div className="rv2-bbpanel-note">Source: Keepa · share of buy-box wins on the audited ASINs.</div>
+      <div className="rv2-bbpanel-legend">
+        <span className="rv2-bbpanel-legend-item">
+          <span className="rv2-bbpanel-swatch rv2-bbpanel-brand" /> Brand-owned
+        </span>
+        <span className="rv2-bbpanel-legend-item">
+          <span className="rv2-bbpanel-swatch rv2-bbpanel-authorized" /> Authorized
+        </span>
+        <span className="rv2-bbpanel-legend-item">
+          <span className="rv2-bbpanel-swatch rv2-bbpanel-amazon" /> Amazon
+        </span>
+        <span className="rv2-bbpanel-legend-item">
+          <span className="rv2-bbpanel-swatch rv2-bbpanel-reseller" /> Reseller
+        </span>
+      </div>
+      <div className="rv2-bbpanel-note">{note}</div>
     </div>
   );
 }
@@ -596,50 +984,105 @@ function BuyBoxPanel({ pct }: { pct: number }) {
 // Section 3 — Reseller Dossier
 // ====================================================================
 
-function SectionResellerDossier({ narrative }: { narrative: NarrativeV2 }) {
+function SectionResellerDossier({
+  narrative,
+  derived,
+}: {
+  narrative: NarrativeV2;
+  derived: DerivedSnapshot;
+}) {
   const d = narrative.reseller_dossier;
-  const friendly = d ? friendlySellerName(d.seller_name) : null;
-  const sellerCount =
-    narrative.reseller_reality.top_sellers.length || null;
-  const inverseBrandPct =
-    d?.share_pct != null ? Math.round(d.share_pct * 100) : null;
+  // Phase 40 Goal A3 — filter the dossier subject through the snapshot:
+  // sellers classified brand_owned/authorized/amazon must NOT appear.
+  // If the dossier subject is a brand-controlled seller, swallow the
+  // dossier and render the tight-channel acknowledgement.
+  const dossierIsReseller = (() => {
+    if (!d) return false;
+    const synthetic: ResellerRow = {
+      rank: 0,
+      seller_name: d.seller_name,
+      share_pct: d.share_pct ?? null,
+      asins_won: d.asins_won ?? null,
+      is_fba: d.is_fba ?? null,
+      country: d.country ?? null,
+    };
+    const cls = lookupClassification(derived, synthetic);
+    if (cls === "reseller") return true;
+    if (cls == null) return true; // Legacy: assume reseller by default.
+    return false;
+  })();
+
+  const filteredDossier = dossierIsReseller ? d : null;
+  const friendly = filteredDossier
+    ? friendlySellerName(filteredDossier.seller_name)
+    : null;
+
+  // Count classified resellers for the "Did you authorize these?" block.
+  const resellerSellers = (narrative.reseller_reality.top_sellers ?? []).filter(
+    (s) => {
+      const cls = lookupClassification(derived, s);
+      if (cls === "reseller") return true;
+      if (cls == null && s.is_brand_controlled === false) return true;
+      return false;
+    },
+  );
 
   return (
     <section id="s-dossier" className="rv2-section">
       <SectionHead
-        eyebrow="Reseller Dossier"
-        title={d ? `Inside ${friendly}` : "Top sellers snapshot"}
-        source="Keepa · seller profile"
+        eyebrow="Did You Authorize These Sellers?"
+        title={filteredDossier ? `Inside ${friendly}` : "Reseller dossier"}
+        source="Keepa · seller profile · filtered to your reseller classifications"
       />
-      {d ? (
+      {filteredDossier ? (
         <>
           <div className="rv2-dossier-grid">
-            <Fact label="Seller name" value={friendly ?? d.seller_name} />
-            <Fact label="Marketplace ID" value={d.seller_id ?? "— not measured"} />
-            <Fact label="Country" value={prettyCountry(d.country) ?? "— not measured"} />
+            <Fact label="Seller name" value={friendly ?? filteredDossier.seller_name} />
+            <Fact
+              label="Marketplace ID"
+              value={filteredDossier.seller_id ?? "— not measured"}
+            />
+            <Fact
+              label="Country"
+              value={prettyCountry(filteredDossier.country) ?? "— not measured"}
+            />
             <Fact
               label="Buy-box share"
-              value={d.share_pct != null ? `${Math.round(d.share_pct * 100)}%` : "— not measured"}
+              value={
+                filteredDossier.share_pct != null
+                  ? `${Math.round(filteredDossier.share_pct * 100)}%`
+                  : "— not measured"
+              }
             />
             <Fact
               label="ASINs won"
-              value={d.asins_won != null ? String(d.asins_won) : "— not measured"}
+              value={
+                filteredDossier.asins_won != null
+                  ? String(filteredDossier.asins_won)
+                  : "— not measured"
+              }
             />
-            <Fact label="Fulfilment" value={d.fulfilment_mix} />
+            <Fact label="Fulfilment" value={filteredDossier.fulfilment_mix} />
+            <Fact
+              label="Authorization status"
+              value="Authorization unknown — confirm with your team"
+            />
           </div>
 
-          {d.top_asins.length > 0 && (
+          {filteredDossier.top_asins.length > 0 && (
             <div className="rv2-dossier-asins">
               <div className="rv2-dossier-subtitle">Top ASINs they win</div>
               <ul>
-                {d.top_asins.map((a) => (
+                {filteredDossier.top_asins.map((a) => (
                   <li key={a.asin}>
                     <span className="rv2-asin">{a.asin}</span>
                     <span className="rv2-asin-title">
                       {a.title ?? "— not measured"}
                     </span>
                     <span className="rv2-asin-price">
-                      {a.buy_box_price != null ? `$${Number(a.buy_box_price).toFixed(2)}` : "—"}
+                      {a.buy_box_price != null
+                        ? `$${Number(a.buy_box_price).toFixed(2)}`
+                        : "—"}
                     </span>
                   </li>
                 ))}
@@ -647,26 +1090,56 @@ function SectionResellerDossier({ narrative }: { narrative: NarrativeV2 }) {
             </div>
           )}
 
-          <div className="rv2-prose rv2-prose-callout">{paragraphs(d.risk_profile)}</div>
+          <div className="rv2-prose rv2-prose-callout">
+            {paragraphs(sanitizeForbidden(filteredDossier.risk_profile))}
+          </div>
 
-          <RcgCallout
-            kicker="What we do here"
-            body={
-              <>
-                {sellerCount ?? "Multiple"} unauthorized resellers controlling{" "}
-                <strong>
-                  {inverseBrandPct != null ? `${inverseBrandPct}%+` : "most"}
-                </strong>{" "}
-                of your buy box. We've removed resellers for Diversified Hospitality and dozens of other brands without disrupting wholesale relationships — written terms, MAP enforcement, sequenced cutovers.
-              </>
-            }
-          />
+          {resellerSellers.length > 0 && (
+            <div className="rv2-checklist">
+              <div className="rv2-checklist-title">
+                Sellers to confirm authorization on
+              </div>
+              <ul>
+                {resellerSellers.slice(0, 8).map((s, i) => (
+                  <li key={`auth-${i}`}>
+                    <span className="rv2-q">?</span>
+                    <span>{friendlySellerName(s.seller_name)}</span>
+                  </li>
+                ))}
+              </ul>
+              <div className="rv2-checklist-note">
+                Authorization status should be confirmed with your team. We&apos;ll review which sellers are authorized, which relationships matter, and which accounts should be transitioned, restricted, or monitored.
+              </div>
+            </div>
+          )}
         </>
-      ) : (
-        <p className="rv2-muted">
-          The dominant reseller share is below 20% — see the &ldquo;Top sellers&rdquo; chart in
-          the Reseller Reality section for the full distribution.
+      ) : derived.is_tight_channel ? (
+        <p className="rv2-muted rv2-prose">
+          No third-party reseller activity to investigate based on your classifications. The channel appears tightly brand-controlled.
         </p>
+      ) : resellerSellers.length === 0 ? (
+        <p className="rv2-muted rv2-prose">
+          No third-party reseller activity to investigate based on your classifications.
+        </p>
+      ) : (
+        <>
+          <p className="rv2-prose">
+            The dominant share is held by sellers you&apos;ve classified as brand-controlled. Below are the third-party sellers we&apos;d still recommend confirming authorization on:
+          </p>
+          <div className="rv2-checklist">
+            <ul>
+              {resellerSellers.slice(0, 8).map((s, i) => (
+                <li key={`auth2-${i}`}>
+                  <span className="rv2-q">?</span>
+                  <span>{friendlySellerName(s.seller_name)}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="rv2-checklist-note">
+              Authorization status should be confirmed with your team.
+            </div>
+          </div>
+        </>
       )}
     </section>
   );
@@ -957,18 +1430,23 @@ function SectionFooterCta({
   const c = narrative.cta;
   return (
     <section id="s-cta" className="rv2-section rv2-section-cta">
+      <div className="rv2-eyebrow">Recommended Next Step</div>
       <h2 className="rv2-h2">
-        Book a strategy call to walk through these numbers and your 6–12 month plan.
+        Schedule a 15-minute Amazon Channel Ownership Review with Steve.
       </h2>
       <p className="rv2-prose rv2-cta-prose">
-        No high-pressure sales — we'll walk the math line-by-line, talk through
-        the reseller list, and answer questions. The report sells the result; this
-        call just opens the door.
+        If these sellers are intentionally authorized to operate {brand.name}&apos;s Amazon channel, this may simply be a useful benchmark. If they are not, this could be a meaningful profit recapture and brand-control opportunity.
+      </p>
+      <p className="rv2-prose rv2-cta-prose">
+        On the call, we&apos;ll walk through the numbers, confirm which sellers are authorized, pressure-test the assumptions, and determine whether this is worth pursuing.
+      </p>
+      <p className="rv2-prose rv2-cta-prose rv2-muted">
+        No pressure. The goal is to confirm whether the opportunity is real, whether the assumptions are fair, and whether taking control is worth exploring.
       </p>
 
       <div className="rv2-cta-actions">
         <a className="rv2-btn rv2-btn-primary" href={callHref}>
-          Book a strategy call
+          Book a 15-minute review
         </a>
         {pdfUrl && (
           <a className="rv2-btn" href={pdfUrl} target="_blank" rel="noreferrer">
@@ -977,27 +1455,15 @@ function SectionFooterCta({
         )}
       </div>
 
-      <div className="rv2-bio">
-        <div className="rv2-bio-name">Steve Rolle · Founder, Rolle Consulting Group</div>
-        <p className="rv2-bio-body">
-          Brand owner who doubled the value of Diversified Hospitality Solutions on
-          Amazon by reclaiming control from resellers — taking it from a
-          reseller-fragmented catalog to <strong>$9.02M (2023)</strong> in revenue and
-          paying down $5M in AP from the recovered margin. RCG is the consulting
-          group that productized that playbook. We work performance-based on the
-          additional first-year profit we generate; if we don't add profit, we
-          don't get paid.
-        </p>
-        <p className="rv2-cta-contact">
-          <a href={`mailto:${c.secondary_email}`}>{c.secondary_email}</a>
-          {c.secondary_phone && (
-            <>
-              {" · "}
-              {c.secondary_phone}
-            </>
-          )}
-        </p>
-      </div>
+      <p className="rv2-cta-contact">
+        <a href={`mailto:${c.secondary_email}`}>{c.secondary_email}</a>
+        {c.secondary_phone && (
+          <>
+            {" · "}
+            {c.secondary_phone}
+          </>
+        )}
+      </p>
     </section>
   );
 }
@@ -1152,6 +1618,348 @@ function RcgCallout({
       <div className="rv2-rcg-callout-body">{body}</div>
     </aside>
   );
+}
+
+// ====================================================================
+// Phase 40 — New executive sections
+// ====================================================================
+
+function SectionExecutiveSummary({
+  narrative,
+  brand,
+  derived,
+}: {
+  narrative: NarrativeV2;
+  brand: PublicReportV2Brand;
+  derived: DerivedSnapshot;
+}) {
+  const revenueLine = narrative.math.lines.find((l) => l.key === "revenue");
+  const revenue = typeof revenueLine?.value === "number" ? revenueLine.value : null;
+  const profit = narrative.cover.delta_profit ?? null;
+  const scope = narrative.audit_scope ?? null;
+  const brandPct = Math.round(derived.non_reseller_share * 100);
+  const resellerPct = Math.round(derived.reseller_share * 100);
+  const top = pickTopReseller(narrative, derived);
+  const topShare = pickTopResellerShare(narrative, derived);
+
+  const bullets: React.ReactNode[] = [];
+  if (revenue != null) {
+    bullets.push(
+      <>
+        Estimated Amazon revenue found: <strong>{money(revenue)}</strong> per year
+      </>,
+    );
+  }
+  if (scope?.asins_included_count != null) {
+    bullets.push(
+      <>
+        ASINs analyzed: <strong>{scope.asins_included_count.toLocaleString("en-US")}</strong>
+        {scope.asins_found_total
+          ? <> of {scope.asins_found_total.toLocaleString("en-US")} found</>
+          : null}
+      </>,
+    );
+  }
+  bullets.push(
+    <>
+      Brand-controlled buy box: <strong>{brandPct}%</strong>
+    </>,
+  );
+  bullets.push(
+    <>
+      Third-party / reseller-controlled buy box: <strong>{resellerPct}%</strong>
+    </>,
+  );
+  if (top && topShare != null) {
+    bullets.push(
+      <>
+        Top reseller: <strong>{top}</strong> with approximately{" "}
+        <strong>{Math.round(topShare * 100)}%</strong> observed buy-box share
+      </>,
+    );
+  }
+  if (profit != null) {
+    bullets.push(
+      <>
+        Estimated annual profit recapture: <strong>{money(profit)}</strong>
+      </>,
+    );
+  }
+  bullets.push(
+    <>Primary issue: margin leakage + customer experience control</>,
+  );
+
+  return (
+    <section id="s-summary" className="rv2-section">
+      <SectionHead eyebrow="Executive Summary" title={`What we found for ${brand.name}`} />
+      <div className="rv2-summary-box">
+        <ul className="rv2-summary-bullets">
+          {bullets.map((b, i) => (
+            <li key={i}>{b}</li>
+          ))}
+        </ul>
+        <p className="rv2-summary-close">
+          This is worth a 15-minute review if these sellers are not intentionally authorized to operate your Amazon channel.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function SectionChannelControl({
+  narrative,
+  brand,
+  bundle,
+  derived,
+  confSellerControl,
+}: {
+  narrative: NarrativeV2;
+  brand: PublicReportV2Brand;
+  bundle: BrandEnrichmentBundle | null;
+  derived: DerivedSnapshot;
+  confSellerControl: ConfidenceLabel;
+}) {
+  const sellers = narrative.reseller_reality.top_sellers ?? [];
+  const top = pickTopReseller(narrative, derived);
+  const topShare = pickTopResellerShare(narrative, derived);
+  const sellerCount = bundle?.keepa?.unique_seller_count ?? sellers.length ?? null;
+  const asinsWithReseller = sellers.filter((s) => {
+    const cls = lookupClassification(derived, s);
+    return cls === "reseller" || (cls == null && s.is_brand_controlled === false);
+  }).reduce((sum, s) => sum + (s.asins_won ?? 0), 0);
+
+  return (
+    <section id="s-channel-control" className="rv2-section rv2-section-alt">
+      <SectionHead
+        eyebrow="The Channel Control Problem"
+        title="Your Amazon channel appears to be controlled by resellers"
+      />
+      <p className="rv2-prose">
+        Amazon may already be a meaningful channel for {brand.name}. The problem is that the channel does not appear to be operated by {brand.name} directly.
+      </p>
+      <p className="rv2-prose rv2-prose-callout">
+        <strong>You may already have a meaningful Amazon business. The issue is that someone else appears to be operating it.</strong>
+      </p>
+
+      <div className="rv2-channel-cards">
+        <ChannelCard
+          label="Brand-controlled buy box"
+          value={`${Math.round(derived.non_reseller_share * 100)}%`}
+          tone="good"
+          confidence={confSellerControl}
+        />
+        <ChannelCard
+          label="Reseller-controlled buy box"
+          value={`${Math.round(derived.reseller_share * 100)}%`}
+          tone="warn"
+          confidence={confSellerControl}
+        />
+        <ChannelCard
+          label="Top reseller"
+          value={top ?? "— not measured"}
+          sub={
+            topShare != null
+              ? `~${Math.round(topShare * 100)}% buy-box share`
+              : null
+          }
+        />
+        <ChannelCard
+          label="Observed sellers"
+          value={sellerCount != null ? String(sellerCount) : "— not measured"}
+        />
+        <ChannelCard
+          label="ASINs with reseller activity"
+          value={asinsWithReseller > 0 ? String(asinsWithReseller) : "— not measured"}
+        />
+        <ChannelCard
+          label="Brand-owned Amazon presence"
+          value={derived.shares.brand_owned > 0 ? "Yes" : "Unknown"}
+          sub="Confirm with your team"
+        />
+      </div>
+
+      <BuyBoxPanel
+        derived={derived}
+        legacyPct={bundle?.keepa?.brand_controlled_pct ?? null}
+      />
+    </section>
+  );
+}
+
+function ChannelCard({
+  label,
+  value,
+  sub,
+  tone,
+  confidence,
+}: {
+  label: string;
+  value: string;
+  sub?: string | null;
+  tone?: "good" | "warn";
+  confidence?: ConfidenceLabel;
+}) {
+  const cls =
+    tone === "good"
+      ? "rv2-channel-card rv2-channel-card-good"
+      : tone === "warn"
+        ? "rv2-channel-card rv2-channel-card-warn"
+        : "rv2-channel-card";
+  return (
+    <div className={cls}>
+      <div className="rv2-channel-card-lbl">{label}</div>
+      <div className="rv2-channel-card-val">{value}</div>
+      {sub && <div className="rv2-channel-card-sub">{sub}</div>}
+      {confidence && (
+        <div className="rv2-channel-card-conf">
+          <ConfidencePill level={confidence} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SectionCustomerExperience({ brand }: { brand: PublicReportV2Brand }) {
+  return (
+    <section id="s-cx" className="rv2-section">
+      <SectionHead
+        eyebrow="The Customer Experience Problem"
+        title="It's not just margin — it's brand control"
+      />
+      <p className="rv2-prose">
+        This is not just a reseller margin problem. It is a brand control problem. When third-party sellers control the channel, they influence pricing, packaging, availability, listing quality, customer expectations, and the buying experience. They may benefit from the demand your brand created without investing in the long-term health of the brand.
+      </p>
+      <p className="rv2-prose">
+        Resellers can sell product. But they rarely represent the brand the way the brand owner would.
+      </p>
+
+      <div className="rv2-cx-list">
+        <div className="rv2-cx-list-title">Typical customer experience risks when resellers control the channel</div>
+        <ul>
+          <li>Inconsistent pricing across listings</li>
+          <li>Inconsistent packaging and product configurations</li>
+          <li>Outdated or incomplete listings</li>
+          <li>Poor images, weak content, and missing A+ pages</li>
+          <li>Inventory inconsistency and stock-outs</li>
+          <li>Customer confusion about which listing is &ldquo;official&rdquo;</li>
+          <li>Bad reviews caused by the wrong seller experience</li>
+          <li>Lack of long-term brand investment from third parties</li>
+        </ul>
+      </div>
+
+      <p className="rv2-prose rv2-prose-callout">
+        At Diversified Hospitality, the biggest unlock was not only capturing reseller margin. The bigger unlock was that the brand owner finally controlled the customer experience, listings, packaging, inventory, pricing, reviews, and long-term channel strategy. That is what allowed the Amazon channel to scale — relevant for {brand.name} too.
+      </p>
+    </section>
+  );
+}
+
+function SectionSafeTransition() {
+  return (
+    <section id="s-transition" className="rv2-section rv2-section-alt">
+      <SectionHead
+        eyebrow="The Safe Path to Taking Control"
+        title="How we reclaim the channel without blowing up wholesale"
+      />
+      <p className="rv2-prose">
+        The biggest objection to bringing Amazon under brand control is fear of disrupting wholesale relationships. The process below is strategic, careful, and respectful of the relationships that matter.
+      </p>
+      <p className="rv2-prose rv2-prose-callout">
+        <strong>The goal is not to create a reseller war. The goal is to bring the Amazon customer experience under brand control in a way that protects the business.</strong>
+      </p>
+      <div className="rv2-cx-list">
+        <ul>
+          <li>Identify authorized vs. authorization-unknown sellers</li>
+          <li>Review distributor and reseller terms</li>
+          <li>Map which relationships matter to the broader business</li>
+          <li>Create sell-through windows where needed</li>
+          <li>Update future Amazon resale restrictions</li>
+          <li>Prepare inventory before transitioning listings</li>
+          <li>Avoid customer availability gaps</li>
+          <li>Maintain important wholesale relationships where possible</li>
+          <li>Transition Amazon toward brand-owned control over 6–12 months</li>
+          <li>Monitor listings after transition</li>
+        </ul>
+      </div>
+      <p className="rv2-muted-small">
+        We&apos;ll confirm which sellers are authorized, which relationships matter, and which accounts should be transitioned, restricted, or monitored.
+      </p>
+    </section>
+  );
+}
+
+function SectionWhySteveRolle() {
+  return (
+    <section id="s-why" className="rv2-section">
+      <SectionHead
+        eyebrow="Why Steve Rolle / RMG"
+        title="Operator-led, not agency"
+      />
+      <p className="rv2-prose">
+        Steve Rolle has lived this problem as a brand owner, not just as a consultant. At Diversified Hospitality, reseller-controlled Amazon activity created inconsistent listings, pricing issues, and margin leakage. Once the channel was brought under brand control, Amazon became a roughly <strong>$9M/year</strong> revenue channel.
+      </p>
+      <p className="rv2-prose">
+        More recently, Steve helped <strong>Legion Chemicals</strong> grow from $0 to roughly a <strong>$1M ARR</strong> Amazon run rate in less than 10 months.
+      </p>
+      <p className="rv2-prose">
+        We&apos;ve handled this process across reseller-fragmented catalogs and understand how to sequence the transition without disrupting core wholesale relationships.
+      </p>
+      <p className="rv2-prose rv2-prose-callout">
+        The lesson was simple: when the brand owner controls the marketplace, the brand can invest in the channel in a way resellers never will.
+      </p>
+      <div className="rv2-positioning">
+        <ul>
+          <li>Operator, not agency</li>
+          <li>Brand owner, not theorist</li>
+          <li>Channel strategist, not Amazon tactician</li>
+          <li>Profit recovery, not ad management</li>
+          <li>Safe transition, not reseller war</li>
+        </ul>
+      </div>
+      <p className="rv2-muted-small">
+        Engagements are structured around the size of the opportunity. In many cases, we combine a fixed implementation fee with performance-based upside tied to incremental profit. If the opportunity is not large enough to justify our involvement, we&apos;ll tell you.
+      </p>
+    </section>
+  );
+}
+
+function SectionDisclaimer() {
+  return (
+    <section className="rv2-section rv2-section-disclaimer">
+      <div className="rv2-disclaimer">
+        <div className="rv2-disclaimer-title">How to read this report</div>
+        <p>
+          Marketplace data is useful for identifying directional opportunity, but final economics require confirmation of COGS, wholesale pricing, authorized seller relationships, fulfillment costs, and current channel agreements.
+        </p>
+        <p>
+          All revenue, profit, and margin estimates are directional and based on available marketplace data, third-party tools, and reasonable assumptions. Actual results depend on costs, pricing, inventory, reseller agreements, fulfillment method, Amazon fees, and execution.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+// ====================================================================
+// Phase 40 — render-time copy sanitization for any LLM-generated text
+// that could surface forbidden phrases (risk_profile, math notes, etc.)
+// ====================================================================
+
+function sanitizeForbidden(input: string | null | undefined): string {
+  if (!input) return "";
+  let s = String(input);
+  // Order matters: the longer/multi-word phrases come first.
+  const replacements: [RegExp, string][] = [
+    [/\bunauthorized importers?\b/gi, "third-party seller"],
+    [/\bconfirmed unauthorized sellers?\b/gi, "third-party seller (authorization unknown)"],
+    [/\btermination lists?\b/gi, "channel transition plan"],
+    [/\bterminate\b/gi, "transition"],
+    [/\bunauthorized resellers?\b/gi, "third-party seller (authorization unknown)"],
+    [/\bdozens of brands\b/gi, "reseller-fragmented catalogs"],
+    [/we only get paid if we add profit/gi, "engagements are structured around the size of the opportunity"],
+    [/the report sells the result;? this call just opens the door\.?/gi, ""],
+  ];
+  for (const [re, rep] of replacements) s = s.replace(re, rep);
+  return s.trim();
 }
 
 // ====================================================================
@@ -1954,6 +2762,336 @@ function V2Styles() {
         .rv2-method-kicker { color: #8a6d2e !important; }
         .rv2-bar-fill { background: #c9a96a !important; }
         .rv2-bbpanel-brand { background: #c9a96a !important; }
+        .rv2-bbpanel-reseller { background: #d6d3cb !important; }
+      }
+
+      /* Phase 40 — new executive sections */
+      .rv2-cover-subhead {
+        max-width: 800px;
+        font-size: 16px;
+        color: var(--text-muted);
+        margin: 18px 0 8px;
+      }
+      .rv2-cover-valueline {
+        max-width: 800px;
+        font-size: 15px;
+        color: var(--text);
+        margin: 0 0 24px;
+      }
+      .rv2-cover-secondary {
+        margin-top: 18px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+      }
+      .rv2-cover-secondary-stat {
+        display: inline-flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 10px 16px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.02);
+      }
+      .rv2-cover-secondary-lbl {
+        font-size: 11px;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .rv2-cover-secondary-val {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--gold);
+        font-variant-numeric: tabular-nums;
+        display: inline-flex;
+        gap: 10px;
+        align-items: center;
+      }
+      .rv2-kpi-grid-3 {
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+
+      /* Confidence pills */
+      .rv2-conf {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 10px;
+        border-radius: 999px;
+        font-size: 10.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        border: 1px solid var(--border-soft);
+        background: rgba(255,255,255,0.03);
+        color: var(--text-muted);
+      }
+      .rv2-conf-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--text-muted);
+      }
+      .rv2-conf-high { color: #6cb98a; border-color: rgba(108,185,138,0.35); }
+      .rv2-conf-high .rv2-conf-dot { background: #6cb98a; }
+      .rv2-conf-med { color: var(--gold-soft); border-color: rgba(216,184,120,0.35); }
+      .rv2-conf-med .rv2-conf-dot { background: var(--gold-soft); }
+      .rv2-conf-low { color: var(--red); border-color: rgba(224,123,94,0.35); }
+      .rv2-conf-low .rv2-conf-dot { background: var(--red); }
+      .rv2-conf-assumption { color: #a8c0ea; border-color: rgba(135,160,210,0.36); }
+      .rv2-conf-assumption .rv2-conf-dot { background: #a8c0ea; }
+      .rv2-bigstat-conf { margin-top: 10px; }
+
+      /* Executive summary box */
+      .rv2-summary-box {
+        padding: 22px 26px;
+        border: 1px solid var(--border-soft);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(201,169,106,0.08), rgba(201,169,106,0.02));
+        margin-top: 8px;
+      }
+      .rv2-summary-bullets {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 8px;
+      }
+      .rv2-summary-bullets li {
+        font-size: 15px;
+        color: var(--text);
+        padding-left: 22px;
+        position: relative;
+        line-height: 1.55;
+      }
+      .rv2-summary-bullets li::before {
+        content: "";
+        position: absolute;
+        left: 4px;
+        top: 8px;
+        width: 8px;
+        height: 8px;
+        background: var(--gold);
+        border-radius: 50%;
+      }
+      .rv2-summary-bullets strong { color: var(--gold-soft); }
+      .rv2-summary-close {
+        margin: 16px 0 0;
+        padding-top: 14px;
+        border-top: 1px solid var(--border-soft);
+        color: var(--text);
+        font-style: italic;
+        font-size: 14px;
+      }
+
+      /* Channel control cards */
+      .rv2-channel-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 12px;
+        margin: 18px 0;
+      }
+      .rv2-channel-card {
+        padding: 14px 16px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.015);
+      }
+      .rv2-channel-card-good { border-color: rgba(108,185,138,0.35); background: rgba(108,185,138,0.06); }
+      .rv2-channel-card-warn { border-color: rgba(224,123,94,0.35); background: rgba(224,123,94,0.06); }
+      .rv2-channel-card-lbl {
+        font-size: 11px;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .rv2-channel-card-val {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--gold);
+        margin-top: 6px;
+        font-variant-numeric: tabular-nums;
+        word-break: break-word;
+      }
+      .rv2-channel-card-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+      .rv2-channel-card-conf { margin-top: 8px; }
+
+      /* Channel block + tone banners (reseller reality) */
+      .rv2-channel-block {
+        margin-top: 16px;
+        padding: 16px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.015);
+      }
+      .rv2-channel-good {
+        background: rgba(108,185,138,0.06);
+        border-color: rgba(108,185,138,0.25);
+      }
+      .rv2-channel-block-title {
+        font-weight: 700;
+        font-size: 14px;
+        color: var(--text);
+        margin-bottom: 8px;
+      }
+      .rv2-channel-good .rv2-channel-block-title { color: #8edca6; }
+      .rv2-channel-sub { font-size: 13px; color: var(--text-muted); margin: 0 0 12px; }
+      .rv2-bar-fill-good {
+        background: linear-gradient(90deg, #6cb98a, #8edca6) !important;
+      }
+      .rv2-banner {
+        margin: 12px 0 18px;
+        padding: 12px 16px;
+        border-radius: 10px;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+      .rv2-banner-good {
+        background: rgba(108,185,138,0.08);
+        border: 1px solid rgba(108,185,138,0.35);
+        color: #cfe8d8;
+      }
+      .rv2-banner-warn {
+        background: rgba(216,184,120,0.10);
+        border: 1px solid rgba(216,184,120,0.35);
+        color: #f5e7c1;
+      }
+
+      /* 4-bucket buy-box bar */
+      .rv2-bbpanel-bar-4 {
+        display: flex;
+        height: 36px;
+        border-radius: 6px;
+        overflow: hidden;
+        background: rgba(255,255,255,0.04);
+      }
+      .rv2-bbpanel-seg {
+        display: flex; align-items: center; justify-content: center;
+        font-size: 11px; font-weight: 600; min-width: 0; padding: 0 6px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .rv2-bbpanel-brand { background: #6cb98a; color: #0d2117; }
+      .rv2-bbpanel-authorized { background: var(--gold); color: #1a1408; }
+      .rv2-bbpanel-amazon { background: #87a0d2; color: #0c1322; }
+      .rv2-bbpanel-reseller { background: var(--red); color: #2a0e0a; }
+      .rv2-bbpanel-empty { background: rgba(255,255,255,0.06); color: var(--text-muted); }
+      .rv2-bbpanel-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 10px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .rv2-bbpanel-legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .rv2-bbpanel-swatch {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+      }
+
+      /* Customer-experience list + transition + positioning */
+      .rv2-cx-list {
+        margin-top: 18px;
+        padding: 16px 20px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.015);
+      }
+      .rv2-cx-list-title {
+        font-weight: 700;
+        font-size: 13px;
+        color: var(--text);
+        margin-bottom: 10px;
+      }
+      .rv2-cx-list ul {
+        list-style: disc;
+        padding-left: 20px;
+        margin: 0;
+        display: grid;
+        gap: 6px;
+      }
+      .rv2-cx-list li {
+        font-size: 14px;
+        color: var(--text);
+        line-height: 1.55;
+      }
+
+      .rv2-positioning {
+        margin-top: 14px;
+        padding: 14px 18px;
+        border-left: 3px solid var(--gold);
+        background: rgba(201,169,106,0.06);
+        border-radius: 0 8px 8px 0;
+      }
+      .rv2-positioning ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 6px;
+      }
+      .rv2-positioning li {
+        font-size: 13.5px;
+        color: var(--text);
+        padding-left: 18px;
+        position: relative;
+      }
+      .rv2-positioning li::before {
+        content: "→";
+        position: absolute;
+        left: 0;
+        color: var(--gold);
+      }
+
+      /* Disclaimer */
+      .rv2-section-disclaimer {
+        padding: 32px 0 48px;
+      }
+      .rv2-disclaimer {
+        max-width: 820px;
+        margin: 0 auto;
+        padding: 16px 20px;
+        border: 1px dashed var(--border-soft);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.015);
+        color: var(--text-muted);
+        font-size: 12.5px;
+        line-height: 1.6;
+      }
+      .rv2-disclaimer-title {
+        font-weight: 700;
+        color: var(--text);
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 8px;
+      }
+      .rv2-disclaimer p { margin: 0 0 8px; }
+      .rv2-disclaimer p:last-child { margin: 0; }
+
+      @media print {
+        .rv2-summary-box, .rv2-channel-card, .rv2-channel-block, .rv2-cx-list,
+        .rv2-positioning, .rv2-disclaimer, .rv2-cover-secondary-stat {
+          background: #fafafa !important; border-color: #ddd !important;
+        }
+        .rv2-conf, .rv2-banner, .rv2-banner-good, .rv2-banner-warn,
+        .rv2-summary-bullets li, .rv2-summary-close, .rv2-cx-list li,
+        .rv2-channel-card-val, .rv2-cover-secondary-val, .rv2-channel-block-title,
+        .rv2-disclaimer p, .rv2-positioning li {
+          color: #111 !important;
+        }
+        .rv2-bbpanel-brand { background: #6cb98a !important; }
+        .rv2-bbpanel-authorized { background: #c9a96a !important; }
+        .rv2-bbpanel-amazon { background: #87a0d2 !important; }
         .rv2-bbpanel-reseller { background: #d6d3cb !important; }
       }
     `}</style>

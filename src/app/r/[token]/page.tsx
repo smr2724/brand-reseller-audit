@@ -92,13 +92,53 @@ export default async function ReportPage({ params }: PageProps) {
   const admin = createSupabaseAdminClient();
   if (!admin) return notFound();
 
-  const { data: report } = await admin
-    .from("reports")
-    .select(
-      "id, token, status, error_message, brand_id, supplier_id, opportunity_id, pdf_storage_path, narrative_json, report_assumptions, generated_at, created_at, views"
-    )
-    .eq("token", params.token)
-    .maybeSingle();
+  // Phase 40 — pull seller_classifications + four *_share_pct columns.
+  // We graceful-degrade when the columns aren't present (legacy DBs that
+  // haven't run migration 0038): retry the query with just the legacy
+  // columns. Old reports without snapshot data still render via the
+  // legacy keepa_brand_controlled_pct fallback in the renderer.
+  type ReportRow = {
+    id: string;
+    token: string | null;
+    status: string;
+    error_message: string | null;
+    brand_id: string | null;
+    supplier_id: string | null;
+    opportunity_id: string | null;
+    pdf_storage_path: string | null;
+    narrative_json: unknown;
+    report_assumptions: unknown;
+    generated_at: string | null;
+    created_at: string;
+    views: number | null;
+    seller_classifications?: unknown;
+    brand_owned_share_pct?: number | null;
+    authorized_share_pct?: number | null;
+    amazon_share_pct?: number | null;
+    reseller_share_pct?: number | null;
+  };
+  let report: ReportRow | null = null;
+  {
+    const { data, error } = await admin
+      .from("reports")
+      .select(
+        "id, token, status, error_message, brand_id, supplier_id, opportunity_id, pdf_storage_path, narrative_json, report_assumptions, generated_at, created_at, views, seller_classifications, brand_owned_share_pct, authorized_share_pct, amazon_share_pct, reseller_share_pct"
+      )
+      .eq("token", params.token)
+      .maybeSingle();
+    if (error && /column .* does not exist|seller_classifications|share_pct/i.test(error.message ?? "")) {
+      const retry = await admin
+        .from("reports")
+        .select(
+          "id, token, status, error_message, brand_id, supplier_id, opportunity_id, pdf_storage_path, narrative_json, report_assumptions, generated_at, created_at, views"
+        )
+        .eq("token", params.token)
+        .maybeSingle();
+      report = (retry.data as ReportRow | null) ?? null;
+    } else {
+      report = (data as ReportRow | null) ?? null;
+    }
+  }
 
   if (!report) return notFound();
 
@@ -120,7 +160,7 @@ export default async function ReportPage({ params }: PageProps) {
 
   // ---- generating / failed / not_a_fit states (brand-audit only) ----
   if (report.brand_id && report.status === "generating") {
-    return <GeneratingState token={report.token} />;
+    return <GeneratingState token={report.token ?? ""} />;
   }
   if (report.brand_id && report.status === "failed") {
     return <FailedState message={report.error_message ?? null} />;
@@ -177,6 +217,12 @@ export default async function ReportPage({ params }: PageProps) {
           | import("@/lib/report/v2/types").ReportAssumptions
           | null
           | undefined) ?? null;
+      const snapshot = (() => {
+        const raw = report!.seller_classifications;
+        return Array.isArray(raw)
+          ? (raw as import("@/lib/report/v2/snapshot-derive").SellerClassificationSnapshotEntry[])
+          : null;
+      })();
       return (
         <PublicReportV2
           narrative={rawNarrative as NarrativeV2}
@@ -185,6 +231,13 @@ export default async function ReportPage({ params }: PageProps) {
           pdfUrl={pdfUrl}
           reportToken={report.token!}
           assumptions={assumptions}
+          classificationSnapshot={snapshot}
+          shareCols={{
+            brand_owned: report.brand_owned_share_pct ?? null,
+            authorized: report.authorized_share_pct ?? null,
+            amazon: report.amazon_share_pct ?? null,
+            reseller: report.reseller_share_pct ?? null,
+          }}
         />
       );
     }
