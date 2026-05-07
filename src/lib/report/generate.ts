@@ -201,6 +201,26 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
     const generatedAt = new Date();
     const contactEmail = (input.contactEmail || "").trim() || FALLBACK_CONTACT;
     const calendlyUrl = process.env.RCG_CALENDLY_URL || "https://calendly.com/steve-rollemanagementgroup/intro";
+
+    // Phase 46 — Read back the persisted classification snapshot so the
+    // narrative LLM prompts (Five-Step Framework, plan, cover) only see
+    // sellers the user classified as `reseller`. Without this, the
+    // "largest seller to transition" copy would reference whoever sits
+    // on top of `bundle.keepa` — which is the brand owner's own LLC for
+    // any audit where the brand sells direct on Amazon.
+    let classificationSnapshotForAssemble: SellerClassificationSnapshotEntry[] | null = null;
+    try {
+      classificationSnapshotForAssemble = await loadReportClassificationSnapshot(
+        admin,
+        reportId,
+      );
+    } catch (e) {
+      console.warn(
+        "[report.generate] classification snapshot fetch for assemble failed:",
+        e,
+      );
+    }
+
     const assembled = await assembleV2({
       brand: brandTyped,
       bundle: enrichResult.bundle,
@@ -213,6 +233,7 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
       spApiTrailing: enrichResult.spApiTrailing,
       productCategoryHints: enrichResult.productCategoryHints,
       auditScope: enrichResult.auditScope,
+      classificationSnapshot: classificationSnapshotForAssemble,
     });
     logStep(reportId, currentStep, t);
 
@@ -222,9 +243,6 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
     //    opportunity) and renders identical content.
     currentStep = "render_pdf";
     t = Date.now();
-    const pdfClassificationSnapshot = input.classificationShares
-      ? null
-      : null;
     const pdfShareCols = input.classificationShares
       ? {
           brand_owned: input.classificationShares.brand_owned_share_pct,
@@ -233,20 +251,21 @@ export async function generateAuditReport(input: GenerateInput): Promise<void> {
           reseller: input.classificationShares.reseller_share_pct,
         }
       : null;
-    // Read back the persisted classification snapshot if present —
-    // `classificationShares` only carries the aggregate percentages, but
-    // the renderer also needs per-seller rows to bucket the dossier and
-    // top-seller bars correctly.
-    let snapshotForPdf: Awaited<
-      ReturnType<typeof loadReportClassificationSnapshot>
-    > = pdfClassificationSnapshot;
-    try {
-      snapshotForPdf = await loadReportClassificationSnapshot(admin, reportId);
-    } catch (e) {
-      console.warn(
-        "[report.generate] classification snapshot fetch for PDF failed:",
-        e,
-      );
+    // Phase 46 — reuse the snapshot we already loaded for assemble so
+    // the PDF renderer sees the exact same per-seller rows the web
+    // renderer reads. Re-fetch only on the unlikely path where the
+    // earlier load failed.
+    let snapshotForPdf: SellerClassificationSnapshotEntry[] | null =
+      classificationSnapshotForAssemble;
+    if (snapshotForPdf == null) {
+      try {
+        snapshotForPdf = await loadReportClassificationSnapshot(admin, reportId);
+      } catch (e) {
+        console.warn(
+          "[report.generate] classification snapshot fetch for PDF failed:",
+          e,
+        );
+      }
     }
     const buffer = await renderAuditPdfV2({
       brand: brandTyped,

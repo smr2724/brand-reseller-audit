@@ -323,7 +323,7 @@ export function PublicReportV2({
             {/* 7. Safe Transition Plan */}
             <SectionSafeTransition />
             {/* 8. Five-Step Framework */}
-            <SectionPlan narrative={narrative} />
+            <SectionPlan narrative={narrative} derived={derived} />
             {/* 9. Why Steve / RMG */}
             <SectionWhySteveRolle />
             {/* 9.5 Phase 44 — Diversified Hospitality case study (opportunity-only) */}
@@ -1472,9 +1472,73 @@ function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
 // Section 6 — 6-12 Month Capture Plan (Five-Step Framework)
 // ====================================================================
 
-function SectionPlan({ narrative }: { narrative: NarrativeV2 }) {
+function SectionPlan({
+  narrative,
+  derived,
+}: {
+  narrative: NarrativeV2;
+  derived: DerivedSnapshot;
+}) {
   const p = narrative.plan;
   const steps = p.steps && p.steps.length === 5 ? p.steps : null;
+
+  // Phase 46 — Render-time defense in depth. Re-classify the top-seller
+  // list against the persisted snapshot here (mirrors the assemble.ts
+  // filter) so legacy narrative_json that named the brand owner as a
+  // reseller in Step 4 still renders cleanly. We use this for:
+  //   1. The empty-resellers fallback decision (no reseller exists →
+  //      switch to a reference protection plan)
+  //   2. A name-redaction sanitizer over each step body / intro
+  const sellers = narrative.reseller_reality.top_sellers ?? [];
+  const resellerSellers: ResellerRow[] = [];
+  const brandControlledNames = new Set<string>();
+  for (const s of sellers) {
+    const cls = lookupClassification(derived, s);
+    if (cls === "reseller" || (cls == null && s.is_brand_controlled === false)) {
+      resellerSellers.push(s);
+    } else if (cls === "brand_owned" || cls === "authorized" || cls === "amazon") {
+      const n = (s.seller_name ?? "").trim();
+      if (n) brandControlledNames.add(n);
+    } else if (cls == null && s.is_brand_controlled === true) {
+      const n = (s.seller_name ?? "").trim();
+      if (n) brandControlledNames.add(n);
+    }
+  }
+  const hasResellers = resellerSellers.length > 0;
+  const scrubBrandOwnedNaming = makePlanCopySanitizer(brandControlledNames);
+
+  // Empty-resellers fallback: every seller is brand-owned / authorized
+  // / amazon. The framework section needs sensible reference copy
+  // rather than a body that still names "the largest reseller".
+  if (!hasResellers && steps) {
+    return (
+      <section id="s-plan" className="rv2-section rv2-section-alt">
+        <SectionHead
+          eyebrow="6–12 Month Capture Plan"
+          title="The Five-Step Framework"
+        />
+        <p className="rv2-prose">
+          Based on your classifications, the channel is already brand-controlled — there are no third-party resellers to transition off your listings today. The framework below is offered as a reference for protecting that position long-term.
+        </p>
+        <div className="rv2-fivestep">
+          {steps.map((s, i) => (
+            <PlanStepCard
+              key={s.number}
+              step={
+                s.number === 4
+                  ? { ...s, body: emptyResellerStep4Body() }
+                  : { ...s, body: scrubBrandOwnedNaming(s.body) }
+              }
+              callout={i === 3 ? "step4" : i === 4 ? "step5" : null}
+            />
+          ))}
+        </div>
+        {p.closing && (
+          <p className="rv2-prose rv2-plan-closing">{p.closing}</p>
+        )}
+      </section>
+    );
+  }
 
   return (
     <section id="s-plan" className="rv2-section rv2-section-alt">
@@ -1482,14 +1546,14 @@ function SectionPlan({ narrative }: { narrative: NarrativeV2 }) {
         eyebrow="6–12 Month Capture Plan"
         title="The Five-Step Framework"
       />
-      {p.intro && <p className="rv2-prose">{p.intro}</p>}
+      {p.intro && <p className="rv2-prose">{scrubBrandOwnedNaming(p.intro)}</p>}
 
       {steps ? (
         <div className="rv2-fivestep">
           {steps.map((s, i) => (
             <PlanStepCard
               key={s.number}
-              step={s}
+              step={{ ...s, body: scrubBrandOwnedNaming(s.body) }}
               callout={i === 3 ? "step4" : i === 4 ? "step5" : null}
             />
           ))}
@@ -1503,7 +1567,7 @@ function SectionPlan({ narrative }: { narrative: NarrativeV2 }) {
               <div className="rv2-plan-label">{col.label}</div>
               <ul>
                 {col.bullets.map((b, j) => (
-                  <li key={j}>{b}</li>
+                  <li key={j}>{scrubBrandOwnedNaming(b)}</li>
                 ))}
               </ul>
             </div>
@@ -1516,6 +1580,55 @@ function SectionPlan({ narrative }: { narrative: NarrativeV2 }) {
       )}
     </section>
   );
+}
+
+/**
+ * Phase 46 — Render-time scrub for any "Transitioning from resellers
+ * like {brand-owned}" copy that may have been baked into older
+ * narrative_json. Replaces the literal seller name with neutral
+ * phrasing rather than failing closed (the page already rendered);
+ * downstream surfaces (PDF) re-use this same helper.
+ */
+function emptyResellerStep4Body(): string {
+  return "Based on your classifications, the channel is already brand-controlled — there are no third-party resellers to transition off your listings today. The framework continues to apply as a protection plan: written distribution terms, MAP enforcement, and a monitored authorized-seller list keep new resellers from showing up six months from now.";
+}
+
+function makePlanCopySanitizer(
+  brandControlledNames: Set<string>,
+): (input: string) => string {
+  if (!brandControlledNames || brandControlledNames.size === 0) {
+    return (s) => s ?? "";
+  }
+  const names = Array.from(brandControlledNames)
+    .map((n) => n.trim())
+    .filter((n) => n.length >= 3)
+    .sort((a, b) => b.length - a.length);
+  if (names.length === 0) return (s) => s ?? "";
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Two passes per name:
+  //   1. "(transitioning|removing|targeting) … resellers like {name}" →
+  //      strip the construct entirely so the sentence reads as a
+  //      generic reseller-transition reference.
+  //   2. Bare-name fallback → swap with "an authorized brand-controlled
+  //      seller" so any standalone mention reads correctly.
+  // Order matters — do construct-stripping first.
+  const constructPatterns = names.map(
+    (n) =>
+      new RegExp(
+        `\\bresellers?\\s+(?:like|such as)\\s+${escape(n)}\\b(?:\\s*\\([^)]*\\))?`,
+        "gi",
+      ),
+  );
+  const barePatterns = names.map(
+    (n) => new RegExp(`\\b${escape(n)}\\b(?:\\s*\\([^)]*\\d+%[^)]*\\))?`, "gi"),
+  );
+  return (input: string) => {
+    if (!input) return input ?? "";
+    let out = input;
+    for (const re of constructPatterns) out = out.replace(re, "third-party resellers");
+    for (const re of barePatterns) out = out.replace(re, "an authorized brand-controlled seller");
+    return out;
+  };
 }
 
 function PlanStepCard({

@@ -1528,26 +1528,100 @@ function SafeTransitionPage({ brand }: { brand: BrandForReport }) {
 function FrameworkPage({
   narrative,
   brand,
+  derived,
 }: {
   narrative: NarrativeV2;
   brand: BrandForReport;
+  derived: DerivedSnapshot;
 }) {
   const p = narrative.plan;
   const steps = p.steps && p.steps.length === 5 ? p.steps : null;
+
+  // Phase 46 — same render-time defense the web renderer uses. Compute
+  // brand-controlled vs reseller buckets from the persisted snapshot
+  // and (a) swap Step 4 for the empty-resellers reference body when no
+  // reseller exists, (b) scrub any legacy narrative_json that names a
+  // brand-controlled seller in a reseller context.
+  const sellers = narrative.reseller_reality.top_sellers ?? [];
+  const brandControlledNames = new Set<string>();
+  let resellerCount = 0;
+  for (const s of sellers) {
+    const cls = lookupClassification(derived, s);
+    if (cls === "reseller" || (cls == null && s.is_brand_controlled === false)) {
+      resellerCount += 1;
+    } else if (cls === "brand_owned" || cls === "authorized" || cls === "amazon") {
+      const n = (s.seller_name ?? "").trim();
+      if (n) brandControlledNames.add(n);
+    } else if (cls == null && s.is_brand_controlled === true) {
+      const n = (s.seller_name ?? "").trim();
+      if (n) brandControlledNames.add(n);
+    }
+  }
+  const hasResellers = resellerCount > 0;
+  const scrubBrandOwnedNaming = makePlanCopySanitizerPdf(brandControlledNames);
+  const introText = sanitizeForbidden(scrubBrandOwnedNaming(p.intro ?? ""));
+
+  if (!hasResellers && steps) {
+    return (
+      <Page size="LETTER" style={styles.page}>
+        <SectionHead
+          eyebrow="6–12 Month Capture Plan"
+          title="The Five-Step Framework"
+        />
+        <Text style={styles.prose}>
+          Based on your classifications, the channel is already brand-controlled — there are no third-party resellers to transition off your listings today. The framework below is offered as a reference for protecting that position long-term.
+        </Text>
+        <View>
+          {steps.map((s, i) => {
+            const body =
+              s.number === 4
+                ? emptyResellerStep4BodyPdf()
+                : sanitizeForbidden(scrubBrandOwnedNaming(s.body));
+            return (
+              <View key={s.number} style={[styles.card, { marginVertical: 4 }]}>
+                <Text style={styles.stepNum}>Step {s.number}</Text>
+                <Text style={styles.stepTitle}>{s.title}</Text>
+                <Text style={styles.stepBody}>{body}</Text>
+                {i === 3 && (
+                  <View style={[styles.bannerWarn, { marginTop: 8, marginBottom: 0 }]}>
+                    <Text style={styles.eyebrow}>Case study</Text>
+                    <Text style={{ fontSize: 9, color: P.ink, lineHeight: 1.5 }}>
+                      {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep4} ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
+                    </Text>
+                  </View>
+                )}
+                {i === 4 && (
+                  <View style={[styles.bannerWarn, { marginTop: 8, marginBottom: 0 }]}>
+                    <Text style={styles.eyebrow}>Team model</Text>
+                    <Text style={{ fontSize: 9, color: P.ink, lineHeight: 1.5 }}>
+                      {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep5} ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
+                    </Text>
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+        {p.closing && <Text style={[styles.prose, { marginTop: 12 }]}>{sanitizeForbidden(p.closing)}</Text>}
+        <PageFooter label="Five-Step Framework" brandName={brand.name} />
+      </Page>
+    );
+  }
+
   return (
     <Page size="LETTER" style={styles.page}>
       <SectionHead
         eyebrow="6–12 Month Capture Plan"
         title="The Five-Step Framework"
       />
-      {p.intro && <Text style={styles.prose}>{sanitizeForbidden(p.intro)}</Text>}
+      {introText && <Text style={styles.prose}>{introText}</Text>}
       {steps ? (
         <View>
           {steps.map((s, i) => (
             <View key={s.number} style={[styles.card, { marginVertical: 4 }]}>
               <Text style={styles.stepNum}>Step {s.number}</Text>
               <Text style={styles.stepTitle}>{s.title}</Text>
-              <Text style={styles.stepBody}>{sanitizeForbidden(s.body)}</Text>
+              <Text style={styles.stepBody}>{sanitizeForbidden(scrubBrandOwnedNaming(s.body))}</Text>
               {i === 3 && (
                 <View style={[styles.bannerWarn, { marginTop: 8, marginBottom: 0 }]}>
                   <Text style={styles.eyebrow}>Case study</Text>
@@ -1574,7 +1648,7 @@ function FrameworkPage({
               <View style={styles.stepCardInner}>
                 <Text style={styles.stepNum}>{col.label}</Text>
                 {col.bullets.map((b, j) => (
-                  <Text key={j} style={[styles.stepBody, { marginTop: 4 }]}>• {b}</Text>
+                  <Text key={j} style={[styles.stepBody, { marginTop: 4 }]}>• {scrubBrandOwnedNaming(b)}</Text>
                 ))}
               </View>
             </View>
@@ -1585,6 +1659,41 @@ function FrameworkPage({
       <PageFooter label="Five-Step Framework" brandName={brand.name} />
     </Page>
   );
+}
+
+function emptyResellerStep4BodyPdf(): string {
+  return "Based on your classifications, the channel is already brand-controlled — there are no third-party resellers to transition off your listings today. The framework continues to apply as a protection plan: written distribution terms, MAP enforcement, and a monitored authorized-seller list keep new resellers from showing up six months from now.";
+}
+
+function makePlanCopySanitizerPdf(
+  brandControlledNames: Set<string>,
+): (input: string) => string {
+  if (!brandControlledNames || brandControlledNames.size === 0) {
+    return (s) => s ?? "";
+  }
+  const names = Array.from(brandControlledNames)
+    .map((n) => n.trim())
+    .filter((n) => n.length >= 3)
+    .sort((a, b) => b.length - a.length);
+  if (names.length === 0) return (s) => s ?? "";
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const constructPatterns = names.map(
+    (n) =>
+      new RegExp(
+        `\\bresellers?\\s+(?:like|such as)\\s+${escape(n)}\\b(?:\\s*\\([^)]*\\))?`,
+        "gi",
+      ),
+  );
+  const barePatterns = names.map(
+    (n) => new RegExp(`\\b${escape(n)}\\b(?:\\s*\\([^)]*\\d+%[^)]*\\))?`, "gi"),
+  );
+  return (input: string) => {
+    if (!input) return input ?? "";
+    let out = input;
+    for (const re of constructPatterns) out = out.replace(re, "third-party resellers");
+    for (const re of barePatterns) out = out.replace(re, "an authorized brand-controlled seller");
+    return out;
+  };
 }
 
 // =====================================================================
@@ -2580,7 +2689,7 @@ function AuditV2Document({
         revenueBadge={revenueBadge}
       />
       <SafeTransitionPage brand={brand} />
-      <FrameworkPage narrative={narrative} brand={brand} />
+      <FrameworkPage narrative={narrative} brand={brand} derived={derived} />
       <WhySteveRollePage brand={brand} />
       <CaseStudyDiversifiedHospitalityPage brand={brand} />
       <CtaPage narrative={narrative} brand={brand} />

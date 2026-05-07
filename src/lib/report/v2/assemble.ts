@@ -30,6 +30,13 @@ import {
   llmPlan,
   llmResellerRealityLine,
 } from "./narrative";
+import {
+  brandControlledNameSet,
+  getLargestReseller,
+  getResellerSellers,
+  type ClassifiableSellerRow,
+  type SellerClassificationSnapshotEntry,
+} from "./snapshot-derive";
 import { withTiming } from "@/lib/util/timing";
 import { resolveBrandRevenue } from "@/lib/math/resolve-brand-revenue";
 import {
@@ -120,6 +127,13 @@ export interface AssembleInput {
   /** Phase 35 — counts for the Methodology & Audit Scope section. Null
    * for legacy callers; the renderer hides the section when missing. */
   auditScope?: NarrativeAuditScope | null;
+  /** Phase 46 — persisted seller classifications. When present, every
+   *  "largest seller to transition" / "top reseller" copy decision in
+   *  the LLM prompts is filtered through this list so brand-owned and
+   *  authorized sellers are NEVER named as resellers. Legacy callers
+   *  may pass null; the per-call helpers fall through to the keepa
+   *  `is_brand_controlled` boolean in that case. */
+  classificationSnapshot?: SellerClassificationSnapshotEntry[] | null;
 }
 
 export interface AssembleOutput {
@@ -284,6 +298,48 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     brandControlledPct: bundle.keepa.brand_controlled_pct ?? null,
   });
 
+  // Phase 46 — Compute the classification-aware "top reseller" for the
+  // copy-generating LLM prompts. We MUST filter out any seller the user
+  // classified as brand_owned / authorized / amazon: naming the brand
+  // owner's own LLC as the "largest seller to transition from" is the
+  // single biggest credibility bug we've shipped (Bigelow Chemists at
+  // 42% share is the canonical case — they ARE the brand). When no
+  // resellers exist at all (or the snapshot is missing), fall back
+  // through the keepa heuristic per the legacy contract.
+  const classificationRows: ClassifiableSellerRow[] = (() => {
+    const snapshot = input.classificationSnapshot;
+    if (Array.isArray(snapshot) && snapshot.length > 0) {
+      return snapshot.map((s) => ({
+        seller_id: s.seller_id ?? null,
+        seller_name: s.seller_name ?? null,
+        share_pct: s.share_pct ?? null,
+        asins_won: s.asins_won ?? null,
+        is_fba: s.is_fba ?? null,
+        classification: s.classification,
+      }));
+    }
+    // Legacy fallback: build classifiable rows from `bundle.keepa.sellers`
+    // using `is_brand_controlled`. Anyone tagged true → brand_owned;
+    // everyone else → reseller. This mirrors the renderer's
+    // lookupClassification() fallback so the two surfaces stay aligned.
+    return (bundle.keepa.sellers ?? []).map((s) => ({
+      seller_id: s.seller_id ?? null,
+      seller_name: s.seller_name ?? null,
+      share_pct: s.share_pct ?? null,
+      asins_won: s.asins_won ?? null,
+      is_fba: s.is_fba ?? null,
+      classification: null,
+      is_brand_controlled: s.is_brand_controlled ?? null,
+    }));
+  })();
+
+  const filteredResellerRows = getResellerSellers(classificationRows);
+  const filteredLargestReseller = getLargestReseller(classificationRows);
+  const filteredTopReseller = filteredLargestReseller?.seller_name ?? null;
+  const filteredTopResellerSharePct =
+    filteredLargestReseller?.share_pct ?? null;
+  const brandControlledNames = brandControlledNameSet(classificationRows);
+
   // 3. LLM section calls — fanned out in parallel where possible.
   // Phase 22 — wrap each in withTiming so we get one log line per
   // section per scan, and they all run concurrently inside Promise.all.
@@ -300,8 +356,8 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     withTiming("llm/coverHeadline", () =>
       llmCoverHeadline({
         brandName: brand.name,
-        topReseller: bundle.keepa.top_seller ?? null,
-        topResellerSharePct: bundle.keepa.top_seller_share_pct ?? null,
+        topReseller: filteredTopReseller,
+        topResellerSharePct: filteredTopResellerSharePct,
         annualLeak,
         exitLift,
         brandedSearchVolume: bundle.dataforseo?.branded_search_volume ?? null,
@@ -323,21 +379,25 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
     withTiming("llm/plan", () =>
       llmPlan({
         brandName: brand.name,
-        topReseller: bundle.keepa.top_seller ?? null,
+        topReseller: filteredTopReseller,
         uniqueSellerCount: bundle.keepa.unique_seller_count,
         brandedSearchVolume: bundle.dataforseo?.branded_search_volume ?? null,
+        resellerSellerCount: filteredResellerRows.length,
+        brandControlledNames: Array.from(brandControlledNames),
       }),
     ),
     withTiming("llm/fiveStepPlan", () =>
       llmFiveStepPlan({
         brandName: brand.name,
-        topReseller: bundle.keepa.top_seller ?? null,
-        topResellerSharePct: bundle.keepa.top_seller_share_pct ?? null,
+        topReseller: filteredTopReseller,
+        topResellerSharePct: filteredTopResellerSharePct,
         uniqueSellerCount: bundle.keepa.unique_seller_count,
         brandControlledPct: bundle.keepa.brand_controlled_pct,
         annualLeak,
         exitLift,
         revenue: trailing12,
+        resellerSellerCount: filteredResellerRows.length,
+        brandControlledNames: Array.from(brandControlledNames),
       }),
     ),
   ]);

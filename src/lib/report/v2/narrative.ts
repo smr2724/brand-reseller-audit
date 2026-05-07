@@ -114,6 +114,51 @@ function friendlyResellerLabel(raw: string | null): string | null {
   return AMAZON_SELLER_ID_RE.test(s) ? `an unbranded 3P seller (Amazon ID: ${s})` : s;
 }
 
+// =====================================================================
+// Phase 46 — Sanitizer that fail-closes against any LLM output naming a
+// brand-controlled seller. The check is deliberately broad: if a seller
+// the user classified `brand_owned` / `authorized` / `amazon` appears
+// anywhere in the body, we treat the body as compromised and the
+// caller falls back to the deterministic fallback (which is built from
+// the filtered data and CAN'T name a brand-controlled seller).
+// =====================================================================
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface SanitizedText {
+  text: string;
+  /** True when the LLM body mentioned a brand-controlled seller name —
+   *  the caller treats this as a failure and uses the fallback. */
+  tripped: boolean;
+}
+
+export function makeBrandOwnedNamingSanitizer(
+  brandControlledNames: string[],
+): (input: string) => SanitizedText {
+  // Strip empties + dedupe + sort longest-first so "Bigelow Chemists LLC"
+  // is matched before "Bigelow Chemists" when both are in the list.
+  const names = Array.from(
+    new Set(
+      (brandControlledNames ?? [])
+        .map((n) => (n ?? "").trim())
+        .filter((n) => n.length >= 3),
+    ),
+  ).sort((a, b) => b.length - a.length);
+  const patterns = names.map((n) => new RegExp(`\\b${escapeRegex(n)}\\b`, "i"));
+
+  return (input: string): SanitizedText => {
+    if (!input) return { text: input ?? "", tripped: false };
+    for (const re of patterns) {
+      if (re.test(input)) {
+        return { text: input, tripped: true };
+      }
+    }
+    return { text: input, tripped: false };
+  };
+}
+
 export async function llmCoverHeadline(input: {
   brandName: string;
   topReseller: string | null;
@@ -485,9 +530,15 @@ export async function llmMathNotes(math: NarrativeMath): Promise<string> {
 
 export interface PlanInput {
   brandName: string;
+  /** Phase 46 — pre-filtered to the largest seller classified `reseller`.
+   *  Null when no reseller is in the classification snapshot. */
   topReseller: string | null;
   uniqueSellerCount: number | null;
   brandedSearchVolume: number | null;
+  /** Phase 46 — count of sellers classified `reseller`. */
+  resellerSellerCount?: number;
+  /** Phase 46 — see FiveStepInput. */
+  brandControlledNames?: string[];
 }
 
 export async function llmPlan(p: PlanInput): Promise<{
@@ -535,17 +586,33 @@ export async function llmPlan(p: PlanInput): Promise<{
       required: ["intro", "columns"],
     },
     userInstruction:
-      "Write the 90-day transition plan. Use 3 columns labeled exactly 'Days 1-30', 'Days 31-60', 'Days 61-90'. 4-5 bullets each, ≤ 18 words each. Cover: Audit, Set Up, Protect (Brand Registry / monitoring / enforcement), Transition Resellers, Build Team. Use careful language ('transition', 'sequence', 'authorized seller map'). Avoid 'termination' / 'terminate' / 'unauthorized'. If many resellers exist, lean reseller transition into Days 1-30. If Brand Registry status unknown, put it in Days 1-30.",
-    userPayload: p,
+      "Write the 90-day transition plan. Use 3 columns labeled exactly 'Days 1-30', 'Days 31-60', 'Days 61-90'. 4-5 bullets each, ≤ 18 words each. Cover: Audit, Set Up, Protect (Brand Registry / monitoring / enforcement), Transition Resellers, Build Team. Use careful language ('transition', 'sequence', 'authorized seller map'). Avoid 'termination' / 'terminate' / 'unauthorized'. If many resellers exist, lean reseller transition into Days 1-30. If Brand Registry status unknown, put it in Days 1-30.\n\n" +
+      "RESELLER NAMING RULE (CRITICAL): The ONLY seller you may name as a reseller, transition target, or party to be removed is `topReseller` in the data payload. That seller has been pre-filtered through the user's classification snapshot. If `topReseller` is null, do NOT name any specific seller — phrase the transition bullets generically (e.g. 'sequence reseller transition under written terms').",
+    userPayload: {
+      brandName: p.brandName,
+      topReseller: p.topReseller,
+      uniqueSellerCount: p.uniqueSellerCount,
+      brandedSearchVolume: p.brandedSearchVolume,
+      resellerSellerCount: p.resellerSellerCount ?? null,
+      has_resellers: !!p.topReseller,
+    },
     maxTokens: 700,
   });
   if (!result?.columns || result.columns.length !== 3) return fb;
+  const sanitizer = makeBrandOwnedNamingSanitizer(p.brandControlledNames ?? []);
+  const cleanedIntro = sanitizer((result.intro || "").trim());
   return {
-    intro: (result.intro || "").trim() || fb.intro,
-    columns: result.columns.map((c) => ({
-      label: c.label,
-      bullets: (c.bullets ?? []).map((b) => String(b)).slice(0, 5),
-    })),
+    intro: (cleanedIntro.tripped ? fb.intro : cleanedIntro.text) || fb.intro,
+    columns: result.columns.map((c, idx) => {
+      const fbCol = fb.columns[idx];
+      const bullets = (c.bullets ?? [])
+        .map((b) => String(b))
+        .map((b) => sanitizer(b))
+        .map((s, j) => (s.tripped ? fbCol?.bullets[j] ?? s.text : s.text))
+        .filter((b): b is string => !!b)
+        .slice(0, 5);
+      return { label: c.label, bullets };
+    }),
   };
 }
 
@@ -555,6 +622,11 @@ export async function llmPlan(p: PlanInput): Promise<{
 
 export interface FiveStepInput {
   brandName: string;
+  /** Phase 46 — the largest seller the user classified as `reseller`.
+   *  NEVER pass the brand owner's own LLC here, even if it tops the
+   *  raw Keepa share list. Null when no reseller exists in the
+   *  classification snapshot — the prompt + fallback render an empty-
+   *  resellers reference plan instead of inventing one. */
   topReseller: string | null;
   topResellerSharePct: number | null;
   uniqueSellerCount: number | null;
@@ -562,6 +634,14 @@ export interface FiveStepInput {
   annualLeak: number | null;
   exitLift: number | null;
   revenue: number | null;
+  /** Phase 46 — count of sellers classified `reseller`. Used by Step 4
+   *  copy + the empty-resellers fallback. */
+  resellerSellerCount?: number;
+  /** Phase 46 — seller names the user classified as brand_owned /
+   *  authorized / amazon. The LLM is told NEVER to name them as
+   *  resellers/transition targets, and the post-process sanitizer
+   *  fail-closes against any such mention. */
+  brandControlledNames?: string[];
 }
 
 interface FiveStepOut {
@@ -584,6 +664,23 @@ export async function llmFiveStepPlan(p: FiveStepInput): Promise<FiveStepOut> {
   const client = getClient();
   const fb = fallbackFiveStep(p);
   if (!client) return fb;
+
+  // Phase 46 — Build a payload that EXCLUDES brand-controlled seller
+  // names entirely. The model only ever sees the largest seller the
+  // user classified as `reseller`. If no reseller exists, the model is
+  // told to render reference copy without naming any seller.
+  const safePayload = {
+    brandName: p.brandName,
+    topReseller: p.topReseller,
+    topResellerSharePct: p.topResellerSharePct,
+    uniqueSellerCount: p.uniqueSellerCount,
+    brandControlledPct: p.brandControlledPct,
+    annualLeak: p.annualLeak,
+    exitLift: p.exitLift,
+    revenue: p.revenue,
+    resellerSellerCount: p.resellerSellerCount ?? null,
+    has_resellers: !!p.topReseller,
+  };
 
   const result = await callJsonTool<FiveStepOut>(client, {
     model: MODEL,
@@ -618,20 +715,26 @@ export async function llmFiveStepPlan(p: FiveStepInput): Promise<FiveStepOut> {
       FIVE_STEP_TITLES.map((s) => `${s.number}. ${s.title}`).join("\n") +
       "\n\nFor each step write a 2-3 sentence brand-specific body, max ~50 words. Write in second person ('your brand', 'your listings'). Reference the real numbers passed in (revenue, top reseller name + share %, unique seller count, annualLeak, exitLift) where relevant. Especially Steps 1-4 should cite specific numbers; Step 5 talks about the team model.\n\n" +
       "HARD RULE: NEVER mention advertising, paid media, DTC, new marketplaces, subscriptions, growth campaigns, international expansion, or any net-new customer acquisition. Year 1 is capture only. The reader is a brand owner who already has demand — we are recovering margin, not generating new sales.\n\n" +
+      "RESELLER NAMING RULE (CRITICAL): The ONLY seller you may name as a reseller, transition target, or party to be removed is `topReseller` in the data payload. That seller has been pre-filtered through the user's classification snapshot. If `topReseller` is null (or `has_resellers` is false), do NOT name any specific seller in Step 4 — write a brand-controlled reference body explaining that the channel is already brand-controlled and the reseller-transition step is offered as ongoing protection. Never reference any other seller name from training data, and never paraphrase a name the reader supplied elsewhere.\n\n" +
       "For the `closing` field, return verbatim: " + JSON.stringify(PLAN_CLOSING),
-    userPayload: p,
+    userPayload: safePayload,
     maxTokens: 1200,
   });
   if (!result?.steps || result.steps.length !== 5) return fb;
   // Always force the canonical titles + ordering — LLM is allowed to
   // freelance on bodies but never on the framework names.
+  const sanitizer = makeBrandOwnedNamingSanitizer(p.brandControlledNames ?? []);
   const steps = FIVE_STEP_TITLES.map(({ number, title }) => {
     const match = result.steps.find((s) => s.number === number);
-    return {
-      number,
-      title,
-      body: (match?.body ?? "").trim() || fb.steps.find((s) => s.number === number)!.body,
-    };
+    const fallbackBody = fb.steps.find((s) => s.number === number)!.body;
+    const rawBody = (match?.body ?? "").trim();
+    if (!rawBody) return { number, title, body: fallbackBody };
+    const sanitized = sanitizer(rawBody);
+    // Fail-closed: if the LLM tried to name a brand-controlled seller in
+    // a reseller context, drop the body entirely and use the fallback,
+    // which is built from the filtered data and CAN'T name a
+    // brand-controlled seller.
+    return { number, title, body: sanitized.tripped ? fallbackBody : sanitized.text };
   });
   return { steps, closing: PLAN_CLOSING };
 }
@@ -647,11 +750,6 @@ function fallbackFiveStep(p: FiveStepInput): FiveStepOut {
       : "meaningful business value";
   const sellerCount =
     p.uniqueSellerCount != null ? `${p.uniqueSellerCount}` : "multiple";
-  const reseller = p.topReseller ?? "the dominant reseller";
-  const share =
-    p.topResellerSharePct != null
-      ? `${Math.round(p.topResellerSharePct * 100)}%`
-      : null;
   const brandPct =
     p.brandControlledPct != null
       ? `${Math.round(p.brandControlledPct * 100)}%`
@@ -661,12 +759,32 @@ function fallbackFiveStep(p: FiveStepInput): FiveStepOut {
       ? `$${Math.round(p.revenue).toLocaleString("en-US")}`
       : "your trailing-12-month";
 
+  // Phase 46 — Step 4 must NEVER name a brand-controlled seller. When
+  // the user's classification snapshot leaves no reseller, render the
+  // step as a reference protection plan instead of pretending one
+  // exists. `topReseller` here is already filtered upstream by
+  // `getLargestReseller(classificationSnapshot)`.
+  const hasReseller = !!p.topReseller;
+  const reseller = p.topReseller ?? "the leading reseller";
+  const share =
+    p.topResellerSharePct != null
+      ? `${Math.round(p.topResellerSharePct * 100)}%`
+      : null;
+
+  const step1Body = hasReseller
+    ? `Step 1 is already underway — this very report is your audit. We've measured ${revenue} in trailing 12-month Amazon revenue with only ${brandPct} brand-controlled buy box and ${sellerCount} third-party sellers (authorization unknown) led by ${reseller}${share ? ` at ${share} share` : ""}. The recoverable opportunity: ${profit}/year in margin and ${value} in business value.`
+    : `Step 1 is already underway — this very report is your audit. We've measured ${revenue} in trailing 12-month Amazon revenue with ${brandPct} brand-controlled buy box. Based on your classifications, the channel is already operating under brand control; the framework below is offered as a reference plan for protecting that position long-term.`;
+
+  const step4Body = hasReseller
+    ? `Resellers come off the listings sequentially, not all at once — written terms, MAP enforcement, distribution-agreement controls. ${reseller}${share ? ` (${share} of buy box)` : ""} is first; the long tail follows. ${profit} in annual margin moves from their P&L to yours, without you adding a single new customer.`
+    : `Based on your classifications, the channel is already brand-controlled — there are no third-party resellers to transition off your listings today. The framework below is offered as a reference for protecting that position long-term: written distribution terms, MAP enforcement, and a monitored authorized-seller list keep new resellers from showing up six months from now.`;
+
   return {
     steps: [
       {
         number: 1,
         title: "Identify the Opportunity through an Account Audit",
-        body: `Step 1 is already underway — this very report is your audit. We've measured ${revenue} in trailing 12-month Amazon revenue with only ${brandPct} brand-controlled buy box and ${sellerCount} third-party sellers (authorization unknown) led by ${reseller}${share ? ` at ${share} share` : ""}. The recoverable opportunity: ${profit}/year in margin and ${value} in business value.`,
+        body: step1Body,
       },
       {
         number: 2,
@@ -681,7 +799,7 @@ function fallbackFiveStep(p: FiveStepInput): FiveStepOut {
       {
         number: 4,
         title: "Transition from Resellers Strategically",
-        body: `Resellers come off the listings sequentially, not all at once — written terms, MAP enforcement, distribution-agreement controls. ${reseller}${share ? ` (${share} of buy box)` : ""} is first; the long tail follows. ${profit} in annual margin moves from their P&L to yours, without you adding a single new customer.`,
+        body: step4Body,
       },
       {
         number: 5,
@@ -698,6 +816,12 @@ function fallbackPlan(p: PlanInput): {
   columns: { label: string; bullets: string[] }[];
 } {
   const heavyResellers = (p.uniqueSellerCount ?? 0) >= 6;
+  // Phase 46 — Step 4 must NEVER name a brand-controlled seller.
+  // `p.topReseller` is already filtered upstream to the largest seller
+  // classified `reseller`; if that's null, render generic phrasing.
+  const ceaseAndDesistBullet = p.topReseller
+    ? `Issue cease-and-desist to ${p.topReseller} and 2–3 next worst`
+    : "Sequence reseller transition under written terms; sell-out windows where appropriate";
   return {
     intro: `Here is exactly how we take ${p.brandName}'s channel back over the next ninety days. No black box.`,
     columns: [
@@ -706,7 +830,7 @@ function fallbackPlan(p: PlanInput): {
         bullets: [
           "Full audit: SKU map, every reseller, MAP gaps, Brand Registry status",
           heavyResellers
-            ? `Issue cease-and-desist to ${p.topReseller ?? "the dominant reseller"} and 2–3 next worst`
+            ? ceaseAndDesistBullet
             : "Open dialogue with top reseller; lock distribution agreements",
           "Lock pricing controls and MAP enforcement infrastructure",
           "Stand up brand-controlled Seller Central or Vendor Central operations",
