@@ -282,3 +282,93 @@ export function confidenceForProfitRecapture(
 export function confidenceForBusinessValue(): ConfidenceLabel {
   return "Assumption-based";
 }
+
+// =====================================================================
+// Phase 46 — Centralized seller-classification filters.
+//
+// Any "largest seller" / "top resellers" / "transition target" copy in
+// the report MUST consult these helpers, never `bundle.keepa.top_seller`
+// or `top_sellers[0]` directly. Naming a `brand_owned` or `authorized`
+// seller as a reseller in the rendered copy is a hard credibility bug
+// (the brand owner is being told to remove themselves) and Phase 46
+// closes the gap by funneling every selection through these filters.
+// =====================================================================
+
+const BRAND_CONTROLLED_CLASSIFICATIONS: ReadonlySet<EffectiveClassification> =
+  new Set<EffectiveClassification>(["brand_owned", "authorized", "amazon"]);
+
+/** Lightweight seller row used by the helpers below. The persisted
+ *  classification snapshot already exposes this shape; Keepa
+ *  `brand_sellers` rows match after we copy `is_brand_controlled` into
+ *  it as the legacy fallback signal. */
+export interface ClassifiableSellerRow {
+  seller_id?: string | null;
+  seller_name?: string | null;
+  share_pct?: number | null;
+  asins_won?: number | null;
+  is_fba?: boolean | null;
+  /** Phase 39+ classification verdict. */
+  classification?: EffectiveClassification | string | null;
+  /** Legacy Keepa boolean — used only when `classification` is missing. */
+  is_brand_controlled?: boolean | null;
+}
+
+function effectiveClassification(
+  s: ClassifiableSellerRow,
+): EffectiveClassification {
+  const raw = typeof s.classification === "string" ? s.classification : null;
+  if (raw && VALID.has(raw as EffectiveClassification)) {
+    return raw as EffectiveClassification;
+  }
+  // Legacy fallback: pre-Phase-39 rows only have `is_brand_controlled`.
+  if (s.is_brand_controlled === true) return "brand_owned";
+  return "reseller";
+}
+
+/** All sellers the user has classified as `reseller`. Brand-owned,
+ *  authorized, and Amazon retail rows are excluded. Legacy rows without
+ *  a classification fall through to `is_brand_controlled === false`. */
+export function getResellerSellers<T extends ClassifiableSellerRow>(
+  sellers: T[] | null | undefined,
+): T[] {
+  if (!Array.isArray(sellers)) return [];
+  return sellers.filter((s) => effectiveClassification(s) === "reseller");
+}
+
+/** All sellers the user has classified as brand_owned, authorized, or
+ *  amazon — i.e. nobody who should ever be named as a reseller in copy. */
+export function getBrandControlledSellers<T extends ClassifiableSellerRow>(
+  sellers: T[] | null | undefined,
+): T[] {
+  if (!Array.isArray(sellers)) return [];
+  return sellers.filter((s) =>
+    BRAND_CONTROLLED_CLASSIFICATIONS.has(effectiveClassification(s)),
+  );
+}
+
+/** The single largest reseller (highest `share_pct`) the user has
+ *  classified as `reseller`. Returns null when no reseller exists —
+ *  callers must render an empty-resellers fallback rather than fall back
+ *  to `sellers[0]`. */
+export function getLargestReseller<T extends ClassifiableSellerRow>(
+  sellers: T[] | null | undefined,
+): T | null {
+  const resellers = getResellerSellers(sellers);
+  if (resellers.length === 0) return null;
+  return resellers.reduce((max, s) =>
+    (s.share_pct ?? 0) > (max.share_pct ?? 0) ? s : max,
+  resellers[0]);
+}
+
+/** Lower-cased seller-name set used by the LLM-output sanitizer to
+ *  redact any brand-controlled seller mentioned in a reseller context. */
+export function brandControlledNameSet(
+  sellers: ClassifiableSellerRow[] | null | undefined,
+): Set<string> {
+  const names = new Set<string>();
+  for (const s of getBrandControlledSellers(sellers ?? [])) {
+    const n = (s.seller_name ?? "").trim();
+    if (n) names.add(n.toLowerCase());
+  }
+  return names;
+}
