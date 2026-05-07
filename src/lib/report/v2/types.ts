@@ -70,6 +70,28 @@ export interface NarrativeV2 {
    * report generation from the persisted `brand_asins` rows. Older
    * reports omit this; the renderer skips the section when null. */
   audit_scope?: NarrativeAuditScope | null;
+
+  /** Phase 47 — Brand Qualification verdict + ranked outreach hooks
+   * for the report (Module 3). Populated by `assembleV2` from the
+   * `brand_qualifications` row when present. Legacy reports omit this
+   * and the renderer skips all hook sections (no regression). */
+  qualification?: NarrativeQualification | null;
+}
+
+/**
+ * Phase 47 — Compact qualification surface for the report renderer.
+ * `hooks` are the LLM-ranked candidate hooks; the renderer gates each
+ * conditional section by `hook_code` AND `confidence >= 0.6`. Tight-
+ * channel reports skip ALL hook sections.
+ */
+export interface NarrativeQualification {
+  verdict: "qualified" | "disqualified" | "needs_review";
+  hooks: Array<{
+    hook_code: string;
+    hook_text: string;
+    evidence: string;
+    confidence: number;
+  }>;
 }
 
 /**

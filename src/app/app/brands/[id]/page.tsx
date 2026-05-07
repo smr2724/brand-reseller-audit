@@ -2,6 +2,8 @@ import { createSupabaseServerClient, createSupabaseAdminClient } from "@/lib/sup
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import BrandDetailClient from "./BrandDetailClient";
+import QualificationReview from "./components/QualificationReview";
+import ContactDiscovery from "./components/ContactDiscovery";
 import BrandOwnerSection, {
   type BrandOwnerBrand,
   type BrandOwnerCandidate,
@@ -151,6 +153,14 @@ export default async function BrandDetail({ params }: { params: { id: string } }
         run={ownerRun}
         candidates={ownerCandidates}
         evidence={ownerEvidence}
+      />
+      <QualificationReview
+        brandId={brand.id}
+        initialState={brand.qualification_state ?? "pending"}
+      />
+      <ContactDiscovery
+        brandId={brand.id}
+        initialContactsState={brand.contacts_state ?? "pending"}
       />
       <BrandDetailClient
         brand={brand}

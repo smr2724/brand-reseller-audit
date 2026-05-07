@@ -41,6 +41,7 @@ import {
   type DerivedSnapshot,
   type SellerClassificationSnapshotEntry,
 } from "./snapshot-derive";
+import { findResellerByName, pickHook } from "./hooks";
 import {
   DEFAULT_ASSUMPTIONS,
   type CxAuditAsinScore,
@@ -1129,6 +1130,21 @@ function ResellerRealityPage({
     : derived.is_strongly_controlled
       ? "strong"
       : "default";
+  // Phase 47 — Module 3 hooks (PDF parity).
+  const antiAmazonHook = pickHook(
+    narrative.qualification,
+    "anti_amazon_policy_violation",
+    derived.is_tight_channel,
+  );
+  const dominantHook = pickHook(
+    narrative.qualification,
+    "dominant_single_reseller",
+    derived.is_tight_channel,
+  );
+  const dominantSeller = dominantHook
+    ? findResellerByName(dominantHook, sellers)
+    : null;
+  const dominantSellerSafe = dominantHook && dominantSeller ? dominantHook : null;
   return (
     <Page size="LETTER" style={styles.page}>
       <SectionHead
@@ -1136,6 +1152,28 @@ function ResellerRealityPage({
         title="Who actually sells your brand on Amazon"
         source="Keepa · 90-day window · classification confirmed by you"
       />
+      {antiAmazonHook && (
+        <View style={styles.bannerWarn}>
+          <Text>
+            <Text style={styles.bold}>Your stated policy:</Text> {antiAmazonHook.hook_text}
+          </Text>
+          {antiAmazonHook.evidence ? (
+            <Text style={[styles.small, { marginTop: 4 }]}>{antiAmazonHook.evidence}</Text>
+          ) : null}
+        </View>
+      )}
+      {dominantSellerSafe && dominantSeller && (
+        <View style={styles.bannerWarn}>
+          <Text>
+            <Text style={styles.bold}>One reseller dominates the channel:</Text>{" "}
+            {dominantSeller.seller_name}
+            {dominantSeller.share_pct != null
+              ? ` — ${Math.round(dominantSeller.share_pct * 100)}% of buy-box share.`
+              : "."}
+          </Text>
+          <Text style={[styles.small, { marginTop: 4 }]}>{dominantSellerSafe.hook_text}</Text>
+        </View>
+      )}
       {sellers.length === 0 ? (
         <Text style={styles.body}>{r.note ?? "Reseller landscape — not measured this run."}</Text>
       ) : (
@@ -1234,6 +1272,18 @@ function ResellerDossierPage({
     if (cls == null && s.is_brand_controlled === false) return true;
     return false;
   });
+  // Phase 47 — Module 3 hook: geographic_diversion (PDF parity).
+  const geoHook = pickHook(
+    narrative.qualification,
+    "geographic_diversion",
+    derived.is_tight_channel,
+  );
+  const intlResellers = geoHook
+    ? resellerSellers.filter((s) => {
+        const c = (s.country ?? "").trim().toUpperCase();
+        return c && c !== "US" && c !== "USA" && c !== "UNITED STATES";
+      })
+    : [];
   return (
     <Page size="LETTER" style={styles.page}>
       <SectionHead
@@ -1241,6 +1291,26 @@ function ResellerDossierPage({
         title={filteredDossier ? `Inside ${friendly}` : "Reseller dossier"}
         source="Keepa · seller profile · filtered to your reseller classifications"
       />
+      {geoHook && (
+        <View style={styles.bannerWarn}>
+          <Text>
+            <Text style={styles.bold}>Geographic diversion:</Text> {geoHook.hook_text}
+          </Text>
+          {intlResellers.length > 0 && (
+            <View style={{ marginTop: 4 }}>
+              {intlResellers.slice(0, 6).map((s, i) => (
+                <Text key={`geo-${i}`} style={styles.small}>
+                  • {s.seller_name}
+                  {s.country ? ` — ${s.country}` : ""}
+                </Text>
+              ))}
+            </View>
+          )}
+          {geoHook.evidence ? (
+            <Text style={[styles.small, { marginTop: 4 }]}>{geoHook.evidence}</Text>
+          ) : null}
+        </View>
+      )}
       {filteredDossier ? (
         <>
           <View style={styles.factGrid}>
@@ -1560,6 +1630,12 @@ function FrameworkPage({
   const hasResellers = resellerCount > 0;
   const scrubBrandOwnedNaming = makePlanCopySanitizerPdf(brandControlledNames);
   const introText = sanitizeForbidden(scrubBrandOwnedNaming(p.intro ?? ""));
+  // Phase 47 — Module 3 hook: trademark_split (PDF parity).
+  const trademarkHook = pickHook(
+    narrative.qualification,
+    "trademark_split",
+    derived.is_tight_channel,
+  );
 
   if (!hasResellers && steps) {
     return (
@@ -1615,6 +1691,17 @@ function FrameworkPage({
         title="The Five-Step Framework"
       />
       {introText && <Text style={styles.prose}>{introText}</Text>}
+      {trademarkHook && (
+        <View style={styles.bannerWarn}>
+          <Text>
+            <Text style={styles.bold}>Brand Registry enforcement complexity:</Text>{" "}
+            {trademarkHook.hook_text}
+          </Text>
+          {trademarkHook.evidence ? (
+            <Text style={[styles.small, { marginTop: 4 }]}>{trademarkHook.evidence}</Text>
+          ) : null}
+        </View>
+      )}
       {steps ? (
         <View>
           {steps.map((s, i) => (

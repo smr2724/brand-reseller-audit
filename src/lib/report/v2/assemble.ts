@@ -37,6 +37,8 @@ import {
   type ClassifiableSellerRow,
   type SellerClassificationSnapshotEntry,
 } from "./snapshot-derive";
+import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import type { NarrativeQualification } from "./types";
 import { withTiming } from "@/lib/util/timing";
 import { resolveBrandRevenue } from "@/lib/math/resolve-brand-revenue";
 import {
@@ -492,6 +494,12 @@ export async function assembleV2(input: AssembleInput): Promise<AssembleOutput> 
 
     audit_scope: input.auditScope ?? null,
 
+    // Phase 47 — Module 3. Pull persisted hooks + verdict from
+    // `brand_qualifications` (1:1 by brand_id) so the renderer can
+    // conditionally render hook sections. Legacy brands without a
+    // qualification row → null → renderer skips all hook sections.
+    qualification: await loadQualificationForReport(brand.id),
+
     data_sources: {
       keepa:
         (bundle.keepa.asin_count ?? 0) > 0 || (bundle.keepa.sellers?.length ?? 0) > 0,
@@ -663,6 +671,47 @@ function priceOnlyMonthlyUnitsFloor(): number {
   if (!raw) return 4;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 4;
+}
+
+/**
+ * Phase 47 — Pull the qualification verdict + ranked hooks for the
+ * report bundle. Returns null when no row exists (legacy / pre-Phase-47
+ * brand) so the renderer can skip hook sections without regression.
+ */
+async function loadQualificationForReport(
+  brandId: string,
+): Promise<NarrativeQualification | null> {
+  const admin = createSupabaseAdminClient();
+  if (!admin) return null;
+  const { data } = await admin
+    .from("brand_qualifications")
+    .select("icp_verdict, candidate_hooks, state")
+    .eq("brand_id", brandId)
+    .maybeSingle<{
+      icp_verdict: "qualified" | "disqualified" | "needs_review";
+      candidate_hooks: Array<{
+        hook_code?: string;
+        hook_text?: string;
+        evidence?: string;
+        confidence?: number;
+      }> | null;
+      state: string;
+    }>();
+  if (!data || data.state !== "complete") return null;
+  const hooks = Array.isArray(data.candidate_hooks)
+    ? data.candidate_hooks
+        .filter((h) => h && typeof h.hook_code === "string")
+        .map((h) => ({
+          hook_code: String(h.hook_code ?? ""),
+          hook_text: String(h.hook_text ?? ""),
+          evidence: String(h.evidence ?? ""),
+          confidence:
+            typeof h.confidence === "number" && Number.isFinite(h.confidence)
+              ? h.confidence
+              : 0,
+        }))
+    : [];
+  return { verdict: data.icp_verdict, hooks };
 }
 
 function priceOnlyTtmFallback(bundle: BrandEnrichmentBundle): number | null {

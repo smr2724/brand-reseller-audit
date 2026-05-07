@@ -42,6 +42,7 @@ import {
   type DerivedSnapshot,
   type SellerClassificationSnapshotEntry,
 } from "./snapshot-derive";
+import { findResellerByName, pickHook } from "./hooks";
 
 export interface PublicReportV2Brand {
   id: string;
@@ -870,6 +871,25 @@ function SectionResellerReality({
 }) {
   const r = narrative.reseller_reality;
   const sellers = r.top_sellers;
+  // Phase 47 — Module 3 hook callouts. Tight-channel reports skip all
+  // hooks (handled inside `pickHook`).
+  const antiAmazonHook = pickHook(
+    narrative.qualification,
+    "anti_amazon_policy_violation",
+    derived.is_tight_channel,
+  );
+  const dominantHook = pickHook(
+    narrative.qualification,
+    "dominant_single_reseller",
+    derived.is_tight_channel,
+  );
+  // Phase 46 — verify the hook names a seller the user has classified
+  // as `reseller`. Brand-controlled / authorized / amazon names are
+  // never named in reseller-context copy.
+  const dominantSeller = dominantHook
+    ? findResellerByName(dominantHook, sellers)
+    : null;
+  const dominantSellerSafe = dominantHook && dominantSeller ? dominantHook : null;
 
   // Phase 40 — Goal A2. Split brand-controlled rows OUT of the reseller
   // table into a separate positive sub-heading. Only classification =
@@ -913,6 +933,35 @@ function SectionResellerReality({
         title="Who actually sells your brand on Amazon"
         source="Keepa · 90-day window · classification confirmed by you"
       />
+
+      {/* Phase 47 — Module 3 hook: anti-amazon policy violation. */}
+      {antiAmazonHook && (
+        <div className="rv2-banner rv2-banner-warn">
+          <strong>Your stated policy:</strong>{" "}
+          <span>{antiAmazonHook.hook_text}</span>
+          {antiAmazonHook.evidence && (
+            <div className="rv2-prose" style={{ marginTop: 6 }}>
+              {antiAmazonHook.evidence}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Phase 47 — Module 3 hook: dominant single reseller emphasis bar.
+          Per Phase 46, only renders when the hook names a seller that the
+          user has classified as `reseller`. */}
+      {dominantSellerSafe && dominantSeller && (
+        <div className="rv2-banner rv2-banner-warn">
+          <strong>One reseller dominates the channel:</strong>{" "}
+          {dominantSeller.seller_name}
+          {dominantSeller.share_pct != null
+            ? ` — ${Math.round(dominantSeller.share_pct * 100)}% of buy-box share.`
+            : "."}
+          <div className="rv2-prose" style={{ marginTop: 6 }}>
+            {dominantSellerSafe.hook_text}
+          </div>
+        </div>
+      )}
 
       {sellers.length === 0 ? (
         <p className="rv2-muted">{r.note ?? "Reseller landscape — not measured this run."}</p>
@@ -1141,6 +1190,29 @@ function SectionResellerDossier({
     ? friendlySellerName(filteredDossier.seller_name)
     : null;
 
+  // Phase 47 — Module 3 hook: geographic diversion highlight box in the
+  // seller dossier. Lists international / non-domestic sellers from the
+  // reseller subset (Phase 46: only sellers classified as `reseller`).
+  const geoHook = pickHook(
+    narrative.qualification,
+    "geographic_diversion",
+    derived.is_tight_channel,
+  );
+  const intlResellers = (() => {
+    if (!geoHook) return [];
+    const sellers = narrative.reseller_reality.top_sellers ?? [];
+    const resellers = sellers.filter((s) => {
+      const cls = lookupClassification(derived, s);
+      if (cls === "reseller") return true;
+      if (cls == null && s.is_brand_controlled === false) return true;
+      return false;
+    });
+    return resellers.filter((s) => {
+      const c = (s.country ?? "").trim().toUpperCase();
+      return c && c !== "US" && c !== "USA" && c !== "UNITED STATES";
+    });
+  })();
+
   // Count classified resellers for the "Did you authorize these?" block.
   const resellerSellers = (narrative.reseller_reality.top_sellers ?? []).filter(
     (s) => {
@@ -1158,6 +1230,28 @@ function SectionResellerDossier({
         title={filteredDossier ? `Inside ${friendly}` : "Reseller dossier"}
         source="Keepa · seller profile · filtered to your reseller classifications"
       />
+      {/* Phase 47 — Module 3 hook: geographic diversion highlight box. */}
+      {geoHook && (
+        <div className="rv2-banner rv2-banner-warn">
+          <strong>Geographic diversion:</strong>{" "}
+          <span>{geoHook.hook_text}</span>
+          {intlResellers.length > 0 && (
+            <ul style={{ marginTop: 6 }}>
+              {intlResellers.slice(0, 6).map((s, i) => (
+                <li key={`geo-${i}`}>
+                  {s.seller_name}
+                  {s.country ? ` — ${s.country}` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+          {geoHook.evidence && (
+            <div className="rv2-prose" style={{ marginTop: 6 }}>
+              {geoHook.evidence}
+            </div>
+          )}
+        </div>
+      )}
       {filteredDossier ? (
         <>
           <div className="rv2-dossier-grid">
@@ -1507,6 +1601,14 @@ function SectionPlan({
   const hasResellers = resellerSellers.length > 0;
   const scrubBrandOwnedNaming = makePlanCopySanitizer(brandControlledNames);
 
+  // Phase 47 — Module 3 hook: trademark split renders as a subsection in
+  // the framework intro (NOT inside Step 4 — Phase 46 already gates that).
+  const trademarkHook = pickHook(
+    narrative.qualification,
+    "trademark_split",
+    derived.is_tight_channel,
+  );
+
   // Empty-resellers fallback: every seller is brand-owned / authorized
   // / amazon. The framework section needs sensible reference copy
   // rather than a body that still names "the largest reseller".
@@ -1547,6 +1649,18 @@ function SectionPlan({
         title="The Five-Step Framework"
       />
       {p.intro && <p className="rv2-prose">{scrubBrandOwnedNaming(p.intro)}</p>}
+
+      {trademarkHook && (
+        <div className="rv2-banner rv2-banner-warn">
+          <strong>Brand Registry enforcement complexity:</strong>{" "}
+          <span>{trademarkHook.hook_text}</span>
+          {trademarkHook.evidence && (
+            <div className="rv2-prose" style={{ marginTop: 6 }}>
+              {trademarkHook.evidence}
+            </div>
+          )}
+        </div>
+      )}
 
       {steps ? (
         <div className="rv2-fivestep">

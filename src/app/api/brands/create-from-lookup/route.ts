@@ -8,6 +8,7 @@ import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 import { enrichBrandWithDataForSeo } from "@/lib/enrichment/dataforseo";
 import { normalizeName } from "@/lib/importer/merge";
 import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
+import { maybeTriggerQualification } from "@/lib/qualification/triggers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -146,8 +147,12 @@ export async function POST(req: Request) {
     .eq("id", brandId);
 
   // Phase 33 — fire owner resolver as a non-blocking follow-up on success.
+  // Phase 47 — also fire qualification (Module 1). The qualification
+  // trigger chains into contact discovery (Module 2) when the verdict
+  // is qualified / needs_review / manual_override.
   if (enrichedNow) {
     maybeTriggerOwnerResolution(brandId);
+    maybeTriggerQualification(brandId);
   }
 
   try {

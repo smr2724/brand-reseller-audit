@@ -16,6 +16,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 import { getKeepaTokenStatus } from "@/lib/keepa";
 import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
+import { maybeTriggerQualification } from "@/lib/qualification/triggers";
+import { runQualification } from "@/lib/qualification/orchestrate";
+import { runContactDiscovery } from "@/lib/contacts/orchestrate";
 
 export interface StuckBrand {
   id: string;
@@ -23,6 +26,11 @@ export interface StuckBrand {
   name: string;
   created_at: string;
   enrichment_state?: string | null;
+  /** Phase 47 — when set, the recovery sweep will re-run the matching
+   *  Phase-47 module instead of Keepa enrichment. `null` (the default)
+   *  means "stuck on enrichment_state = pending|failed|enriching" and
+   *  the legacy enrichment-recovery path applies. */
+  stuck_module?: "qualification" | "contacts" | null;
 }
 
 export const STUCK_BRAND_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
@@ -66,24 +74,41 @@ export async function findStuckBrands(
   const cutoff = new Date(Date.now() - thresholdMs).toISOString();
   const enrichingCutoff = new Date(Date.now() - STUCK_ENRICHING_THRESHOLD_MS).toISOString();
 
-  const [pendingFailedRes, enrichingRes] = await Promise.all([
-    admin
-      .from("brands")
-      .select("id, user_id, name, created_at, enrichment_state")
-      .in("enrichment_state", RECOVERABLE_STATES as unknown as string[])
-      .lte("created_at", cutoff)
-      .order("created_at", { ascending: true })
-      .limit(limit),
-    // Phase 45 — also pick up brands stuck in `enriching` whose
-    // `updated_at` (last state transition) is older than the threshold.
-    admin
-      .from("brands")
-      .select("id, user_id, name, created_at, enrichment_state")
-      .eq("enrichment_state", RECOVERABLE_ENRICHING_STATE)
-      .lte("updated_at", enrichingCutoff)
-      .order("updated_at", { ascending: true })
-      .limit(limit),
-  ]);
+  const [pendingFailedRes, enrichingRes, qualRunningRes, contactsRunningRes] =
+    await Promise.all([
+      admin
+        .from("brands")
+        .select("id, user_id, name, created_at, enrichment_state")
+        .in("enrichment_state", RECOVERABLE_STATES as unknown as string[])
+        .lte("created_at", cutoff)
+        .order("created_at", { ascending: true })
+        .limit(limit),
+      // Phase 45 — also pick up brands stuck in `enriching` whose
+      // `updated_at` (last state transition) is older than the threshold.
+      admin
+        .from("brands")
+        .select("id, user_id, name, created_at, enrichment_state")
+        .eq("enrichment_state", RECOVERABLE_ENRICHING_STATE)
+        .lte("updated_at", enrichingCutoff)
+        .order("updated_at", { ascending: true })
+        .limit(limit),
+      // Phase 47 — pick up qualification-stuck rows, same threshold.
+      admin
+        .from("brands")
+        .select("id, user_id, name, created_at, enrichment_state, qualification_state")
+        .eq("qualification_state", "running")
+        .lte("updated_at", enrichingCutoff)
+        .order("updated_at", { ascending: true })
+        .limit(limit),
+      // Phase 47 — pick up contact-discovery-stuck rows.
+      admin
+        .from("brands")
+        .select("id, user_id, name, created_at, enrichment_state, contacts_state")
+        .eq("contacts_state", "running")
+        .lte("updated_at", enrichingCutoff)
+        .order("updated_at", { ascending: true })
+        .limit(limit),
+    ]);
 
   if (pendingFailedRes.error) {
     console.error("[recover-brands] findStuckBrands (pending|failed) error", pendingFailedRes.error);
@@ -91,15 +116,41 @@ export async function findStuckBrands(
   if (enrichingRes.error) {
     console.error("[recover-brands] findStuckBrands (enriching) error", enrichingRes.error);
   }
+  if (qualRunningRes.error) {
+    console.error(
+      "[recover-brands] findStuckBrands (qualification:running) error",
+      qualRunningRes.error,
+    );
+  }
+  if (contactsRunningRes.error) {
+    console.error(
+      "[recover-brands] findStuckBrands (contacts:running) error",
+      contactsRunningRes.error,
+    );
+  }
 
-  const merged = [
-    ...((pendingFailedRes.data ?? []) as StuckBrand[]),
-    ...((enrichingRes.data ?? []) as StuckBrand[]),
+  const tagged: StuckBrand[] = [
+    ...((pendingFailedRes.data ?? []) as StuckBrand[]).map((b) => ({
+      ...b,
+      stuck_module: null,
+    })),
+    ...((enrichingRes.data ?? []) as StuckBrand[]).map((b) => ({
+      ...b,
+      stuck_module: null,
+    })),
+    ...((qualRunningRes.data ?? []) as StuckBrand[]).map((b) => ({
+      ...b,
+      stuck_module: "qualification" as const,
+    })),
+    ...((contactsRunningRes.data ?? []) as StuckBrand[]).map((b) => ({
+      ...b,
+      stuck_module: "contacts" as const,
+    })),
   ];
-  // De-dupe by id (defensive — the two queries are disjoint by state).
+  // De-dupe by id (defensive — the four queries are disjoint by state).
   const seen = new Set<string>();
   const out: StuckBrand[] = [];
-  for (const b of merged) {
+  for (const b of tagged) {
     if (seen.has(b.id)) continue;
     seen.add(b.id);
     out.push(b);
@@ -138,6 +189,37 @@ export async function recoverStuckBrand(
   admin: SupabaseClient,
   brand: StuckBrand,
 ): Promise<RecoverBrandResult> {
+  // Phase 47 — Module-aware recovery. When the brand is wedged in
+  // qualification_state='running' or contacts_state='running' past the
+  // threshold, re-run the matching Phase-47 module instead of touching
+  // Keepa enrichment. Same force:true semantics as the legacy admin
+  // override path.
+  if (brand.stuck_module === "qualification") {
+    try {
+      const r = await runQualification(brand.id, { force: true });
+      return {
+        brand_id: brand.id,
+        status: r.ok ? "recovered" : "failed",
+        error: r.error,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { brand_id: brand.id, status: "failed", error: msg };
+    }
+  }
+  if (brand.stuck_module === "contacts") {
+    try {
+      const r = await runContactDiscovery(brand.id);
+      return {
+        brand_id: brand.id,
+        status: r.ok ? "recovered" : "failed",
+        error: r.error,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { brand_id: brand.id, status: "failed", error: msg };
+    }
+  }
   await setBrandState(admin, brand.id, "enriching");
   try {
     const summary = await enrichBrandWithKeepa(admin, {
@@ -159,7 +241,9 @@ export async function recoverStuckBrand(
     }
     await setBrandState(admin, brand.id, "enriched");
     // Phase 33 — fire owner resolver as a non-blocking follow-up.
+    // Phase 47 — also fire qualification (Module 1).
     maybeTriggerOwnerResolution(brand.id);
+    maybeTriggerQualification(brand.id);
     return {
       brand_id: brand.id,
       status: "recovered",
