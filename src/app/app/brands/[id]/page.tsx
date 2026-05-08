@@ -1,19 +1,10 @@
-import { createSupabaseServerClient, createSupabaseAdminClient } from "@/lib/supabase/server";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import BrandDetailClient from "./BrandDetailClient";
 import QualificationReview from "./components/QualificationReview";
 import ContactDiscovery from "./components/ContactDiscovery";
-import BrandOwnerSection, {
-  type BrandOwnerBrand,
-  type BrandOwnerCandidate,
-  type BrandOwnerRun,
-} from "./BrandOwnerSection";
 import { computeBrandDetailFinancials } from "@/lib/brand-detail/financial-model";
-import {
-  normalizeRunEvidence,
-  type EvidenceSummary,
-} from "@/lib/owner-resolver/evidence";
 
 export const dynamic = "force-dynamic";
 
@@ -47,82 +38,6 @@ export default async function BrandDetail({ params }: { params: { id: string } }
     .limit(1)
     .maybeSingle();
 
-  // Phase 33.1 — load latest resolver run + candidates for the new
-  // Brand Owner section at the top of this page. We use the admin client
-  // because owner_resolution_runs / owner_candidates aren't exposed under
-  // RLS for end users; brand ownership is already enforced above.
-  const adminDb = createSupabaseAdminClient();
-  let ownerRun: BrandOwnerRun | null = null;
-  let ownerCandidates: BrandOwnerCandidate[] = [];
-  let ownerEvidence: EvidenceSummary | null = null;
-  if (adminDb) {
-    // Phase 34.5 — pull `raw_uspto_payload` / `raw_web_search_payload`
-    // alongside the existing run summary fields so we can normalize an
-    // evidence snapshot for the brand-page evidence panel server-side.
-    // The raw payloads are consumed in-process and never returned to the
-    // client.
-    const { data: runs } = await adminDb
-      .from("owner_resolution_runs")
-      .select(
-        "id, brand_id, triggered_by, started_at, completed_at, status, error_message, uspto_query, uspto_results_count, raw_uspto_payload, web_search_queries, web_search_results_count, raw_web_search_payload, candidates_inserted",
-      )
-      .eq("brand_id", brand.id)
-      .order("started_at", { ascending: false })
-      .limit(1);
-    const rawOwnerRun = ((runs ?? [])[0] ?? null) as
-      | (BrandOwnerRun & {
-          raw_uspto_payload?: unknown;
-          raw_web_search_payload?: unknown;
-        })
-      | null;
-    if (rawOwnerRun) {
-      ownerEvidence = normalizeRunEvidence({
-        uspto_query: rawOwnerRun.uspto_query ?? null,
-        uspto_results_count: rawOwnerRun.uspto_results_count ?? 0,
-        raw_uspto_payload: rawOwnerRun.raw_uspto_payload ?? null,
-        web_search_queries: rawOwnerRun.web_search_queries ?? [],
-        web_search_results_count: rawOwnerRun.web_search_results_count ?? 0,
-        raw_web_search_payload: rawOwnerRun.raw_web_search_payload ?? null,
-        error_message: rawOwnerRun.error_message ?? null,
-      });
-      // Strip raw payloads before passing to the client component.
-      const {
-        raw_uspto_payload: _u,
-        raw_web_search_payload: _w,
-        ...rest
-      } = rawOwnerRun;
-      void _u;
-      void _w;
-      ownerRun = rest as BrandOwnerRun;
-    }
-    if (ownerRun) {
-      const { data: cands } = await adminDb
-        .from("owner_candidates")
-        .select(
-          // Phase 34.3 — include `raw_payload` so the UI can read
-          // `raw_payload.apollo_source` (`crm` | `public`).
-          "id, brand_id, resolution_run_id, candidate_company_name, candidate_domain, candidate_source, evidence_text, evidence_url, match_reason, trademark_serial_number, trademark_status, trademark_registration_date, trademark_owner_address, goods_services_text, heuristic_score, heuristic_label, is_selected_owner, needs_manual_review, selected_at, created_at, apollo_organization_id, apollo_organization_name, apollo_domain, apollo_employee_count, apollo_total_contacts, apollo_estimated_employees, apollo_hq_city, apollo_hq_country, apollo_industry, extractor_confidence, extractor_reasoning, evidence_urls, is_manual_apollo, derived_from_candidate_id, apollo_search_attempted_at, raw_payload",
-        )
-        .eq("resolution_run_id", ownerRun.id)
-        .order("apollo_total_contacts", { ascending: false, nullsFirst: false })
-        .order("extractor_confidence", { ascending: false, nullsFirst: false })
-        .order("created_at", { ascending: false });
-      ownerCandidates = (cands ?? []) as BrandOwnerCandidate[];
-    }
-  }
-
-  const ownerBrand: BrandOwnerBrand = {
-    id: brand.id,
-    name: brand.name,
-    owner_resolution_state: brand.owner_resolution_state ?? "pending",
-    owner_resolution_error: brand.owner_resolution_error ?? null,
-    owner_resolved_at: brand.owner_resolved_at ?? null,
-    resolved_owner_company_name: brand.resolved_owner_company_name ?? null,
-    resolved_owner_domain: brand.resolved_owner_domain ?? null,
-    resolved_owner_type: brand.resolved_owner_type ?? null,
-    owner_resolution_notes: brand.owner_resolution_notes ?? null,
-  };
-
   // Phase 26 — auto-populate the FINANCIAL MODEL panel as soon as
   // Keepa enrichment lands. Single source: computeLegionEconomics.
   // Phase 27 — pass brand-controlled share so the panel reads the same
@@ -148,12 +63,6 @@ export default async function BrandDetail({ params }: { params: { id: string } }
           ← All brands
         </Link>
       </div>
-      <BrandOwnerSection
-        brand={ownerBrand}
-        run={ownerRun}
-        candidates={ownerCandidates}
-        evidence={ownerEvidence}
-      />
       <QualificationReview
         brandId={brand.id}
         initialState={brand.qualification_state ?? "pending"}

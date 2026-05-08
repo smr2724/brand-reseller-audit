@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
-import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
 import { maybeTriggerQualification } from "@/lib/qualification/triggers";
 import { persistBrandEconomics } from "@/lib/brand-detail/persist-economics";
 
@@ -75,7 +74,9 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
       } catch (e) {
         console.warn("[api/enrichment/keepa] persistBrandEconomics threw:", e);
       }
-      maybeTriggerOwnerResolution(brand.id);
+      // Phase 49 — owner resolution auto-trigger removed; Phase 47
+      // qualification supersedes it. DB columns + API route + lib are
+      // intentionally left in place for a future cleanup.
       maybeTriggerQualification(brand.id);
     }
     return NextResponse.json({ ok: true, summary });
