@@ -220,10 +220,16 @@ export async function runQualification(
       );
     }
   }
+  const brandControlledShareIcp =
+    brand.keepa_brand_controlled_pct != null
+      ? String(brand.keepa_brand_controlled_pct)
+      : "unknown";
   const icp = icpPrompt({
+    brand_name: brand.name,
     selected_entity_json: JSON.stringify(selected_entity ?? {}, null, 2),
     uspto_summary: usptoSummary,
     seller_list: sellerListText,
+    brand_controlled_share_pct: brandControlledShareIcp,
     web_evidence_bullets:
       webEvidence.join("\n") || "(no additional web evidence collected)",
   });
@@ -267,10 +273,12 @@ export async function runQualification(
     icp_reasoning = `LLM error during ICP screen: ${e instanceof Error ? e.message : String(e)}`;
   }
 
-  // 6. Prompt 3 — hook ranking. Only meaningful when not hard-disqualified
-  //    (we still run it to surface override hooks for needs_review cases).
+  // 6. Prompt 3 — hook ranking. Phase 51: only generate when verdict is
+  //    'qualified'. needs_review and disqualified cases get no hooks —
+  //    they are not actionable outreach targets. Manual override on a
+  //    needs_review brand will regenerate hooks via the override flow.
   let candidate_hooks: CandidateHook[] = [];
-  if (icp_verdict !== "disqualified") {
+  if (icp_verdict === "qualified") {
     const hookSystem = hookPrompt({
       brand_name: brand.name,
       selected_entity_json: JSON.stringify(selected_entity ?? {}, null, 2),
@@ -399,6 +407,39 @@ export async function runQualification(
     if (!llmError) llmError = e instanceof Error ? e.message : String(e);
   }
 
+  // 7b. Phase 51 — verdict reconciliation belt-and-suspenders.
+  //
+  //  If the narrative recommendation explicitly says "skip", "not a fit",
+  //  "don't reach out", or "disqualified" but the ICP verdict came back
+  //  'qualified' or 'needs_review', we have a two-LLM disagreement. The
+  //  prompt fix in Phase 51 should drive these to zero, but if one
+  //  slips through we downgrade to 'needs_review' (NEVER silently to
+  //  'disqualified' — needs_review is the correct middle ground) and
+  //  attach a reconciliation note for the UI.
+  let icp_reconciliation_note: string | null = null;
+  if (
+    narrative_markdown &&
+    (icp_verdict === "qualified" || icp_verdict === "needs_review")
+  ) {
+    const conflict = detectNarrativeDisqualification(narrative_markdown);
+    if (conflict) {
+      icp_reconciliation_note =
+        `Narrative recommendation says "${conflict}" but ICP screen returned ${icp_verdict}. ` +
+        `Verdict downgraded to needs_review pending human review. ` +
+        `If the narrative is correct, the brand is likely brand-self-managed ` +
+        `or otherwise out of ICP — do not silently overwrite to disqualified.`;
+      console.warn(
+        "[qualification] verdict/narrative mismatch",
+        brandId,
+        { prior: icp_verdict, narrative_signal: conflict },
+      );
+      icp_verdict = "needs_review";
+      // If we downgraded after generating hooks, drop them — hooks only
+      // apply to qualified brands.
+      candidate_hooks = [];
+    }
+  }
+
   // 8. Persist (upsert by brand_id).
   const nowIso = new Date().toISOString();
   const row = {
@@ -429,6 +470,7 @@ export async function runQualification(
     ownership_signal,
     icp_verdict,
     icp_reasoning,
+    icp_reconciliation_note,
     disqualification_pattern,
     candidate_hooks,
     // Phase 50 — narrative bundle. All nullable so legacy + transient
@@ -545,6 +587,36 @@ async function callJsonLLM(args: {
     tokens_in: usage?.prompt_tokens ?? 0,
     tokens_out: usage?.completion_tokens ?? 0,
   };
+}
+
+/**
+ * Phase 51 — scan the narrative markdown for a disqualifying signal in
+ * the Recommendation section. Returns the matched phrase, or null when
+ * the narrative is consistent with a positive verdict.
+ *
+ * We only inspect the tail of the document (the Recommendation usually
+ * lives in the last ~600 characters) so we do not false-positive on
+ * mid-memo phrasing like "this would normally be a skip, but...".
+ */
+function detectNarrativeDisqualification(markdown: string): string | null {
+  const tail = markdown.slice(-1200).toLowerCase();
+  const recIdx = tail.lastIndexOf("recommendation");
+  const window = recIdx >= 0 ? tail.slice(recIdx) : tail;
+  const signals = [
+    "skip this one",
+    "skip this",
+    "don't reach out",
+    "do not reach out",
+    "not a fit",
+    "out of icp",
+    "disqualified",
+    "don't generate the report",
+    "do not generate the report",
+  ];
+  for (const s of signals) {
+    if (window.includes(s)) return s;
+  }
+  return null;
 }
 
 /**

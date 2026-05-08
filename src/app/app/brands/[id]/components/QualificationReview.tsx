@@ -74,6 +74,7 @@ interface QualificationRow {
   trademark_status: string | null;
   icp_verdict: Verdict;
   icp_reasoning: string;
+  icp_reconciliation_note: string | null;
   disqualification_pattern: string | null;
   candidate_hooks: Hook[] | null;
   // Phase 50 — narrative bundle (nullable on legacy rows).
@@ -289,6 +290,12 @@ export default function QualificationReview({
           {err && <div className="text-xs text-red-400">{err}</div>}
         </div>
       </div>
+
+      {row.icp_reconciliation_note && (
+        <div className="mb-3 p-3 rounded border border-amber-700 bg-amber-900/20 text-sm text-amber-200">
+          <strong>Verdict reconciliation:</strong> {row.icp_reconciliation_note}
+        </div>
+      )}
 
       {showOverrideBanner && (
         <div

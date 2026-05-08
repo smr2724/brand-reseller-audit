@@ -67,9 +67,11 @@ Approximate Amazon TTM revenue: ${vars.ttm_usd}`;
 }
 
 export interface IcpVars {
+  brand_name: string;
   selected_entity_json: string;
   uspto_summary: string;
   seller_list: string;
+  brand_controlled_share_pct: string;
   web_evidence_bullets: string;
 }
 
@@ -89,12 +91,14 @@ NOT a fit:
 - Brands with explicit anti-Amazon stance (statements, no Amazon presence by choice)
 - OEMs with authorized dealer networks (powersports, automotive, marine, agricultural)
 - Brands where "resellers" are by-design authorized distributors
+- Brands that already control their own Amazon channel — there is no
+  channel-control problem to solve. (See "BRAND-SELF-MANAGED RULE" below.)
 
 Output STRICT JSON:
 {
   "icp_verdict": "qualified|disqualified|needs_review",
   "icp_reasoning": "3-6 sentences citing specific evidence",
-  "disqualification_pattern": "public_company|dealer_network|anti_amazon|enterprise|subsidiary_of_giant|no_amazon_presence|other|null",
+  "disqualification_pattern": "public_company|dealer_network|anti_amazon|enterprise|subsidiary_of_giant|no_amazon_presence|brand_self_managed|other|null",
   "ownership_signal": "owner_operated|pe_owned|public|subsidiary|unknown",
   "legal_entity_type": "individual|corporation|llc|subsidiary|partnership|unknown",
   "legal_entity_country": "ISO-2 country code"
@@ -102,7 +106,8 @@ Output STRICT JSON:
 
 Rules:
 - Verdict 'qualified' requires: not public, not subsidiary of public/large-PE,
-  no anti-Amazon stance, no obvious dealer network in the seller list.
+  no anti-Amazon stance, no obvious dealer network in the seller list, AND
+  the brand is NOT already self-managing its own Amazon channel.
 - Verdict 'needs_review' is correct when one signal is ambiguous (e.g. PE-backed but
   small fund, or dealer-ish sellers but no clear OEM).
 - Verdict 'disqualified' requires at least one strong negative signal with a citation.
@@ -112,14 +117,45 @@ Rules:
 - For ownership-chain verification (parent companies, PE backing, public
   status), rely on USPTO data plus your own web search. There is no
   corporate-registry feed in this prompt — if you cannot resolve the
-  ownership chain from web evidence, return 'needs_review' with a note.`;
+  ownership chain from web evidence, return 'needs_review' with a note.
 
-  const user = `Selected entity (from disambiguation):
+BRAND-SELF-MANAGED RULE (CRITICAL — read carefully)
+You will be given a top-seller list with buy-box share percentages, AND a
+"brand-controlled share" estimate (the fraction of revenue currently flowing
+through the brand itself or its known subsidiaries/affiliates). Apply these
+checks IN ORDER and disqualify on the first match:
+
+1. SELLER-NAME MATCH: Look at the seller-name strings. If the dominant seller
+   (>50% buy-box share) is the brand itself, a brand subsidiary, or the brand's
+   parent company, this is NOT a channel-control opportunity. The brand
+   already controls Amazon. Verdict 'disqualified' with
+   disqualification_pattern='brand_self_managed'.
+   - "Same name" includes verbatim matches (brand 'EPR Distribution',
+     seller 'EPR Distribution'), brand-name + suffix ('Cherry Americas' for
+     brand 'Cherry'), and obvious abbreviations. Use judgement — if the
+     strings are clearly the same operating entity, treat them as such.
+
+2. AGGREGATE BRAND-CONTROLLED SHARE: If brand-controlled share (brand +
+   subsidiaries + affiliates + licensed distributors named in the seller
+   list) is ≥0.70 (i.e. ≥70%), this is NOT a fit. Verdict 'disqualified'
+   with disqualification_pattern='brand_self_managed'. There is nothing
+   meaningful to recover — Steve cannot pitch channel control to a brand
+   that already has channel control.
+
+3. NAME-MATCH FALSE-POSITIVE GUARD: If a top seller's name contains the
+   brand name verbatim or is a clear variant, treat that seller as
+   brand-owned for the purpose of these rules — DO NOT treat it as an
+   unauthorized reseller and DO NOT generate a 'dominant_single_reseller'
+   hook against it.`;
+
+  const user = `Brand name on Amazon: ${vars.brand_name}
+Selected entity (from disambiguation):
 ${vars.selected_entity_json}
 USPTO trademark data:
 ${vars.uspto_summary}   // owner, attorney, address, status
-Top resellers:
+Top sellers (with buy-box share %):
 ${vars.seller_list}
+Brand-controlled share of revenue (estimate, 0-1, where 1.0 = 100% brand-controlled): ${vars.brand_controlled_share_pct}
 Public web evidence collected:
 ${vars.web_evidence_bullets}`;
 
