@@ -11,7 +11,7 @@
  * qualification_state='running' so the user sees the verdict land
  * without a manual refresh.
  */
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import OverrideModal from "./OverrideModal";
 
@@ -33,6 +33,35 @@ interface SelectedEntity {
   confidence?: number;
 }
 
+// Phase 50 — upgraded narrative output.
+type AssociationType =
+  | "brand_owned"
+  | "parent_owned"
+  | "affiliate"
+  | "licensed_distributor";
+
+interface BrandAssociatedSeller {
+  seller_name: string;
+  association_type: AssociationType;
+  evidence: string;
+}
+
+interface FalsePositiveFlag {
+  flag: string;
+  explanation: string;
+}
+
+interface PitchMath {
+  recoverable_share_pct: number | null;
+  recoverable_revenue_usd: number | null;
+  blended_margin_low: number | null;
+  blended_margin_high: number | null;
+  incremental_profit_low_usd: number | null;
+  incremental_profit_high_usd: number | null;
+  defensible_pitch_number_usd: number | null;
+  reasoning: string | null;
+}
+
 interface QualificationRow {
   id: string;
   brand_id: string;
@@ -47,6 +76,12 @@ interface QualificationRow {
   icp_reasoning: string;
   disqualification_pattern: string | null;
   candidate_hooks: Hook[] | null;
+  // Phase 50 — narrative bundle (nullable on legacy rows).
+  narrative_markdown: string | null;
+  brand_associated_sellers: BrandAssociatedSeller[] | null;
+  false_positive_flags: FalsePositiveFlag[] | null;
+  channel_pattern: string | null;
+  pitch_math: PitchMath | null;
   manual_override: boolean;
   manual_override_reason: string | null;
   manual_override_at: string | null;
@@ -227,8 +262,19 @@ export default function QualificationReview({
               </span>
             )}
           </div>
-          {row.icp_reasoning && (
-            <div className="text-sm mt-2 max-w-3xl">{row.icp_reasoning}</div>
+          {row.narrative_markdown ? (
+            <div className="mt-3 max-w-3xl">
+              <NarrativeMarkdown source={row.narrative_markdown} />
+            </div>
+          ) : (
+            row.icp_reasoning && (
+              <>
+                <div className="text-sm mt-2 max-w-3xl">{row.icp_reasoning}</div>
+                <div className="text-xs text-[var(--text-muted)] mt-2 italic">
+                  Legacy qualification — re-qualify for upgraded analysis.
+                </div>
+              </>
+            )
           )}
         </div>
         <div className="shrink-0 flex flex-col gap-1 items-end">
@@ -363,6 +409,12 @@ export default function QualificationReview({
         </div>
       </div>
 
+      <BrandAssociatedSellersCard sellers={row.brand_associated_sellers} />
+      <FalsePositiveFlagsCard flags={row.false_positive_flags} />
+      {verdict === "qualified" && row.pitch_math && (
+        <PitchMathCard math={row.pitch_math} />
+      )}
+
       {showOverride && (
         <OverrideModal
           brandId={brandId}
@@ -374,6 +426,349 @@ export default function QualificationReview({
           }}
         />
       )}
+    </div>
+  );
+}
+
+// ---- Phase 50 — narrative + side-cards ---------------------------------
+
+/**
+ * Minimal markdown renderer. Avoids pulling in `react-markdown` for this
+ * one feature. Handles the subset of markdown the LLM is instructed to
+ * emit: ## headings, **bold**, `inline code`, numbered lists, paragraph
+ * breaks. Anything fancier degrades to plain text — safe by default.
+ */
+function NarrativeMarkdown({ source }: { source: string }) {
+  const blocks = parseMarkdownBlocks(source);
+  return (
+    <div className="text-sm leading-relaxed space-y-3 text-[var(--text)]">
+      {blocks.map((b, i) => {
+        if (b.type === "h2") {
+          return (
+            <h3
+              key={i}
+              className="text-base font-semibold mt-4 mb-1 text-[var(--text)]"
+            >
+              {renderInline(b.text)}
+            </h3>
+          );
+        }
+        if (b.type === "h3") {
+          return (
+            <h4
+              key={i}
+              className="text-sm font-semibold mt-3 mb-1 text-[var(--text)]"
+            >
+              {renderInline(b.text)}
+            </h4>
+          );
+        }
+        if (b.type === "ol") {
+          return (
+            <ol key={i} className="list-decimal pl-6 space-y-1">
+              {b.items.map((it, j) => (
+                <li key={j}>{renderInline(it)}</li>
+              ))}
+            </ol>
+          );
+        }
+        if (b.type === "ul") {
+          return (
+            <ul key={i} className="list-disc pl-6 space-y-1">
+              {b.items.map((it, j) => (
+                <li key={j}>{renderInline(it)}</li>
+              ))}
+            </ul>
+          );
+        }
+        return (
+          <p key={i} className="whitespace-pre-wrap">
+            {renderInline(b.text)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+type MdBlock =
+  | { type: "h2"; text: string }
+  | { type: "h3"; text: string }
+  | { type: "p"; text: string }
+  | { type: "ol"; items: string[] }
+  | { type: "ul"; items: string[] };
+
+function parseMarkdownBlocks(source: string): MdBlock[] {
+  const lines = source.replace(/\r\n/g, "\n").split("\n");
+  const blocks: MdBlock[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+    if (line.startsWith("### ")) {
+      blocks.push({ type: "h3", text: line.slice(4).trim() });
+      i += 1;
+      continue;
+    }
+    if (line.startsWith("## ")) {
+      blocks.push({ type: "h2", text: line.slice(3).trim() });
+      i += 1;
+      continue;
+    }
+    if (line.startsWith("# ")) {
+      blocks.push({ type: "h2", text: line.slice(2).trim() });
+      i += 1;
+      continue;
+    }
+    const olMatch = /^\s*\d+\.\s+(.*)$/.exec(line);
+    if (olMatch) {
+      const items: string[] = [olMatch[1]];
+      i += 1;
+      while (i < lines.length) {
+        const m = /^\s*\d+\.\s+(.*)$/.exec(lines[i]);
+        if (m) {
+          items.push(m[1]);
+          i += 1;
+          continue;
+        }
+        // Continuation line (indented or non-empty without list marker) folds in.
+        if (
+          lines[i].trim() &&
+          (lines[i].startsWith("   ") || lines[i].startsWith("\t"))
+        ) {
+          items[items.length - 1] += " " + lines[i].trim();
+          i += 1;
+          continue;
+        }
+        break;
+      }
+      blocks.push({ type: "ol", items });
+      continue;
+    }
+    const ulMatch = /^\s*[-*]\s+(.*)$/.exec(line);
+    if (ulMatch) {
+      const items: string[] = [ulMatch[1]];
+      i += 1;
+      while (i < lines.length) {
+        const m = /^\s*[-*]\s+(.*)$/.exec(lines[i]);
+        if (m) {
+          items.push(m[1]);
+          i += 1;
+          continue;
+        }
+        break;
+      }
+      blocks.push({ type: "ul", items });
+      continue;
+    }
+    // Paragraph: consume until blank line.
+    const para: string[] = [line];
+    i += 1;
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) {
+      para.push(lines[i]);
+      i += 1;
+    }
+    blocks.push({ type: "p", text: para.join("\n") });
+  }
+  return blocks;
+}
+
+function isBlockStart(line: string): boolean {
+  if (line.startsWith("# ") || line.startsWith("## ") || line.startsWith("### ")) {
+    return true;
+  }
+  if (/^\s*\d+\.\s+/.test(line)) return true;
+  if (/^\s*[-*]\s+/.test(line)) return true;
+  return false;
+}
+
+function renderInline(text: string): React.ReactNode {
+  // Order matters: code spans first (so ** inside backticks is preserved),
+  // then bold, then italic.
+  const parts: Array<{ kind: "text" | "code" | "bold" | "italic"; value: string }> = [
+    { kind: "text", value: text },
+  ];
+  // Pass 1: split out `code`.
+  const afterCode: typeof parts = [];
+  for (const p of parts) {
+    if (p.kind !== "text") {
+      afterCode.push(p);
+      continue;
+    }
+    const re = /`([^`]+)`/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(p.value))) {
+      if (m.index > last) {
+        afterCode.push({ kind: "text", value: p.value.slice(last, m.index) });
+      }
+      afterCode.push({ kind: "code", value: m[1] });
+      last = m.index + m[0].length;
+    }
+    if (last < p.value.length) {
+      afterCode.push({ kind: "text", value: p.value.slice(last) });
+    }
+  }
+  // Pass 2: split out **bold**.
+  const afterBold: typeof parts = [];
+  for (const p of afterCode) {
+    if (p.kind !== "text") {
+      afterBold.push(p);
+      continue;
+    }
+    const re = /\*\*([^*]+)\*\*/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(p.value))) {
+      if (m.index > last) {
+        afterBold.push({ kind: "text", value: p.value.slice(last, m.index) });
+      }
+      afterBold.push({ kind: "bold", value: m[1] });
+      last = m.index + m[0].length;
+    }
+    if (last < p.value.length) {
+      afterBold.push({ kind: "text", value: p.value.slice(last) });
+    }
+  }
+  return afterBold.map((p, i) => {
+    if (p.kind === "code") {
+      return (
+        <code
+          key={i}
+          className="px-1 py-0.5 rounded bg-[var(--surface-2,rgba(255,255,255,0.06))] text-[0.85em]"
+        >
+          {p.value}
+        </code>
+      );
+    }
+    if (p.kind === "bold") {
+      return (
+        <strong key={i} className="font-semibold">
+          {p.value}
+        </strong>
+      );
+    }
+    return <span key={i}>{p.value}</span>;
+  });
+}
+
+function BrandAssociatedSellersCard({
+  sellers,
+}: {
+  sellers: BrandAssociatedSeller[] | null;
+}) {
+  // Show an empty-state explanation only when the field is a present-but-empty
+  // array (i.e. Phase 50 did run and found nothing). Null = legacy row, hide.
+  if (!Array.isArray(sellers)) return null;
+  return (
+    <div className="rounded border border-[var(--border-soft)] p-3 mb-3">
+      <div className="text-xs uppercase text-[var(--text-muted)] mb-2">
+        Brand-associated sellers
+      </div>
+      {sellers.length === 0 ? (
+        <div className="text-xs text-[var(--text-muted)]">
+          No brand-associated sellers detected — all Amazon sellers appear to be
+          third-party resellers.
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {sellers.map((s, i) => (
+            <li key={i} className="text-sm">
+              <div className="flex items-center gap-2 flex-wrap">
+                <strong>{s.seller_name}</strong>
+                <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-blue-700/20 border-blue-600/50 text-blue-200 uppercase tracking-wide">
+                  {s.association_type.replace(/_/g, "-")}
+                </span>
+              </div>
+              {s.evidence && (
+                <div className="text-xs text-[var(--text-muted)] mt-0.5">
+                  {s.evidence}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function FalsePositiveFlagsCard({
+  flags,
+}: {
+  flags: FalsePositiveFlag[] | null;
+}) {
+  if (!Array.isArray(flags) || flags.length === 0) return null;
+  return (
+    <div className="rounded border border-amber-700/60 bg-amber-900/20 p-3 mb-3">
+      <div className="text-xs uppercase text-amber-300 mb-2">
+        False positive flags
+      </div>
+      <ul className="space-y-2">
+        {flags.map((f, i) => (
+          <li key={i} className="text-sm text-amber-100">
+            <div className="font-semibold">{f.flag}</div>
+            <div className="text-xs text-amber-200/80 mt-0.5">{f.explanation}</div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function PitchMathCard({ math }: { math: PitchMath }) {
+  const fmtUsd = (v: number | null) =>
+    v == null ? "—" : `$${Math.round(v).toLocaleString("en-US")}`;
+  const fmtPct = (v: number | null) =>
+    v == null ? "—" : `${(v * (v <= 1 ? 100 : 1)).toFixed(0)}%`;
+  const marginRange =
+    math.blended_margin_low == null && math.blended_margin_high == null
+      ? "—"
+      : `${fmtPct(math.blended_margin_low)} – ${fmtPct(math.blended_margin_high)}`;
+  const profitRange =
+    math.incremental_profit_low_usd == null &&
+    math.incremental_profit_high_usd == null
+      ? "—"
+      : `${fmtUsd(math.incremental_profit_low_usd)} – ${fmtUsd(math.incremental_profit_high_usd)}`;
+  return (
+    <div className="rounded border border-green-700/60 bg-green-900/15 p-4 mb-3">
+      <div className="text-xs uppercase text-green-300 mb-2">Pitch math</div>
+      <div className="grid sm:grid-cols-2 gap-3 text-sm">
+        <div>
+          <div className="text-xs text-[var(--text-muted)]">Recoverable share</div>
+          <div className="font-medium">{fmtPct(math.recoverable_share_pct)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-[var(--text-muted)]">Recoverable revenue</div>
+          <div className="font-medium">{fmtUsd(math.recoverable_revenue_usd)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-[var(--text-muted)]">Blended margin range</div>
+          <div className="font-medium">{marginRange}</div>
+        </div>
+        <div>
+          <div className="text-xs text-[var(--text-muted)]">
+            Incremental annual profit
+          </div>
+          <div className="font-medium">{profitRange}</div>
+        </div>
+      </div>
+      <div className="mt-3 pt-3 border-t border-green-700/40">
+        <div className="text-xs text-green-300/80 uppercase">
+          Defensible pitch number
+        </div>
+        <div className="text-2xl font-semibold text-green-100">
+          {fmtUsd(math.defensible_pitch_number_usd)}
+        </div>
+        {math.reasoning && (
+          <div className="text-xs text-[var(--text-muted)] mt-2">
+            {math.reasoning}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

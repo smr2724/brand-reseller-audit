@@ -14,13 +14,18 @@ import {
   disambiguationPrompt,
   hookPrompt,
   icpPrompt,
+  narrativePrompt,
 } from "./prompts";
 import type {
+  BrandAssociatedSeller,
   CandidateEntity,
   CandidateHook,
+  ChannelPattern,
+  FalsePositiveFlag,
   IcpVerdict,
   LegalEntityType,
   OwnershipSignal,
+  PitchMath,
   QualificationRow,
 } from "./types";
 
@@ -35,6 +40,7 @@ interface BrandRow {
   confirmed_ttm_revenue_dollars: number | null;
   est_monthly_revenue: number | null;
   resolved_owner_domain: string | null;
+  keepa_brand_controlled_pct: number | null;
 }
 
 interface SellerSnap {
@@ -78,7 +84,7 @@ export async function runQualification(
   const { data: brand } = await admin
     .from("brands")
     .select(
-      "id, name, user_id, trailing_12_months, confirmed_ttm_revenue_dollars, est_monthly_revenue, resolved_owner_domain, qualification_state",
+      "id, name, user_id, trailing_12_months, confirmed_ttm_revenue_dollars, est_monthly_revenue, resolved_owner_domain, keepa_brand_controlled_pct, qualification_state",
     )
     .eq("id", brandId)
     .maybeSingle<
@@ -292,7 +298,108 @@ export async function runQualification(
     }
   }
 
-  // 7. Persist (upsert by brand_id).
+  // 7. Phase 50 — long-form analyst narrative + brand-associated seller
+  //    pre-classification + false-positive flags + channel pattern +
+  //    pitch math. Runs AFTER ICP + hooks so the model sees every prior
+  //    decision. Failures here are non-fatal: the row still saves with
+  //    legacy short reasoning.
+  let narrative_markdown: string | null = null;
+  let brand_associated_sellers: BrandAssociatedSeller[] | null = null;
+  let false_positive_flags: FalsePositiveFlag[] | null = null;
+  let channel_pattern: ChannelPattern | null = null;
+  let pitch_math: PitchMath | null = null;
+  try {
+    const hooksSummary =
+      candidate_hooks.length === 0
+        ? "(no hooks)"
+        : candidate_hooks
+            .map(
+              (h, i) =>
+                `${i + 1}. [${h.hook_code}] ${h.hook_text}${h.evidence ? ` — ${h.evidence}` : ""}`,
+            )
+            .join("\n");
+    const brandControlledShare =
+      brand.keepa_brand_controlled_pct != null
+        ? String(brand.keepa_brand_controlled_pct)
+        : "unknown";
+    const ttmNumber = ttm != null ? String(Math.round(ttm)) : "unknown";
+    const narr = narrativePrompt({
+      brand_name: brand.name,
+      selected_entity_json: JSON.stringify(selected_entity ?? {}, null, 2),
+      uspto_summary: usptoSummary,
+      seller_list: sellerListText,
+      asin_titles: asinTitles,
+      ttm_usd: ttmText,
+      ttm_revenue_usd_number: ttmNumber,
+      brand_controlled_share_pct: brandControlledShare,
+      web_evidence_bullets:
+        webEvidence.join("\n") || "(no additional web evidence collected)",
+      icp_verdict,
+      icp_reasoning,
+      disqualification_pattern: disqualification_pattern ?? "none",
+      hooks_summary: hooksSummary,
+    });
+    const r = await callJsonLLM({
+      model: DEFAULT_MAIN_MODEL,
+      system: narr.system,
+      user: narr.user,
+      maxTokens: 3000,
+    });
+    totalTokensIn += r.tokens_in;
+    totalTokensOut += r.tokens_out;
+    totalCost += estimateCost(DEFAULT_MAIN_MODEL, r.tokens_in, r.tokens_out);
+    const parsed = r.parsed as {
+      narrative_markdown?: string;
+      brand_associated_sellers?: BrandAssociatedSeller[];
+      false_positive_flags?: FalsePositiveFlag[];
+      channel_pattern?: string | null;
+      pitch_math?: PitchMath | null;
+    };
+    if (typeof parsed?.narrative_markdown === "string") {
+      const md = parsed.narrative_markdown.trim();
+      narrative_markdown = md.length > 0 ? md : null;
+    }
+    if (Array.isArray(parsed?.brand_associated_sellers)) {
+      brand_associated_sellers = parsed.brand_associated_sellers
+        .filter(
+          (s): s is BrandAssociatedSeller =>
+            !!s &&
+            typeof s.seller_name === "string" &&
+            typeof s.association_type === "string" &&
+            ["brand_owned", "parent_owned", "affiliate", "licensed_distributor"].includes(
+              s.association_type,
+            ),
+        )
+        .slice(0, 20);
+    }
+    if (Array.isArray(parsed?.false_positive_flags)) {
+      false_positive_flags = parsed.false_positive_flags
+        .filter(
+          (f): f is FalsePositiveFlag =>
+            !!f && typeof f.flag === "string" && typeof f.explanation === "string",
+        )
+        .slice(0, 5);
+    }
+    if (
+      typeof parsed?.channel_pattern === "string" &&
+      parsed.channel_pattern !== "null" &&
+      parsed.channel_pattern.length > 0
+    ) {
+      channel_pattern = parsed.channel_pattern;
+    }
+    if (
+      icp_verdict === "qualified" &&
+      parsed?.pitch_math &&
+      typeof parsed.pitch_math === "object"
+    ) {
+      pitch_math = parsed.pitch_math;
+    }
+  } catch (e) {
+    // Non-fatal — leave narrative null, legacy short reasoning still renders.
+    if (!llmError) llmError = e instanceof Error ? e.message : String(e);
+  }
+
+  // 8. Persist (upsert by brand_id).
   const nowIso = new Date().toISOString();
   const row = {
     brand_id: brandId,
@@ -324,6 +431,13 @@ export async function runQualification(
     icp_reasoning,
     disqualification_pattern,
     candidate_hooks,
+    // Phase 50 — narrative bundle. All nullable so legacy + transient
+    // failures still upsert successfully.
+    narrative_markdown,
+    brand_associated_sellers,
+    false_positive_flags,
+    channel_pattern,
+    pitch_math,
     llm_model: model,
     llm_tokens_in: totalTokensIn,
     llm_tokens_out: totalTokensOut,
@@ -400,6 +514,7 @@ async function callJsonLLM(args: {
   model: string;
   system: string;
   user: string;
+  maxTokens?: number;
 }): Promise<JsonLLMResult> {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY missing");
@@ -409,6 +524,7 @@ async function callJsonLLM(args: {
     model: args.model,
     temperature: 0.2,
     response_format: { type: "json_object" },
+    max_tokens: args.maxTokens,
     messages: [
       { role: "system", content: args.system },
       { role: "user", content: args.user },

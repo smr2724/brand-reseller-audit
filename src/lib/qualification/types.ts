@@ -59,6 +59,43 @@ export interface CandidateHook {
   confidence: number;
 }
 
+// Phase 50 — upgraded narrative output.
+export type BrandAssociationType =
+  | "brand_owned"
+  | "parent_owned"
+  | "affiliate"
+  | "licensed_distributor";
+
+export interface BrandAssociatedSeller {
+  seller_name: string;
+  association_type: BrandAssociationType;
+  evidence: string;
+}
+
+export interface FalsePositiveFlag {
+  flag: string;
+  explanation: string;
+}
+
+export type ChannelPattern =
+  | "dealer_led_oem"
+  | "split_ip_split_ops"
+  | "independent_owner_operator"
+  | "pe_holdco"
+  | "subsidiary_of_giant"
+  | string;
+
+export interface PitchMath {
+  recoverable_share_pct: number | null;
+  recoverable_revenue_usd: number | null;
+  blended_margin_low: number | null;
+  blended_margin_high: number | null;
+  incremental_profit_low_usd: number | null;
+  incremental_profit_high_usd: number | null;
+  defensible_pitch_number_usd: number | null;
+  reasoning: string | null;
+}
+
 export interface QualificationRow {
   id: string;
   brand_id: string;
@@ -81,6 +118,13 @@ export interface QualificationRow {
   icp_reasoning: string;
   disqualification_pattern: DisqualificationPattern | null;
   candidate_hooks: CandidateHook[];
+  // Phase 50 — long-form analyst narrative + structured side-fields.
+  // Nullable on legacy rows that pre-date Phase 50.
+  narrative_markdown: string | null;
+  brand_associated_sellers: BrandAssociatedSeller[] | null;
+  false_positive_flags: FalsePositiveFlag[] | null;
+  channel_pattern: ChannelPattern | null;
+  pitch_math: PitchMath | null;
   llm_model: string | null;
   llm_tokens_in: number | null;
   llm_tokens_out: number | null;
