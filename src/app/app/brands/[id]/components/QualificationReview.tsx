@@ -154,7 +154,7 @@ export default function QualificationReview({
         <div className="flex items-center gap-2">
           <span className="inline-block w-3 h-3 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
           <div className="text-sm font-medium">
-            Running qualification… (LLM + USPTO + OpenCorporates)
+            Running qualification… (LLM + USPTO)
           </div>
         </div>
       </div>

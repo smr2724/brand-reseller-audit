@@ -86,7 +86,6 @@ export interface QualificationRow {
   llm_tokens_out: number | null;
   llm_cost_usd: number | null;
   uspto_called: boolean;
-  opencorporates_called: boolean;
   total_cost_usd: number | null;
   manual_override: boolean;
   manual_override_reason: string | null;

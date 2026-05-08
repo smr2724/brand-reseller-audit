@@ -2,15 +2,14 @@
  * Phase 47 — Module 1 orchestrator.
  *
  * Reads the brand row + Keepa snapshot + top sellers, runs the three
- * prompts (disambiguation → ICP → hooks) with USPTO + OpenCorporates
- * enrichment in between, and persists the verdict to
- * `brand_qualifications`. Drives `brands.qualification_state` through
- * pending → running → complete | error.
+ * prompts (disambiguation → ICP → hooks) with USPTO enrichment in
+ * between, and persists the verdict to `brand_qualifications`. Drives
+ * `brands.qualification_state` through pending → running →
+ * complete | error.
  */
 import OpenAI from "openai";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import { searchTrademark, summarizeUspto } from "./uspto";
-import { lookupEntity, summarizeOpenCorporates } from "./opencorporates";
 import {
   disambiguationPrompt,
   hookPrompt,
@@ -196,21 +195,14 @@ export async function runQualification(
     llmError = e instanceof Error ? e.message : String(e);
   }
 
-  // 4. USPTO + OpenCorporates in parallel using selected_entity.name (or
-  //    fall through to brand.name if disambiguation failed).
+  // 4. USPTO lookup using selected_entity.name (or fall through to
+  //    brand.name if disambiguation failed). Ownership-chain
+  //    verification beyond USPTO relies on the LLM's web search.
   const lookupName = selected_entity?.name ?? brand.name;
-  const [uspto, opencorp] = await Promise.all([
-    searchTrademark(lookupName).catch(() => null),
-    lookupEntity(lookupName, selected_entity?.country ?? undefined).catch(
-      () => null,
-    ),
-  ]);
+  const uspto = await searchTrademark(lookupName).catch(() => null);
   const usptoSummary = uspto
     ? summarizeUspto(uspto)
     : "USPTO: not called";
-  const ocSummary = opencorp
-    ? summarizeOpenCorporates(opencorp)
-    : "OpenCorporates: not called";
 
   // 5. Prompt 2 — ICP screen.
   const webEvidence: string[] = [];
@@ -225,7 +217,6 @@ export async function runQualification(
   const icp = icpPrompt({
     selected_entity_json: JSON.stringify(selected_entity ?? {}, null, 2),
     uspto_summary: usptoSummary,
-    opencorporates_summary: ocSummary,
     seller_list: sellerListText,
     web_evidence_bullets:
       webEvidence.join("\n") || "(no additional web evidence collected)",
@@ -338,7 +329,6 @@ export async function runQualification(
     llm_tokens_out: totalTokensOut,
     llm_cost_usd: Number(totalCost.toFixed(4)),
     uspto_called: !!uspto?.called,
-    opencorporates_called: !!opencorp?.called,
     total_cost_usd: Number(totalCost.toFixed(4)),
     state: "complete" as const,
     error_message: llmError,

@@ -69,7 +69,6 @@ Approximate Amazon TTM revenue: ${vars.ttm_usd}`;
 export interface IcpVars {
   selected_entity_json: string;
   uspto_summary: string;
-  opencorporates_summary: string;
   seller_list: string;
   web_evidence_bullets: string;
 }
@@ -109,14 +108,16 @@ Rules:
 - Verdict 'disqualified' requires at least one strong negative signal with a citation.
 - "Owner_operated" requires a named individual demonstrably running the company
   (LinkedIn, About page, USPTO trademark in personal name, etc.).
-- Cite at least one source URL inside icp_reasoning.`;
+- Cite at least one source URL inside icp_reasoning.
+- For ownership-chain verification (parent companies, PE backing, public
+  status), rely on USPTO data plus your own web search. There is no
+  corporate-registry feed in this prompt — if you cannot resolve the
+  ownership chain from web evidence, return 'needs_review' with a note.`;
 
   const user = `Selected entity (from disambiguation):
 ${vars.selected_entity_json}
 USPTO trademark data:
 ${vars.uspto_summary}   // owner, attorney, address, status
-OpenCorporates data (if available):
-${vars.opencorporates_summary}
 Top resellers:
 ${vars.seller_list}
 Public web evidence collected:
