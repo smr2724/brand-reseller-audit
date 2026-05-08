@@ -73,6 +73,17 @@ function resolveStep(
   const enr = brand.enrichment_state ?? "pending";
   const qualState = brand.qualification_state ?? "pending";
   const contactsState = brand.contacts_state ?? "pending";
+  const verdict = qual?.icp_verdict ?? null;
+  // Phase 52: contact discovery is only auto-run on qualified brands.
+  // For disqualified / needs_review / override_disqualified verdicts the
+  // user manually clicks "Discover" — so a contacts_state='pending' row
+  // should NOT be shown as queued.
+  const skipContactsForVerdict =
+    qualState === "complete" &&
+    contactsState === "pending" &&
+    (verdict === "disqualified" ||
+      verdict === "needs_review" ||
+      verdict === "override_disqualified");
 
   // Failed states win first — they short-circuit everything else.
   if (enr === "failed") {
@@ -191,7 +202,11 @@ function resolveStep(
   }
 
   // Phase 3 — Contact discovery.
-  if (qualState === "complete" && contactsState === "pending") {
+  if (
+    qualState === "complete" &&
+    contactsState === "pending" &&
+    !skipContactsForVerdict
+  ) {
     return {
       current_step: "Queued for contact discovery",
       current_step_detail: null,
@@ -279,10 +294,23 @@ export async function GET(
     }
   }
 
+  // Phase 52: contact discovery is opt-in (manual click) when the brand
+  // is disqualified / needs_review / override_disqualified. The client
+  // uses this flag to suppress the "Contact discovery" row in those cases.
+  const verdict = qual?.icp_verdict ?? null;
+  const contactsAutoSkipped =
+    (brand.qualification_state ?? "pending") === "complete" &&
+    (brand.contacts_state ?? "pending") === "pending" &&
+    (verdict === "disqualified" ||
+      verdict === "needs_review" ||
+      verdict === "override_disqualified");
+
   return NextResponse.json({
     enrichment_state: brand.enrichment_state ?? "pending",
     qualification_state: brand.qualification_state ?? "pending",
     contacts_state: brand.contacts_state ?? "pending",
+    icp_verdict: verdict,
+    contacts_auto_skipped: contactsAutoSkipped,
     current_step: step.current_step,
     current_step_detail: step.current_step_detail,
     step_started_at: step.step_started_at,

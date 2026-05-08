@@ -21,6 +21,8 @@ interface StatusResponse {
   enrichment_state: "pending" | "queued" | "enriching" | "enriched" | "failed" | "deferred";
   qualification_state: "pending" | "running" | "complete" | "skipped" | "error";
   contacts_state: "pending" | "running" | "complete" | "skipped" | "error";
+  icp_verdict?: string | null;
+  contacts_auto_skipped?: boolean;
   current_step: string;
   current_step_detail: string | null;
   step_started_at: string;
@@ -312,6 +314,18 @@ function buildDisplaySteps(status: StatusResponse | null): DisplayStep[] {
   }
 
   // Contact discovery
+  // Phase 52: when the server reports contacts_auto_skipped (i.e. brand
+  // is disqualified / needs_review / override_disqualified and contact
+  // discovery only runs on manual click), drop the row entirely.
+  const baseRows: DisplayStep[] = [
+    { key: "keepa", label: "Amazon seller data", state: keepaState, detail: null },
+    { key: "dataforseo", label: "Search trend data", state: dfsState, detail: null },
+    { key: "qualification", label: "Brand qualification", state: qualDispState, detail: qualDetail },
+  ];
+  if (status?.contacts_auto_skipped) {
+    return baseRows;
+  }
+
   let contactsDispState: DisplayState;
   if (contactsFailed) {
     contactsDispState = "error";
@@ -322,9 +336,7 @@ function buildDisplaySteps(status: StatusResponse | null): DisplayStep[] {
   } else if (contacts === "pending" && qual === "complete") {
     contactsDispState = "running";
     return [
-      { key: "keepa", label: "Amazon seller data", state: keepaState, detail: null },
-      { key: "dataforseo", label: "Search trend data", state: dfsState, detail: null },
-      { key: "qualification", label: "Brand qualification", state: qualDispState, detail: qualDetail },
+      ...baseRows,
       { key: "contacts", label: "Contact discovery", state: "running", detail: "Queued" },
     ];
   } else {
@@ -332,9 +344,7 @@ function buildDisplaySteps(status: StatusResponse | null): DisplayStep[] {
   }
 
   return [
-    { key: "keepa", label: "Amazon seller data", state: keepaState, detail: null },
-    { key: "dataforseo", label: "Search trend data", state: dfsState, detail: null },
-    { key: "qualification", label: "Brand qualification", state: qualDispState, detail: qualDetail },
+    ...baseRows,
     { key: "contacts", label: "Contact discovery", state: contactsDispState, detail: null },
   ];
 }
