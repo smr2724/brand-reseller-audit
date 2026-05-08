@@ -2,6 +2,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import BrandDetailClient from "./BrandDetailClient";
+import EnrichmentStatusCard from "./components/EnrichmentStatusCard";
 import QualificationReview from "./components/QualificationReview";
 import ContactDiscovery from "./components/ContactDiscovery";
 import { computeBrandDetailFinancials } from "@/lib/brand-detail/financial-model";
@@ -63,6 +64,7 @@ export default async function BrandDetail({ params }: { params: { id: string } }
           ← All brands
         </Link>
       </div>
+      <EnrichmentStatusCard brandId={brand.id} />
       <QualificationReview
         brandId={brand.id}
         initialState={brand.qualification_state ?? "pending"}

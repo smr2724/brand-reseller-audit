@@ -26,6 +26,7 @@ export type DisqualificationPattern =
   | "enterprise"
   | "subsidiary_of_giant"
   | "no_amazon_presence"
+  | "brand_self_managed"
   | "other";
 
 export type QualificationState =
@@ -116,6 +117,7 @@ export interface QualificationRow {
   ownership_signal: OwnershipSignal | null;
   icp_verdict: IcpVerdict;
   icp_reasoning: string;
+  icp_reconciliation_note: string | null;
   disqualification_pattern: DisqualificationPattern | null;
   candidate_hooks: CandidateHook[];
   // Phase 50 — long-form analyst narrative + structured side-fields.
