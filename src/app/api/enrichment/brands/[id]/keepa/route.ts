@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
+import { maybeTriggerQualification } from "@/lib/qualification/triggers";
 import { persistBrandEconomics } from "@/lib/brand-detail/persist-economics";
 
 export const runtime = "nodejs";
@@ -75,6 +76,7 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
         console.warn("[api/enrichment/keepa] persistBrandEconomics threw:", e);
       }
       maybeTriggerOwnerResolution(brand.id);
+      maybeTriggerQualification(brand.id);
     }
     return NextResponse.json({ ok: true, summary });
   } catch (e: any) {

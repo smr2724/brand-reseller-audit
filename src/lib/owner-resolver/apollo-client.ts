@@ -187,29 +187,12 @@ interface CachedCount {
 }
 
 /**
- * Phase 34.2 — Encode a body of mixed scalar / array values as
- * application/x-www-form-urlencoded. Apollo expects array params as
- * repeated `key[]=value` pairs (PHP-style brackets). Sending a JSON body
- * to `mixed_companies/search` returns a generic empty result instead of
- * the matching organizations.
+ * Phase 47 — Hoisted to `src/lib/contacts/apollo-encoding.ts` so the new
+ * contact-discovery wrapper can share it. This file keeps the original
+ * export name for backward compatibility with the owner-resolver code.
  */
-export function encodeApolloFormBody(body: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(body)) {
-    if (value === null || value === undefined) continue;
-    if (Array.isArray(value)) {
-      for (const v of value) {
-        if (v === null || v === undefined) continue;
-        parts.push(
-          `${encodeURIComponent(`${key}[]`)}=${encodeURIComponent(String(v))}`,
-        );
-      }
-      continue;
-    }
-    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
-  }
-  return parts.join("&");
-}
+import { encodeApolloFormBody } from "@/lib/contacts/apollo-encoding";
+export { encodeApolloFormBody };
 
 /**
  * Phase 34.1 / 34.3 — Strip common legal-suffix and parenthetical noise
