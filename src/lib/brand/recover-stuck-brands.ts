@@ -31,7 +31,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 import { getKeepaTokenStatus } from "@/lib/keepa";
-import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
 
 export interface StuckBrand {
   id: string;
@@ -348,18 +347,11 @@ export async function recoverStuckBrand(
     await setBrandState(admin, brand.id, "enriched");
     terminalWritten = true;
 
-    // Phase 33 — fire owner resolver as a non-blocking follow-up.
-    // Phase 47 — also fire qualification (Module 1).
-    // Phase 48 — both wrapped in try/catch so a follow-up failure cannot
+    // Phase 47 — fire qualification (Module 1).
+    // Phase 48 — wrapped in try/catch so a follow-up failure cannot
     // mask the successful enrichment we just persisted.
-    try {
-      maybeTriggerOwnerResolution(brand.id);
-    } catch (e) {
-      console.error("[recover-brands] maybeTriggerOwnerResolution threw", {
-        brandId: brand.id,
-        error: e instanceof Error ? e.message : String(e),
-      });
-    }
+    // Phase 49 — owner resolution auto-trigger removed; qualification
+    // supersedes it.
     try {
       lazyMaybeTriggerQualification(brand.id);
     } catch (e) {
