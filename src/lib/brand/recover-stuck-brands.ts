@@ -11,14 +11,27 @@
  * available tokens are below a floor.
  *
  * Mirrors the Phase 21 stuck-report recovery pattern.
+ *
+ * Phase 48 — Hardening for silent token-burn regression:
+ *   - Phase 47 module imports (runQualification, runContactDiscovery,
+ *     maybeTriggerQualification) are lazy-loaded so a module-load failure
+ *     can never crash the Keepa recovery path.
+ *   - Every Phase-47 call site is individually try/catch'd. An OpenAI/
+ *     Apollo/Hunter outage during a follow-up step MUST NOT mask the
+ *     enrichment that already succeeded.
+ *   - `setBrandState('failed', err)` ALWAYS writes a non-null
+ *     `enrichment_error` so the brand row is never left in
+ *     `enriching` with `enrichment_error=null` (the "silent burn"
+ *     fingerprint that motivated this fix).
+ *   - A try/finally backstop guarantees a terminal write (enriched or
+ *     failed-with-error) for every brand we set to `enriching`.
+ *   - console.error at every catch boundary so token drains are visible
+ *     in Vercel logs the next time something goes sideways.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 import { getKeepaTokenStatus } from "@/lib/keepa";
 import { maybeTriggerOwnerResolution } from "@/lib/owner-resolver/triggers";
-import { maybeTriggerQualification } from "@/lib/qualification/triggers";
-import { runQualification } from "@/lib/qualification/orchestrate";
-import { runContactDiscovery } from "@/lib/contacts/orchestrate";
 
 export interface StuckBrand {
   id: string;
@@ -167,22 +180,102 @@ export interface RecoverBrandResult {
 }
 
 /**
- * Transition `enrichment_state` for a brand. We never touch rows that are
- * `deferred` from this helper — the caller has already verified the state
- * before calling enrichment.
+ * Transition `enrichment_state` for a brand. Phase 48 — when the new state
+ * is `failed`, also write a non-null `enrichment_error` so we can never
+ * leave a row at `enriching`/`failed` with `enrichment_error=null` (the
+ * silent-burn fingerprint that motivated Phase 48). For non-failed
+ * transitions the error column is left untouched.
  */
 async function setBrandState(
   admin: SupabaseClient,
   brandId: string,
   state: "enriching" | "enriched" | "failed" | "pending",
+  errorMessage?: string,
 ): Promise<void> {
+  const update: Record<string, unknown> = {
+    enrichment_state: state,
+    updated_at: new Date().toISOString(),
+  };
+  if (state === "failed") {
+    update.enrichment_error = errorMessage && errorMessage.length > 0
+      ? errorMessage.slice(0, 500)
+      : "stuck-brand recovery failed (no error message captured)";
+  }
   const { error } = await admin
     .from("brands")
-    .update({ enrichment_state: state, updated_at: new Date().toISOString() })
+    .update(update)
     .eq("id", brandId);
   if (error) {
-    console.warn("[recover-brands] setBrandState failed", { brandId, state, error: error.message });
+    console.error("[recover-brands] setBrandState failed", {
+      brandId,
+      state,
+      error: error.message,
+    });
   }
+}
+
+/**
+ * Phase 48 — Lazy-load Phase 47 modules. The original Phase 47 patch
+ * imported `runQualification`, `runContactDiscovery`, and
+ * `maybeTriggerQualification` at module top. If any of those modules
+ * (or anything THEY import — OpenAI SDK, Apollo, Hunter, MillionVerifier
+ * env-var assertions, `@vercel/functions`, etc.) crashes at module load
+ * inside the cron lambda, the entire recovery path dies before the
+ * Keepa try/catch can persist a terminal state. By switching to dynamic
+ * import inside try/catch we contain that blast radius — a Phase-47
+ * module load failure becomes a logged warning, never a stuck-enriching
+ * silent-burn loop.
+ */
+async function lazyRunQualification(
+  brandId: string,
+  opts: { force?: boolean } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const mod = await import("@/lib/qualification/orchestrate");
+    const r = await mod.runQualification(brandId, opts);
+    return { ok: !!r.ok, error: r.error };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[recover-brands] runQualification threw", { brandId, error: msg });
+    return { ok: false, error: msg };
+  }
+}
+
+async function lazyRunContactDiscovery(
+  brandId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const mod = await import("@/lib/contacts/orchestrate");
+    const r = await mod.runContactDiscovery(brandId);
+    return { ok: !!r.ok, error: r.error };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[recover-brands] runContactDiscovery threw", { brandId, error: msg });
+    return { ok: false, error: msg };
+  }
+}
+
+function lazyMaybeTriggerQualification(brandId: string): void {
+  // Truly fire-and-forget. Any failure inside the trigger module — or in
+  // its module load — is swallowed here so the Keepa recovery's success
+  // path can return cleanly to the cron loop.
+  import("@/lib/qualification/triggers")
+    .then((mod) => {
+      try {
+        mod.maybeTriggerQualification(brandId);
+      } catch (e) {
+        console.error("[recover-brands] maybeTriggerQualification threw", {
+          brandId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    })
+    .catch((e: unknown) => {
+      console.error("[recover-brands] failed to load qualification triggers", {
+        brandId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    });
 }
 
 export async function recoverStuckBrand(
@@ -193,45 +286,58 @@ export async function recoverStuckBrand(
   // qualification_state='running' or contacts_state='running' past the
   // threshold, re-run the matching Phase-47 module instead of touching
   // Keepa enrichment. Same force:true semantics as the legacy admin
-  // override path.
+  // override path. Phase 48 — these calls go through lazy wrappers so
+  // a module-load failure cannot crash the recovery cron.
   if (brand.stuck_module === "qualification") {
-    try {
-      const r = await runQualification(brand.id, { force: true });
-      return {
-        brand_id: brand.id,
-        status: r.ok ? "recovered" : "failed",
-        error: r.error,
-      };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { brand_id: brand.id, status: "failed", error: msg };
-    }
+    const r = await lazyRunQualification(brand.id, { force: true });
+    return {
+      brand_id: brand.id,
+      status: r.ok ? "recovered" : "failed",
+      error: r.error,
+    };
   }
   if (brand.stuck_module === "contacts") {
+    const r = await lazyRunContactDiscovery(brand.id);
+    return {
+      brand_id: brand.id,
+      status: r.ok ? "recovered" : "failed",
+      error: r.error,
+    };
+  }
+
+  // Phase 48 — `try/finally` backstop. Once we've claimed the row by
+  // setting it to `enriching`, we MUST end this function with a terminal
+  // state write. Otherwise a thrown-and-uncaught error leaves the row at
+  // `enriching` with `enrichment_error=null` and the next cron run
+  // re-picks it 10 min later, burning Keepa tokens forever.
+  await setBrandState(admin, brand.id, "enriching");
+  let terminalWritten = false;
+  try {
+    let summary;
     try {
-      const r = await runContactDiscovery(brand.id);
-      return {
+      summary = await enrichBrandWithKeepa(admin, {
         brand_id: brand.id,
-        status: r.ok ? "recovered" : "failed",
-        error: r.error,
-      };
+        brand_name: brand.name,
+        user_id: brand.user_id,
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      console.error("[recover-brands] enrichBrandWithKeepa threw", {
+        brandId: brand.id,
+        name: brand.name,
+        error: msg,
+      });
+      await setBrandState(admin, brand.id, "failed", `keepa enrichment threw: ${msg}`);
+      terminalWritten = true;
       return { brand_id: brand.id, status: "failed", error: msg };
     }
-  }
-  await setBrandState(admin, brand.id, "enriching");
-  try {
-    const summary = await enrichBrandWithKeepa(admin, {
-      brand_id: brand.id,
-      brand_name: brand.name,
-      user_id: brand.user_id,
-    });
+
     // enrichBrandWithKeepa may return a "no ASINs" summary without throwing.
     // Treat that as a soft failure so the cron backs off (otherwise we'd
     // re-enrich the same dead-end brand every 5 min).
     if (summary.enrichment_error) {
-      await setBrandState(admin, brand.id, "failed");
+      await setBrandState(admin, brand.id, "failed", summary.enrichment_error);
+      terminalWritten = true;
       return {
         brand_id: brand.id,
         status: "failed",
@@ -240,19 +346,57 @@ export async function recoverStuckBrand(
       };
     }
     await setBrandState(admin, brand.id, "enriched");
+    terminalWritten = true;
+
     // Phase 33 — fire owner resolver as a non-blocking follow-up.
     // Phase 47 — also fire qualification (Module 1).
-    maybeTriggerOwnerResolution(brand.id);
-    maybeTriggerQualification(brand.id);
+    // Phase 48 — both wrapped in try/catch so a follow-up failure cannot
+    // mask the successful enrichment we just persisted.
+    try {
+      maybeTriggerOwnerResolution(brand.id);
+    } catch (e) {
+      console.error("[recover-brands] maybeTriggerOwnerResolution threw", {
+        brandId: brand.id,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+    try {
+      lazyMaybeTriggerQualification(brand.id);
+    } catch (e) {
+      console.error("[recover-brands] lazyMaybeTriggerQualification threw", {
+        brandId: brand.id,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
     return {
       brand_id: brand.id,
       status: "recovered",
       asin_count: summary.asin_count,
     };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    await setBrandState(admin, brand.id, "failed");
-    return { brand_id: brand.id, status: "failed", error: msg };
+  } finally {
+    if (!terminalWritten) {
+      // Defense-in-depth: if any thrown-but-uncaught error skipped both
+      // explicit terminal writes above (e.g. a fault between the
+      // `enriched` setBrandState and this `finally`), make sure the row
+      // does not stay stuck at `enriching` with a null error.
+      try {
+        await setBrandState(
+          admin,
+          brand.id,
+          "failed",
+          "stuck-brand recovery exited without terminal state (Phase 48 backstop)",
+        );
+        console.error("[recover-brands] Phase 48 backstop fired", {
+          brandId: brand.id,
+          name: brand.name,
+        });
+      } catch (e) {
+        console.error("[recover-brands] Phase 48 backstop write failed", {
+          brandId: brand.id,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
   }
 }
 
