@@ -22,6 +22,7 @@ import type { NarrativeOutput } from "@/lib/report/narrative";
 import { PublicReportV2 } from "@/lib/report/v2/web";
 import type { NarrativeV2 } from "@/lib/report/v2/types";
 import AuditProgress from "@/components/marketing/AuditProgress";
+import { logReportView } from "@/lib/report/view-log";
 
 // ISR: the report row is largely immutable once `status='completed'`, but
 // enrichment (Keepa / DataForSEO) can refresh underneath it. 5 minutes is
@@ -142,20 +143,29 @@ export default async function ReportPage({ params }: PageProps) {
 
   if (!report) return notFound();
 
-  // Best-effort: bump view counter. Don't await — we don't want to block
-  // render on this, and a failure (e.g., column missing in dev DB) should
-  // not 404 the page.
+  // Phase 53 — per-visit log + gated counter bump.
+  //
+  // INSERT into report_views always (best-effort), capturing IP / UA /
+  // geo. Then bump `reports.views` only for genuine customer visits —
+  // not for steve@'s authenticated sessions and not for bot crawlers /
+  // link unfurlers. A logging failure must never break page render.
   try {
-    admin
-      .from("reports")
-      .update({
-        views: (report.views ?? 0) + 1,
-        last_viewed_at: new Date().toISOString(),
-      })
-      .eq("id", report.id)
-      .then(() => {});
-  } catch {
-    /* ignore */
+    const visit = await logReportView(admin, report.id);
+    if (visit.isCustomerView) {
+      try {
+        await admin
+          .from("reports")
+          .update({
+            views: (report.views ?? 0) + 1,
+            last_viewed_at: new Date().toISOString(),
+          })
+          .eq("id", report.id);
+      } catch (e) {
+        console.error("[/r/[token]] counter bump failed:", e);
+      }
+    }
+  } catch (e) {
+    console.error("[/r/[token]] view log failed:", e);
   }
 
   // ---- generating / failed / not_a_fit states (brand-audit only) ----
