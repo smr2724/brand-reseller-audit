@@ -2,15 +2,17 @@
 /**
  * Phase 47 — Section B on /app/brands/[id]: Contact Discovery.
  *
- * Decision-makers table, primary toggle, send-to preview, re-discover
- * button. Mounted below the seller-classification table and above the
- * "Confirm & Generate Report" CTA. Preserves the Phase-43 STEVE_CC rule
- * (`steve@rollemanagementgroup.com`) as the always-CC recipient.
+ * Decision-makers table + clipboard tooling. This is an internal admin
+ * view — it does NOT send any emails. The actual report-send code path
+ * (lib/email/resend.ts STEVE_CC) is unaffected.
+ *
+ * Phase 52: dropped the radio-based primary selector and the "send to"
+ * footer; replaced with multi-select checkboxes + Copy buttons that
+ * write a TSV-formatted block to the clipboard for clean Excel/Sheets
+ * paste.
  */
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-
-const STEVE_CC_DISPLAY = "steve@rollemanagementgroup.com";
 
 interface Contact {
   id: string;
@@ -49,7 +51,8 @@ export default function ContactDiscovery({
   const [catchAll, setCatchAll] = useState<boolean | null>(null);
   const [running, setRunning] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [toast, setToast] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -97,58 +100,63 @@ export default function ContactDiscovery({
     }
   }
 
-  async function setPrimary(contactId: string) {
-    setBusyId(contactId);
-    try {
-      const res = await fetch(
-        `/api/brands/${brandId}/contacts/${contactId}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ is_primary: true }),
-        },
-      );
-      if (res.ok) {
-        setContacts((cs) =>
-          cs.map((c) => ({ ...c, is_primary: c.id === contactId })),
-        );
-      }
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function reverify(contactId: string) {
-    setBusyId(contactId);
-    try {
-      const res = await fetch(
-        `/api/brands/${brandId}/contacts/${contactId}/verify-email`,
-        { method: "POST" },
-      );
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data?.verify) {
-        setContacts((cs) =>
-          cs.map((c) =>
-            c.id === contactId
-              ? {
-                  ...c,
-                  email_status: data.verify.status,
-                  ready_to_send: data.verify.status === "verified",
-                }
-              : c,
-          ),
-        );
-      }
-    } finally {
-      setBusyId(null);
-    }
-  }
-
   useEffect(() => {
     load();
   }, [brandId]);
 
-  const primary = contacts.find((c) => c.is_primary) ?? contacts[0] ?? null;
+  function flashToast(message: string) {
+    setToast(message);
+    setTimeout(() => setToast(null), 2000);
+  }
+
+  async function copyText(text: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      flashToast(`Copied ${label}!`);
+    } catch (e) {
+      flashToast(
+        `Copy failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  function rowsToTsv(rows: Contact[]): string {
+    const header = ["Name", "Title", "Email", "LinkedIn", "Source"].join("\t");
+    const body = rows
+      .map((c) =>
+        [
+          c.full_name ?? "",
+          c.title ?? "",
+          c.email ?? "",
+          c.linkedin_url ?? "",
+          formatSourceLabel(c.email_source),
+        ]
+          .map((v) => String(v).replace(/\t/g, " ").replace(/\r?\n/g, " "))
+          .join("\t"),
+      )
+      .join("\n");
+    return `${header}\n${body}`;
+  }
+
+  function toggleRow(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    if (selectedIds.size === contacts.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(contacts.map((c) => c.id)));
+    }
+  }
+
+  const selectedRows = contacts.filter((c) => selectedIds.has(c.id));
+  const hasLinkedIn = contacts.some((c) => !!c.linkedin_url);
 
   return (
     <div className="card p-4 mb-4">
@@ -158,8 +166,8 @@ export default function ContactDiscovery({
             Contact Discovery
           </div>
           <div className="text-sm text-[var(--text-muted)] mt-1">
-            Apollo + Hunter + MillionVerifier. Generation will email the primary contact (CC{" "}
-            <code>{STEVE_CC_DISPLAY}</code>).
+            Apollo + Hunter + MillionVerifier. Find decision-maker contacts
+            and copy them for your outreach.
           </div>
         </div>
         <button
@@ -197,93 +205,164 @@ export default function ContactDiscovery({
 
       {contacts.length === 0 ? (
         <div className="text-sm text-[var(--text-muted)]">
-          No contacts found yet. Click {contactsState === "complete" ? "Re-discover" : "Discover decision-makers"} to run Apollo + Hunter + MillionVerifier.
+          No contacts found yet. Click{" "}
+          {contactsState === "complete"
+            ? "Re-discover"
+            : "Discover decision-makers"}{" "}
+          to run Apollo + Hunter + MillionVerifier.
         </div>
       ) : (
-        <table className="w-full text-sm">
-          <thead className="text-xs text-[var(--text-muted)] uppercase">
-            <tr>
-              <th className="text-left py-1">Primary</th>
-              <th className="text-left py-1">Name / Title</th>
-              <th className="text-left py-1">Email</th>
-              <th className="text-left py-1">Status</th>
-              <th className="text-left py-1">Source</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {contacts.map((c) => (
-              <tr key={c.id} className="border-t border-[var(--border-soft)]">
-                <td className="py-2">
+        <>
+          <div className="flex items-center gap-2 mb-2">
+            <button
+              className="btn btn-ghost text-xs"
+              disabled={selectedRows.length === 0}
+              onClick={() =>
+                copyText(
+                  rowsToTsv(selectedRows),
+                  `${selectedRows.length} selected`,
+                )
+              }
+            >
+              Copy selected ({selectedRows.length})
+            </button>
+            <button
+              className="btn btn-ghost text-xs"
+              onClick={() =>
+                copyText(rowsToTsv(contacts), `all ${contacts.length}`)
+              }
+            >
+              Copy all
+            </button>
+            {toast && (
+              <span className="text-xs text-[var(--accent,#60a5fa)] ml-2">
+                {toast}
+              </span>
+            )}
+          </div>
+          <table className="w-full text-sm">
+            <thead className="text-xs text-[var(--text-muted)] uppercase">
+              <tr>
+                <th className="text-left py-1 w-8">
                   <input
-                    type="radio"
-                    checked={c.is_primary}
-                    disabled={busyId === c.id}
-                    onChange={() => setPrimary(c.id)}
+                    type="checkbox"
+                    checked={
+                      contacts.length > 0 &&
+                      selectedIds.size === contacts.length
+                    }
+                    onChange={toggleAll}
+                    aria-label="Select all"
                   />
-                </td>
-                <td className="py-2">
-                  <div className="font-medium">{c.full_name}</div>
-                  <div className="text-xs text-[var(--text-muted)]">
-                    {c.title ?? "—"}
-                    {c.linkedin_url && (
-                      <>
-                        {" "}·{" "}
+                </th>
+                <th className="text-left py-1">Name / Title</th>
+                <th className="text-left py-1">Email</th>
+                <th className="text-left py-1">Status</th>
+                <th className="text-left py-1">Source</th>
+                {hasLinkedIn && <th className="text-left py-1">LinkedIn</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {contacts.map((c) => (
+                <tr key={c.id} className="border-t border-[var(--border-soft)]">
+                  <td className="py-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(c.id)}
+                      onChange={() => toggleRow(c.id)}
+                      aria-label={`Select ${c.full_name}`}
+                    />
+                  </td>
+                  <td className="py-2">
+                    <div className="font-medium">{c.full_name}</div>
+                    <div className="text-xs text-[var(--text-muted)]">
+                      {c.title ?? "—"}
+                    </div>
+                  </td>
+                  <td className="py-2">
+                    {c.email ? (
+                      <span className="inline-flex items-center gap-2">
+                        <code>{c.email}</code>
+                        <button
+                          type="button"
+                          className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text)] underline"
+                          onClick={() => copyText(c.email!, "email")}
+                        >
+                          Copy
+                        </button>
+                      </span>
+                    ) : (
+                      <code>—</code>
+                    )}
+                  </td>
+                  <td className="py-2">
+                    <EmailPill status={c.email_status} hasEmail={!!c.email} />
+                    {typeof c.email_verifier_score === "number" && (
+                      <span className="text-xs text-[var(--text-muted)] ml-1">
+                        {Math.round(c.email_verifier_score * 100)}%
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2 text-xs text-[var(--text-muted)]">
+                    {formatSourceLabel(c.email_source)}
+                  </td>
+                  {hasLinkedIn && (
+                    <td className="py-2 text-xs">
+                      {c.linkedin_url ? (
                         <a
-                          className="underline"
+                          className="underline text-[var(--text-muted)] hover:text-[var(--text)]"
                           href={c.linkedin_url}
                           target="_blank"
                           rel="noreferrer"
                         >
-                          LinkedIn
+                          LinkedIn ↗
                         </a>
-                      </>
-                    )}
-                  </div>
-                </td>
-                <td className="py-2">
-                  <code>{c.email ?? "—"}</code>
-                </td>
-                <td className="py-2">
-                  <EmailPill status={c.email_status} />
-                  {typeof c.email_verifier_score === "number" && (
-                    <span className="text-xs text-[var(--text-muted)] ml-1">
-                      {Math.round(c.email_verifier_score * 100)}%
-                    </span>
+                      ) : (
+                        <span className="text-[var(--text-muted)]">—</span>
+                      )}
+                    </td>
                   )}
-                </td>
-                <td className="py-2 text-xs text-[var(--text-muted)]">
-                  {c.email_source ?? "—"}
-                </td>
-                <td className="py-2 text-right">
-                  {c.email && (
-                    <button
-                      className="btn btn-ghost text-xs"
-                      disabled={busyId === c.id}
-                      onClick={() => reverify(c.id)}
-                    >
-                      Verify
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
-
-      <div className="mt-3 text-xs text-[var(--text-muted)]">
-        Send to:{" "}
-        <strong>
-          {primary?.email ?? "(no primary email yet)"}
-        </strong>{" "}
-        · CC <code>{STEVE_CC_DISPLAY}</code>
-      </div>
     </div>
   );
 }
 
-function EmailPill({ status }: { status: string | null }) {
+function formatSourceLabel(source: string | null | undefined): string {
+  if (!source) return "—";
+  switch (source) {
+    case "apollo":
+    case "apollo_crm":
+      return "Apollo";
+    case "hunter":
+    case "hunter_pattern":
+      return "Hunter";
+    case "pattern_guess":
+      return "Pattern guess";
+    case "manual":
+      return "Manual";
+    default:
+      return "—";
+  }
+}
+
+function EmailPill({
+  status,
+  hasEmail,
+}: {
+  status: string | null;
+  hasEmail: boolean;
+}) {
+  if (!hasEmail || status === "not_found") {
+    return (
+      <span className="inline-block px-2 py-0.5 rounded text-xs bg-zinc-700/40 text-zinc-200">
+        Not found
+      </span>
+    );
+  }
   if (!status) return <span className="text-xs text-[var(--text-muted)]">—</span>;
   const map: Record<string, { bg: string; label: string }> = {
     verified: { bg: "bg-green-700/40 text-green-200", label: "Verified ✓" },
@@ -294,6 +373,7 @@ function EmailPill({ status }: { status: string | null }) {
     invalid: { bg: "bg-red-800/40 text-red-200", label: "Invalid" },
     guessed: { bg: "bg-zinc-700/40 text-zinc-200", label: "Guessed" },
     unknown: { bg: "bg-zinc-700/40 text-zinc-200", label: "Unknown" },
+    not_found: { bg: "bg-zinc-700/40 text-zinc-200", label: "Not found" },
   };
   const s = map[status] ?? map.unknown;
   return (

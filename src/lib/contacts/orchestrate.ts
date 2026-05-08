@@ -65,6 +65,7 @@ interface CandidateRecord {
     | "bounced"
     | "invalid"
     | "unknown"
+    | "not_found"
     | null;
   email_verifier: "millionverifier" | "zerobounce" | "none" | null;
   email_verifier_score: number | null;
@@ -141,10 +142,25 @@ export async function runContactDiscovery(
   // 4. Per-candidate enrichment.
   const candidates: CandidateRecord[] = [];
   for (const p of apolloCandidates) {
-    const first = (p.first_name ?? "").trim();
-    const last = (p.last_name ?? "").trim();
-    const fullName = (p.name ?? `${first} ${last}`).trim() || "(unknown)";
-    let email: string | null = (p.email ?? null) || null;
+    // Split `name` if Apollo only returned the combined string (basic
+    // plan responses sometimes omit first_name/last_name fields). Without
+    // first/last we cannot call Hunter at all.
+    let first = (p.first_name ?? "").trim();
+    let last = (p.last_name ?? "").trim();
+    const combined = (p.name ?? "").trim();
+    if ((!first || !last) && combined) {
+      const parts = combined.split(/\s+/).filter(Boolean);
+      if (parts.length >= 2) {
+        if (!first) first = parts[0];
+        if (!last) last = parts[parts.length - 1];
+      } else if (parts.length === 1 && !first) {
+        first = parts[0];
+      }
+    }
+    const fullName = combined || `${first} ${last}`.trim() || "(unknown)";
+    // Apollo basic plan often returns placeholder strings instead of a
+    // real address — strip those before treating the field as an email.
+    let email: string | null = sanitizeApolloEmail(p.email ?? null);
     let email_source: CandidateRecord["email_source"] = "unknown";
     let email_pattern_used: string | null = null;
     let raw_hunter: unknown = null;
@@ -157,8 +173,9 @@ export async function runContactDiscovery(
         first_name: first || undefined,
         last_name: last || undefined,
       });
-      if (match.ok && match.person?.email) {
-        email = match.person.email;
+      const matchedEmail = sanitizeApolloEmail(match.ok ? match.person?.email ?? null : null);
+      if (matchedEmail) {
+        email = matchedEmail;
         email_source = "apollo";
       }
     }
@@ -209,7 +226,7 @@ export async function runContactDiscovery(
         ? verify
           ? mapVerifyStatus(verify.status)
           : "guessed"
-        : "unknown",
+        : "not_found",
       email_verifier: email ? (verify?.verifier ?? "none") : null,
       email_verifier_score:
         email && verify && typeof verify.score === "number"
@@ -321,6 +338,28 @@ function mapVerifyStatus(
     default:
       return "unknown";
   }
+}
+
+/**
+ * Apollo basic plan returns sentinel values like
+ * "email_not_unlocked@domain.com" or "domain_catch_all@…" instead of a
+ * real email when the credit-gated email field is locked. Treat anything
+ * that matches those well-known patterns as no-email so the orchestrator
+ * falls through to Hunter.
+ */
+function sanitizeApolloEmail(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const v = String(input).trim().toLowerCase();
+  if (!v) return null;
+  if (
+    v.startsWith("email_not_unlocked") ||
+    v.startsWith("domain_catch_all") ||
+    v.includes("not_unlocked@") ||
+    v.includes("@domain.com")
+  ) {
+    return null;
+  }
+  return v;
 }
 
 function extractDomain(input: string | null): string | null {
