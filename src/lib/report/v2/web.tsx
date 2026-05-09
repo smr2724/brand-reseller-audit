@@ -249,6 +249,7 @@ export function PublicReportV2({
               brand={brand}
               pdfUrl={pdfUrl}
               callHref={callHref}
+              derived={derived}
             />
             {/* 9. Methodology Appendix */}
             <SectionMethodology narrative={narrative} brand={brand} />
@@ -262,7 +263,7 @@ export function PublicReportV2({
             <SectionResellerDossier narrative={narrative} derived={derived} />
             <SectionTopProducts narrative={narrative} />
             <SectionDiySteps narrative={narrative} brand={brand} />
-            <SectionDiyFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
+            <SectionDiyFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} derived={derived} />
             <SectionMethodology narrative={narrative} brand={brand} />
             <SectionDisclaimer />
           </>
@@ -325,6 +326,8 @@ export function PublicReportV2({
             <SectionSafeTransition />
             {/* 8. Five-Step Framework */}
             <SectionPlan narrative={narrative} derived={derived} />
+            {/* 8.5 Phase 54 — Phase 2 / fractional CAO */}
+            <SectionPhaseTwo brand={brand} />
             {/* 9. Why Steve / RMG */}
             <SectionWhySteveRolle />
             {/* 9.5 Phase 44 — Diversified Hospitality case study (opportunity-only) */}
@@ -441,6 +444,7 @@ function SideNav({ mode }: { mode: ReportLayoutMode }) {
             ["s-math", "Financial opportunity"],
             ["s-transition", "Safe transition"],
             ["s-plan", "Five-step framework"],
+            ["s-phase-two", "Phase 2 — what comes next"],
             ["s-why", "Why Steve / RMG"],
             [CASE_STUDY_ANCHOR_ID, "Case study"],
             ["s-cta", "Recommended next step"],
@@ -1817,6 +1821,9 @@ function SectionFooterCta({
       <p className="rv2-prose rv2-cta-prose">
         On the call, we&apos;ll walk through the numbers, confirm which sellers are authorized, pressure-test the assumptions, and determine whether this is worth pursuing.
       </p>
+      <p className="rv2-prose rv2-cta-prose">
+        If Phase 1 lands, we&apos;ll talk about Phase 2 — running the controlled channel as a fractional CAO engagement — as a separate conversation.
+      </p>
       <p className="rv2-prose rv2-cta-prose rv2-muted">
         No pressure. The goal is to confirm whether the opportunity is real, whether the assumptions are fair, and whether taking control is worth exploring.
       </p>
@@ -1940,25 +1947,45 @@ function SectionDiyFooterCta({
   brand,
   pdfUrl,
   callHref,
+  derived,
 }: {
   narrative: NarrativeV2;
   brand: PublicReportV2Brand;
   pdfUrl: string | null;
   callHref: string;
+  derived?: DerivedSnapshot;
 }) {
   const c = narrative.cta;
+  // Phase 54 — brand-controlled share for the tactful Phase 2 framing.
+  // Falls back to narrative.brand_controlled_pct for legacy reports.
+  const pct =
+    (derived && derived.shares.has_snapshot
+      ? derived.non_reseller_share
+      : narrative.brand_controlled_pct) ?? null;
+  const brandControlledPct =
+    pct != null ? Math.round(Math.max(0, Math.min(1, pct)) * 100) : null;
   return (
     <section id="s-cta" className="rv2-section rv2-section-cta">
+      <div className="rv2-eyebrow">What comes next</div>
       <h2 className="rv2-h2">
-        When you're ready to scale or want a hand executing on this, we're a click away.
+        You&apos;ve done more than most brands ever do. Here&apos;s what comes next.
       </h2>
       <p className="rv2-prose rv2-cta-prose">
-        Most brands at {brand.name}'s stage don't need a consultant — they just need a clean plan. If you'd like a second pair of eyes later, the strategy call is free and we'll walk through whatever you're seeing.
+        Your snapshot shows roughly {brandControlledPct != null ? `${brandControlledPct}%` : "most"} of buy-box wins running through brand-controlled entities — that puts you ahead of 80%+ of the brands we audit. Genuine credit for that; most owners never get there.
+      </p>
+      <p className="rv2-prose rv2-cta-prose">
+        The path from where you are to a channel that compounds at the rate Amazon allows is shorter than for most brands — but it isn&apos;t zero. There&apos;s a distinction that matters before growth investment starts paying back at full strength: complete sales control is different from majority sales control. Authorized resellers — even the ones operating in good faith — fragment how the channel can be invested in. Each one sets its own pricing posture, its own inventory cadence, its own customer experience. None of them are positioned to invest in the brand the way the brand owner can. Before Phase 2 capital and strategy can compound, the channel needs to be running at 100% — not 95%, not 90%.
+      </p>
+      <p className="rv2-prose rv2-cta-prose">
+        For brands in your position, Phase 1 is shorter and lighter than the typical engagement. The work is finishing what you started: closing the residual gap, transitioning the remaining authorized sellers under terms that respect the relationships you&apos;ve built, and putting the operational scaffolding in place so Phase 2 has a clean foundation. Brands in this position typically clear Phase 1 quickly.
+      </p>
+      <p className="rv2-prose rv2-cta-prose">
+        Phase 2 is where the next chapter starts — and that&apos;s a conversation we&apos;d genuinely like to have with you.
       </p>
 
       <div className="rv2-cta-actions">
-        <a className="rv2-btn" href={callHref}>
-          Book a free strategy call
+        <a className="rv2-btn rv2-btn-primary" href={callHref}>
+          Schedule a 15-minute review with Steve
         </a>
         {pdfUrl && (
           <a className="rv2-btn" href={pdfUrl} target="_blank" rel="noreferrer">
@@ -2283,6 +2310,42 @@ function SectionSafeTransition() {
   );
 }
 
+// ====================================================================
+// Phase 54 — Phase 2 / Fractional Chief Amazon Officer section.
+// Renders only in opportunity mode, between the Five-Step Framework and
+// Why Steve Rolle. Tight + legacy-diy modes use the SectionDiyFooterCta
+// block to deliver the Phase 2 framing instead.
+// ====================================================================
+
+function SectionPhaseTwo({ brand }: { brand: PublicReportV2Brand }) {
+  return (
+    <section id="s-phase-two" className="rv2-section">
+      <SectionHead
+        eyebrow="Phase 2"
+        title="What comes next, once capture is complete"
+      />
+      <p className="rv2-prose">
+        Phase 1 is about taking control of what&apos;s already yours — recovering the margin sitting in someone else&apos;s pocket on demand you already generate. That&apos;s what this report has covered.
+      </p>
+      <p className="rv2-prose">
+        Phase 2 is a different question entirely.
+      </p>
+      <p className="rv2-prose">
+        Once your channel is brand-controlled and the leakage is closed, the question shifts from &ldquo;how do we stop the bleeding&rdquo; to &ldquo;how do we compound this into a meaningful business.&rdquo; That&apos;s where most brands stall — not because the team isn&apos;t capable, but because the Amazon growth playbook is a moving target. The right agency this year is the wrong one next year. The right team structure at $5M is the wrong one at $15M. The experiments that compound aren&apos;t the ones that look obvious from the outside.
+      </p>
+      <p className="rv2-prose">
+        Phase 2 is where Rolle Consulting steps in as your fractional Chief Amazon Officer. We&apos;ve spent years figuring out which partners actually deliver, which experiments are worth the spend, when to bring capability in-house versus keep it with an agency, and how to scale the team without scaling overhead ahead of the revenue. We orchestrate the growth strategy alongside your team — selecting and managing the agencies, strategists, and specialists who execute against it — so you skip the years of trial-and-error and go directly to what works.
+      </p>
+      <p className="rv2-prose">
+        Diversified Hospitality is the proof. Phase 1 doubled the profit on roughly $2M in Amazon revenue without adding a single new customer. Phase 2 is what took that channel from $2M to $10M+ per year. Across the brands we operate today, we&apos;ve sold over $60M on Amazon since 2018 and consistently run $10M+ in annual revenue.
+      </p>
+      <p className="rv2-prose">
+        Phase 2 is structured as a separate engagement that begins after Phase 1 capture stabilizes. The work, the team, and the cadence are different — and so is the contract. We&apos;ll walk through what that looks like for {brand.name} once Phase 1 is on track.
+      </p>
+    </section>
+  );
+}
+
 function SectionWhySteveRolle() {
   return (
     <section id="s-why" className="rv2-section">
@@ -2301,6 +2364,9 @@ function SectionWhySteveRolle() {
       </p>
       <p className="rv2-prose">
         We&apos;ve handled this process across reseller-fragmented catalogs and understand how to sequence the transition without disrupting core wholesale relationships.
+      </p>
+      <p className="rv2-prose">
+        Phase 1 — what this report covers — is the capture work: getting the channel under brand control and recovering the margin already in your demand. Phase 2, which begins after capture stabilizes, is where Rolle Consulting acts as a fractional Chief Amazon Officer — orchestrating the agencies, strategists, and team scaling that compound a controlled channel into real growth. The two phases are structured as separate engagements.
       </p>
       <p className="rv2-prose rv2-prose-callout">
         The lesson was simple: when the brand owner controls the marketplace, the brand can invest in the channel in a way resellers never will.
@@ -2440,6 +2506,9 @@ function SectionCaseStudyDiversifiedHospitality({
               payable across 2022 and 2023
             </li>
             <li>The increased profitability materially improved the value of the business</li>
+            <li>
+              Once Phase 1 stabilized, Phase 2 (running the channel as a real brand investment) compounded revenue from ~$2M to $10M+ per year
+            </li>
           </ul>
 
           <h3 className="rv2-h3 rv2-case-study-h3">The Lesson</h3>
