@@ -1870,6 +1870,7 @@ function CaseStudyDiversifiedHospitalityPage({
           "Cash flow improved significantly because Amazon paid faster than reseller terms",
           "Diversified paid down more than $5 million in accounts payable across 2022 and 2023",
           "The increased profitability materially improved the value of the business",
+          "Once Phase 1 stabilized, Phase 2 (running the channel as a real brand investment) compounded revenue from ~$2M to $10M+ per year",
         ]}
       />
 
@@ -1930,6 +1931,9 @@ function WhySteveRollePage({ brand }: { brand: BrandForReport }) {
       <Text style={styles.prose}>
         We&apos;ve handled this process across reseller-fragmented catalogs and understand how to sequence the transition without disrupting core wholesale relationships.
       </Text>
+      <Text style={styles.prose}>
+        Phase 1 — what this report covers — is the capture work: getting the channel under brand control and recovering the margin already in your demand. Phase 2, which begins after capture stabilizes, is where Rolle Consulting acts as a fractional Chief Amazon Officer — orchestrating the agencies, strategists, and team scaling that compound a controlled channel into real growth. The two phases are structured as separate engagements.
+      </Text>
       <Text style={styles.proseCallout}>
         The lesson was simple: when the brand owner controls the marketplace, the brand can invest in the channel in a way resellers never will.
       </Text>
@@ -1948,6 +1952,42 @@ function WhySteveRollePage({ brand }: { brand: BrandForReport }) {
         Engagements are structured around the size of the opportunity. In many cases, we combine a fixed implementation fee with performance-based upside tied to incremental profit. If the opportunity is not large enough to justify our involvement, we&apos;ll tell you.
       </Text>
       <PageFooter label="Why Steve / RMG" brandName={brand.name} />
+    </Page>
+  );
+}
+
+// =====================================================================
+// Phase 54 — Phase 2 / fractional Chief Amazon Officer page.
+// Renders only in opportunity mode, between Five-Step Framework and
+// Why Steve Rolle.
+// =====================================================================
+
+function PhaseTwoPage({ brand }: { brand: BrandForReport }) {
+  return (
+    <Page size="LETTER" style={styles.page} wrap>
+      <SectionHead
+        eyebrow="Phase 2"
+        title="What comes next, once capture is complete"
+      />
+      <Text style={styles.prose}>
+        Phase 1 is about taking control of what&apos;s already yours — recovering the margin sitting in someone else&apos;s pocket on demand you already generate. That&apos;s what this report has covered.
+      </Text>
+      <Text style={styles.prose}>
+        Phase 2 is a different question entirely.
+      </Text>
+      <Text style={styles.prose}>
+        Once your channel is brand-controlled and the leakage is closed, the question shifts from &ldquo;how do we stop the bleeding&rdquo; to &ldquo;how do we compound this into a meaningful business.&rdquo; That&apos;s where most brands stall — not because the team isn&apos;t capable, but because the Amazon growth playbook is a moving target. The right agency this year is the wrong one next year. The right team structure at $5M is the wrong one at $15M. The experiments that compound aren&apos;t the ones that look obvious from the outside.
+      </Text>
+      <Text style={styles.prose}>
+        Phase 2 is where Rolle Consulting steps in as your fractional Chief Amazon Officer. We&apos;ve spent years figuring out which partners actually deliver, which experiments are worth the spend, when to bring capability in-house versus keep it with an agency, and how to scale the team without scaling overhead ahead of the revenue. We orchestrate the growth strategy alongside your team — selecting and managing the agencies, strategists, and specialists who execute against it — so you skip the years of trial-and-error and go directly to what works.
+      </Text>
+      <Text style={styles.prose}>
+        Diversified Hospitality is the proof. Phase 1 doubled the profit on roughly $2M in Amazon revenue without adding a single new customer. Phase 2 is what took that channel from $2M to $10M+ per year. Across the brands we operate today, we&apos;ve sold over $60M on Amazon since 2018 and consistently run $10M+ in annual revenue.
+      </Text>
+      <Text style={styles.prose}>
+        Phase 2 is structured as a separate engagement that begins after Phase 1 capture stabilizes. The work, the team, and the cadence are different — and so is the contract. We&apos;ll walk through what that looks like for {brand.name} once Phase 1 is on track.
+      </Text>
+      <PageFooter label="Phase 2 — What comes next" brandName={brand.name} />
     </Page>
   );
 }
@@ -1972,6 +2012,9 @@ function CtaPage({
       </Text>
       <Text style={styles.prose}>
         On the call, we&apos;ll walk through the numbers, confirm which sellers are authorized, pressure-test the assumptions, and determine whether this is worth pursuing.
+      </Text>
+      <Text style={styles.prose}>
+        If Phase 1 lands, we&apos;ll talk about Phase 2 — running the controlled channel as a fractional CAO engagement — as a separate conversation.
       </Text>
       <Text style={[styles.prose, { color: P.muted }]}>
         No pressure. The goal is to confirm whether the opportunity is real, whether the assumptions are fair, and whether taking control is worth exploring.
@@ -2493,30 +2536,47 @@ function DiyStepsPage({
 function DiyFooterCtaPage({
   narrative,
   brand,
+  derived,
 }: {
   narrative: NarrativeV2;
   brand: BrandForReport;
+  derived?: DerivedSnapshot;
 }) {
   const c = narrative.cta;
+  const pct =
+    (derived && derived.shares.has_snapshot
+      ? derived.non_reseller_share
+      : narrative.brand_controlled_pct) ?? null;
+  const brandControlledPct =
+    pct != null ? Math.round(Math.max(0, Math.min(1, pct)) * 100) : null;
   return (
     <Page size="LETTER" style={styles.page}>
-      <Text style={styles.eyebrow}>Want help later?</Text>
+      <Text style={styles.eyebrow}>What comes next</Text>
       <View style={styles.goldRule} />
       <Text style={styles.h2}>
-        When you&apos;re ready to scale or want a hand executing on this, we&apos;re a click away.
+        You&apos;ve done more than most brands ever do. Here&apos;s what comes next.
       </Text>
       <Text style={styles.prose}>
-        Most brands at {brand.name}&apos;s stage don&apos;t need a consultant — they just need a clean plan. If you&apos;d like a second pair of eyes later, the strategy call is free and we&apos;ll walk through whatever you&apos;re seeing.
+        Your snapshot shows roughly {brandControlledPct != null ? `${brandControlledPct}%` : "most"} of buy-box wins running through brand-controlled entities — that puts you ahead of 80%+ of the brands we audit. Genuine credit for that; most owners never get there.
+      </Text>
+      <Text style={styles.prose}>
+        The path from where you are to a channel that compounds at the rate Amazon allows is shorter than for most brands — but it isn&apos;t zero. There&apos;s a distinction that matters before growth investment starts paying back at full strength: complete sales control is different from majority sales control. Authorized resellers — even the ones operating in good faith — fragment how the channel can be invested in. Each one sets its own pricing posture, its own inventory cadence, its own customer experience. None of them are positioned to invest in the brand the way the brand owner can. Before Phase 2 capital and strategy can compound, the channel needs to be running at 100% — not 95%, not 90%.
+      </Text>
+      <Text style={styles.prose}>
+        For brands in your position, Phase 1 is shorter and lighter than the typical engagement. The work is finishing what you started: closing the residual gap, transitioning the remaining authorized sellers under terms that respect the relationships you&apos;ve built, and putting the operational scaffolding in place so Phase 2 has a clean foundation. Brands in this position typically clear Phase 1 quickly.
+      </Text>
+      <Text style={styles.prose}>
+        Phase 2 is where the next chapter starts — and that&apos;s a conversation we&apos;d genuinely like to have with you.
       </Text>
       <View style={[styles.card, { marginTop: 12 }]}>
         {c.primary_cta_url && (
           <Text style={[styles.body, { color: P.gold }]}>
-            Book a free strategy call → {c.primary_cta_url}
+            Schedule a 15-minute review with Steve → {c.primary_cta_url}
           </Text>
         )}
         <Text style={[styles.body, { color: P.muted, marginTop: 4 }]}>{c.secondary_email}</Text>
       </View>
-      <PageFooter label="Want help later?" brandName={brand.name} />
+      <PageFooter label="What comes next" brandName={brand.name} />
     </Page>
   );
 }
@@ -2693,7 +2753,7 @@ function AuditV2Document({
           derived={derived}
         />
         <DiyStepsPage narrative={narrative} brand={brand} />
-        <DiyFooterCtaPage narrative={narrative} brand={brand} />
+        <DiyFooterCtaPage narrative={narrative} brand={brand} derived={derived} />
         <MethodologyPage narrative={narrative} brand={brand} />
         <DisclaimerPage brand={brand} />
       </Document>
@@ -2717,7 +2777,7 @@ function AuditV2Document({
         />
         <TopProductsPage narrative={narrative} brand={brand} maxCards={10} />
         <DiyStepsPage narrative={narrative} brand={brand} />
-        <DiyFooterCtaPage narrative={narrative} brand={brand} />
+        <DiyFooterCtaPage narrative={narrative} brand={brand} derived={derived} />
         <MethodologyPage narrative={narrative} brand={brand} />
         <DisclaimerPage brand={brand} />
       </Document>
@@ -2777,6 +2837,7 @@ function AuditV2Document({
       />
       <SafeTransitionPage brand={brand} />
       <FrameworkPage narrative={narrative} brand={brand} derived={derived} />
+      <PhaseTwoPage brand={brand} />
       <WhySteveRollePage brand={brand} />
       <CaseStudyDiversifiedHospitalityPage brand={brand} />
       <CtaPage narrative={narrative} brand={brand} />

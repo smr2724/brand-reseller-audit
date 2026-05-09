@@ -658,7 +658,7 @@ const FIVE_STEP_TITLES: { number: number; title: string }[] = [
 ];
 
 const PLAN_CLOSING =
-  "Year 1 is about capture — recovering the demand that already exists. Once that foundation is in place, we have a separate playbook for growth. But growth is not what we're selling today. We're selling the result of capture.";
+  "Year 1 is about capture — recovering the margin that's already there. Once your channel is brand-controlled and the leakage is closed, the question changes from 'how do we stop the bleeding' to 'how do we compound this into a meaningful business.' That's Phase 2, and it's a separate engagement we'll outline if and when capture lands. For now, focus on Phase 1 — the result of capture is what we're selling today, and it's what makes Phase 2 possible later.";
 
 export async function llmFiveStepPlan(p: FiveStepInput): Promise<FiveStepOut> {
   const client = getClient();
@@ -714,7 +714,7 @@ export async function llmFiveStepPlan(p: FiveStepInput): Promise<FiveStepOut> {
       "Return the Five-Step Framework with these EXACT titles, in order:\n" +
       FIVE_STEP_TITLES.map((s) => `${s.number}. ${s.title}`).join("\n") +
       "\n\nFor each step write a 2-3 sentence brand-specific body, max ~50 words. Write in second person ('your brand', 'your listings'). Reference the real numbers passed in (revenue, top reseller name + share %, unique seller count, annualLeak, exitLift) where relevant. Especially Steps 1-4 should cite specific numbers; Step 5 talks about the team model.\n\n" +
-      "HARD RULE: NEVER mention advertising, paid media, DTC, new marketplaces, subscriptions, growth campaigns, international expansion, or any net-new customer acquisition. Year 1 is capture only. The reader is a brand owner who already has demand — we are recovering margin, not generating new sales.\n\n" +
+      "HARD RULE: The Five-Step Framework is about Phase 1 — capture and channel control. The bullets you write must stay focused on capture: removing resellers, taking the buy box, recovering margin on existing demand. DO NOT make growth promises in the bullets. DO NOT detail advertising, paid media, DTC, new marketplaces, subscriptions, growth campaigns, international expansion, or net-new customer acquisition tactics in the bullets — those belong to Phase 2, which is a separate engagement covered elsewhere in the report. You MAY reference Phase 2 as the destination once capture is complete (e.g. \"this sets up Phase 2\"), but the Five-Step bullets themselves are Phase 1 only.\n\n" +
       "RESELLER NAMING RULE (CRITICAL): The ONLY seller you may name as a reseller, transition target, or party to be removed is `topReseller` in the data payload. That seller has been pre-filtered through the user's classification snapshot. If `topReseller` is null (or `has_resellers` is false), do NOT name any specific seller in Step 4 — write a brand-controlled reference body explaining that the channel is already brand-controlled and the reseller-transition step is offered as ongoing protection. Never reference any other seller name from training data, and never paraphrase a name the reader supplied elsewhere.\n\n" +
       "For the `closing` field, return verbatim: " + JSON.stringify(PLAN_CLOSING),
     userPayload: safePayload,
