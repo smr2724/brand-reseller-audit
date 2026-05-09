@@ -289,9 +289,65 @@ function sanitizeForbidden(input: string | null | undefined): string {
       /every number,?\s*every assumption/gi,
       "every line in the bridge is shown with its source",
     ],
+    // Phase 55 — strip stray markdown bold markers from LLM output.
+    // PDF renderer doesn't process markdown either; same behavior as web.
+    [/(\S)\*\*(\S)/g, "$1 **$2"],
+    [/(\S)\*\*(\s)/g, "$1**$2"],
+    [/\*\*([^*]+?)\*\*/g, "$1"],
+    [/  +/g, " "],
   ];
   for (const [re, rep] of replacements) s = s.replace(re, rep);
   return s.trim();
+}
+
+// Phase 55 — Dossier-specific sanitizer. The reseller dossier is
+// FORENSIC, not prescriptive. Mirror of web.tsx so PDF + web stay
+// symmetric. If the LLM recommends MAP enforcement, an in-house team,
+// or otherwise contradicts RCG's pitch, we strip the paragraph and
+// fall back to a hardcoded forensic line.
+const PDF_DOSSIER_FORBIDDEN_PHRASES: RegExp[] = [
+  /\bMAP (?:policy|policies|enforcement|program)\b/gi,
+  /\bMinimum Advertised Price\b/gi,
+  /\b(?:enforce|enforcing) (?:a |an )?MAP\b/gi,
+  /\b(?:build|develop|establish|stand up) (?:a |an )?in[- ]house team\b/gi,
+  /\bin[- ]house team\b/gi,
+  /\bdistribut(?:or|ion) (?:agreement|terms?|controls?)\b/gi,
+  /\bwholesale (?:agreement|terms?)\b/gi,
+  /\bcease[- ]and[- ]desist\b/gi,
+  /\b(?:vital|crucial|essential|best[- ]in[- ]class|stakeholder|ecosystem|synergy)\b/gi,
+  /\bleverag(?:e|ing|ed)\b/gi,
+  /\bbuy them out\b/gi,
+  /\b(?:transition them off|transition off the listings)\b/gi,
+];
+
+function sanitizeDossierProse(
+  input: string | null | undefined,
+  fallback: { sellerName: string; sharePct: number | null; asinsWon: number | null },
+): string {
+  if (!input) return "";
+  let s = sanitizeForbidden(String(input));
+  let tripped = false;
+  for (const re of PDF_DOSSIER_FORBIDDEN_PHRASES) {
+    if (re.test(s)) {
+      tripped = true;
+      re.lastIndex = 0;
+    }
+  }
+  if (tripped) {
+    if (typeof console !== "undefined" && typeof console.warn === "function") {
+      console.warn("[v2/pdf] dossier prose tripped forbidden-phrase sanitizer; falling back to forensic line.");
+    }
+    const share = fallback.sharePct != null ? `${Math.round(fallback.sharePct * 100)}%` : null;
+    if (share && fallback.asinsWon != null && fallback.asinsWon > 0) {
+      return `${fallback.sellerName} controls ${share} of the buy box across ${fallback.asinsWon} ASINs.`;
+    }
+    if (share) return `${fallback.sellerName} controls ${share} of the buy box.`;
+    if (fallback.asinsWon != null && fallback.asinsWon > 0) {
+      return `${fallback.sellerName} wins the buy box on ${fallback.asinsWon} ASINs.`;
+    }
+    return "";
+  }
+  return s;
 }
 
 // =====================================================================
@@ -1355,13 +1411,24 @@ function ResellerDossierPage({
               ))}
             </View>
           )}
-          {filteredDossier.risk_profile && (
-            <View style={styles.proseCallout}>
-              {paragraphs(sanitizeForbidden(filteredDossier.risk_profile)).map((p, i) => (
-                <Text key={i} style={{ marginBottom: 4 }}>{p}</Text>
-              ))}
-            </View>
-          )}
+          {(() => {
+            // Phase 55 — forensic dossier prose. Suppress entirely
+            // when sanitization fails or the LLM/fallback returned
+            // nothing.
+            const cleaned = sanitizeDossierProse(filteredDossier.risk_profile, {
+              sellerName: friendlySellerName(filteredDossier.seller_name) ?? filteredDossier.seller_name ?? "This seller",
+              sharePct: filteredDossier.share_pct ?? null,
+              asinsWon: filteredDossier.asins_won ?? null,
+            });
+            if (!cleaned) return null;
+            return (
+              <View style={styles.proseCallout}>
+                {paragraphs(cleaned).map((p, i) => (
+                  <Text key={i} style={{ marginBottom: 4 }}>{p}</Text>
+                ))}
+              </View>
+            );
+          })()}
           {resellerSellers.length > 0 && (
             <View style={[styles.card, { marginTop: 8 }]}>
               <Text style={styles.h3}>Sellers to confirm authorization on</Text>
@@ -1774,10 +1841,19 @@ function makePlanCopySanitizerPdf(
   const barePatterns = names.map(
     (n) => new RegExp(`\\b${escape(n)}\\b(?:\\s*\\([^)]*\\d+%[^)]*\\))?`, "gi"),
   );
+  // Phase 55 — appositive guard mirror of web.tsx.
+  const appositivePatterns = names.map(
+    (n) =>
+      new RegExp(
+        `(your brand|the brand|${escape(n)})\\s*,\\s*${escape(n)}\\s*,\\s*`,
+        "gi",
+      ),
+  );
   return (input: string) => {
     if (!input) return input ?? "";
     let out = input;
     for (const re of constructPatterns) out = out.replace(re, "third-party resellers");
+    for (const re of appositivePatterns) out = out.replace(re, "$1 ");
     for (const re of barePatterns) out = out.replace(re, "an authorized brand-controlled seller");
     return out;
   };
@@ -1889,14 +1965,19 @@ function CaseStudyDiversifiedHospitalityPage({
         </Text>
       ))}
 
-      <Text style={[styles.h3, { marginTop: 10 }]}>
-        Why This Matters for Your Brand
-      </Text>
-      {cs.sections.whyThisMatters.paragraphs?.map((p, i) => (
-        <Text key={`w-p-${i}`} style={styles.prose}>
-          {p}
-        </Text>
-      ))}
+      {cs.sections.whyThisMatters.paragraphs &&
+        cs.sections.whyThisMatters.paragraphs.length > 0 && (
+          <>
+            <Text style={[styles.h3, { marginTop: 10 }]}>
+              Why This Matters for Your Brand
+            </Text>
+            {cs.sections.whyThisMatters.paragraphs.map((p, i) => (
+              <Text key={`w-p-${i}`} style={styles.prose}>
+                {p}
+              </Text>
+            ))}
+          </>
+        )}
 
       <View
         style={{
@@ -1919,7 +2000,7 @@ function WhySteveRollePage({ brand }: { brand: BrandForReport }) {
   return (
     <Page size="LETTER" style={styles.page}>
       <SectionHead
-        eyebrow="Why Steve Rolle / RMG"
+        eyebrow="Why Steve Rolle / RCG"
         title="Operator-led, not agency"
       />
       <Text style={styles.prose}>
@@ -1930,9 +2011,6 @@ function WhySteveRollePage({ brand }: { brand: BrandForReport }) {
       </Text>
       <Text style={styles.prose}>
         We&apos;ve handled this process across reseller-fragmented catalogs and understand how to sequence the transition without disrupting core wholesale relationships.
-      </Text>
-      <Text style={styles.prose}>
-        Phase 1 — what this report covers — is the capture work: getting the channel under brand control and recovering the margin already in your demand. Phase 2, which begins after capture stabilizes, is where Rolle Consulting acts as a fractional Chief Amazon Officer — orchestrating the agencies, strategists, and team scaling that compound a controlled channel into real growth. The two phases are structured as separate engagements.
       </Text>
       <Text style={styles.proseCallout}>
         The lesson was simple: when the brand owner controls the marketplace, the brand can invest in the channel in a way resellers never will.
@@ -1951,7 +2029,7 @@ function WhySteveRollePage({ brand }: { brand: BrandForReport }) {
       <Text style={styles.small}>
         Engagements are structured around the size of the opportunity. In many cases, we combine a fixed implementation fee with performance-based upside tied to incremental profit. If the opportunity is not large enough to justify our involvement, we&apos;ll tell you.
       </Text>
-      <PageFooter label="Why Steve / RMG" brandName={brand.name} />
+      <PageFooter label="Why Steve / RCG" brandName={brand.name} />
     </Page>
   );
 }
@@ -1979,13 +2057,10 @@ function PhaseTwoPage({ brand }: { brand: BrandForReport }) {
         Once your channel is brand-controlled and the leakage is closed, the question shifts from &ldquo;how do we stop the bleeding&rdquo; to &ldquo;how do we compound this into a meaningful business.&rdquo; That&apos;s where most brands stall — not because the team isn&apos;t capable, but because the Amazon growth playbook is a moving target. The right agency this year is the wrong one next year. The right team structure at $5M is the wrong one at $15M. The experiments that compound aren&apos;t the ones that look obvious from the outside.
       </Text>
       <Text style={styles.prose}>
-        Phase 2 is where Rolle Consulting steps in as your fractional Chief Amazon Officer. We&apos;ve spent years figuring out which partners actually deliver, which experiments are worth the spend, when to bring capability in-house versus keep it with an agency, and how to scale the team without scaling overhead ahead of the revenue. We orchestrate the growth strategy alongside your team — selecting and managing the agencies, strategists, and specialists who execute against it — so you skip the years of trial-and-error and go directly to what works.
+        Phase 2 is where Rolle Consulting steps in as your fractional Chief Amazon Officer — orchestrating the agencies, strategists, and team scaling that turn a controlled channel into a compounding one. We&apos;ve already done the trial-and-error on which partners deliver, which experiments are worth the spend, and how to scale the team without scaling overhead ahead of the revenue.
       </Text>
       <Text style={styles.prose}>
-        Diversified Hospitality is the proof. Phase 1 doubled the profit on roughly $2M in Amazon revenue without adding a single new customer. Phase 2 is what took that channel from $2M to $10M+ per year. Across the brands we operate today, we&apos;ve sold over $60M on Amazon since 2018 and consistently run $10M+ in annual revenue.
-      </Text>
-      <Text style={styles.prose}>
-        Phase 2 is structured as a separate engagement that begins after Phase 1 capture stabilizes. The work, the team, and the cadence are different — and so is the contract. We&apos;ll walk through what that looks like for {brand.name} once Phase 1 is on track.
+        Phase 2 is a separate engagement that begins after Phase 1 capture stabilizes. We&apos;ll walk through what that looks like for {brand.name} once Phase 1 is on track.
       </Text>
       <PageFooter label="Phase 2 — What comes next" brandName={brand.name} />
     </Page>

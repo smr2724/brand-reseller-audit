@@ -41,7 +41,7 @@ export type DiversifiedCaseStudy = {
   footnote: string;
   /** Short snippets used throughout the rest of the report. */
   snippets: {
-    /** ~1-line snippet for the Why-Steve / RMG section. */
+    /** ~1-line snippet for the Why-Steve / RCG section. */
     whySteveBio: string;
     /** ~1-2 line snippet for the Customer Experience callout. */
     customerExperience: string;
@@ -148,47 +148,28 @@ export const DIVERSIFIED_HOSPITALITY_CASE_STUDY: DiversifiedCaseStudy = {
         "$9-10 million in Amazon revenue each year thereafter",
       ],
       tail: [
-        "That is roughly a 5x increase from the reseller-controlled baseline — and that growth happened in Phase 2, not Phase 1. Phase 1 doubled the profit at flat revenue. Phase 2 took the controlled channel and compounded it.",
-        "Across the brands Steve and RCG operate today, the aggregate trajectory speaks to the durability of the playbook: more than $60 million sold on Amazon since 2018, and consistently $10M+ in annual revenue today.",
-        "The key was not simply “removing resellers.”",
-        "The key was that the brand owner finally had the ability and incentive to invest in the channel properly — and that only became possible once Phase 1 was done.",
+        "That is roughly a 5x increase from the reseller-controlled baseline — and that growth happened in Phase 2, not Phase 1.",
+        "The key was not simply “removing resellers.” The key was that the brand owner finally had the ability and incentive to invest in the channel properly — and that only became possible once Phase 1 was done.",
         "The financial impact went beyond revenue:",
       ],
     },
+    // Phase 55 — collapsed "The Lesson" + "Why This Matters" into a
+    // single closing section per all-three-reviewer feedback. Keeps the
+    // canonical Phase 1 vs Phase 2 framing once, drops the duplicate
+    // "what makes it healthy / what makes it valuable" restatement, and
+    // ends on the question this report exists to answer.
     lesson: {
       paragraphs: [
-        "Diversified's experience showed a simple truth:",
         "Phase 1 made the business healthy. Phase 2 made it valuable.",
-        "Phase 1 — taking control of the channel and recovering the margin already in existing demand — is what makes the business healthy. Profit doubles, cash flow improves, the brand stops subsidizing other people's businesses. But Phase 1 alone leaves the bigger prize on the table.",
-        "Phase 2 — running the controlled channel as a real brand investment, with the right partners, the right team, and the right experiments — is what makes the business valuable. That is where revenue compounds, where enterprise value gets created, where Amazon stops being a leak and starts being a category.",
-        "You cannot get to Phase 2 without doing Phase 1 first. And most brands stop at Phase 1, leaving the bigger prize on the table.",
-        "When the brand controls Amazon, it controls:",
-      ],
-      bullets: [
-        "The listing",
-        "The pricing",
-        "The packaging",
-        "The customer experience",
-        "The inventory strategy",
-        "The brand presentation",
-        "The margin",
-        "The long-term growth plan",
-      ],
-      tail: [
-        "That is why Amazon channel ownership can be so powerful.",
-        "It is not just a reseller-removal strategy.",
-        "It is a brand-control strategy — and a prerequisite for everything that comes after.",
+        "Phase 1 — taking control of the channel and recovering the margin already in existing demand — closes the leak: profit doubles at flat revenue, cash flow improves, the brand stops subsidizing other people's businesses. Phase 2 — running the controlled channel as a real brand investment — is where revenue compounds and enterprise value gets created. You cannot get to Phase 2 without doing Phase 1 first, and most brands stop at Phase 1 leaving the bigger prize on the table.",
+        "If your products are already generating meaningful Amazon revenue through third-party sellers, the question is not whether Amazon works. The question is whether someone else should keep operating that channel, or whether your brand should own it. This audit is sized around answering that first question for your brand.",
       ],
     },
     whyThisMatters: {
-      paragraphs: [
-        "If your products are already generating meaningful Amazon revenue through third-party sellers, the question is not whether Amazon works.",
-        "The question is:",
-        "Should someone else keep operating that channel, or should your brand own it?",
-        "Phase 1 — what this audit is sized around — answers that first question. The marketplace data we found suggests your brand may already have an Amazon business hiding in plain sight, and the immediate prize is the margin sitting in someone else's pocket on demand you already generate. That is what makes the business healthy.",
-        "Phase 2 is the question that comes next, once the channel is yours: how do you compound a controlled Amazon channel into a meaningful business? That is a separate engagement, and it is where Rolle Consulting acts as a fractional Chief Amazon Officer to orchestrate the agencies, strategists, and team scaling that turn a healthy channel into a valuable one.",
-        "The next step is to determine whether Phase 1 is worth pursuing for your brand. Phase 2 is the conversation that follows.",
-      ],
+      // Phase 55 — section emptied; content merged into `lesson` above.
+      // Renderer falls back to omitting the section when paragraphs is
+      // empty.
+      paragraphs: [],
     },
   },
   /** Results-section sub-bullets that follow the "financial impact went beyond revenue" line. */
@@ -196,7 +177,7 @@ export const DIVERSIFIED_HOSPITALITY_CASE_STUDY: DiversifiedCaseStudy = {
     "This case reflects Steve Rolle's prior operational experience at Diversified Hospitality Solutions. Past results do not guarantee future outcomes; your channel and brand will have unique dynamics.",
   snippets: {
     whySteveBio:
-      "Steve Rolle has lived this problem as a brand owner, not just as a consultant. At Diversified Hospitality, reseller-controlled Amazon activity created inconsistent listings, pricing issues, and margin leakage. Phase 1 brought the channel under brand control and doubled profit on the existing ~$2M revenue base. Phase 2 — running the channel as a real brand investment — compounded it into a $10M+/year business. Across our portfolio, we've sold over $60M on Amazon since 2018.",
+      "Steve Rolle has lived this problem as a brand owner, not just as a consultant. At Diversified Hospitality, reseller-controlled Amazon activity created inconsistent listings, pricing issues, and margin leakage. Phase 1 brought the channel under brand control and doubled profit on the existing ~$2M revenue base; Phase 2 compounded the controlled channel from there. Portfolio context: see Why Rolle Consulting.",
     customerExperience:
       "At Diversified Hospitality, the biggest unlock was not only capturing reseller margin. The bigger unlock was that the brand owner finally controlled the customer experience, listings, packaging, inventory, pricing, reviews, and long-term channel strategy.",
     frameworkStep4:

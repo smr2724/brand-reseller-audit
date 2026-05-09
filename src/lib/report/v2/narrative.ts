@@ -270,7 +270,7 @@ export async function llmDossierRisk(
     model: MODEL,
     toolName: "emit_dossier_risk_profile",
     toolDescription:
-      "Write a 150–200 word risk profile of the dominant reseller. Classify them and explain what to do about it.",
+      "Write a forensic 1-paragraph profile (≤ 80 words) describing what this seller is doing on the brand's listings. Description only — no recommendations.",
     schema: {
       type: "object",
       additionalProperties: false,
@@ -278,7 +278,10 @@ export async function llmDossierRisk(
       required: ["risk_profile"],
     },
     userInstruction:
-      "Write a 150–200 word risk profile of this seller. Classify them as one of: classic 3PL diverter, third-party importer (authorization unknown), authorized but undercutting, or arbitrage seller — pick whichever fits the data. Use careful language: say 'appears', 'may', 'authorization unknown' rather than 'unauthorized'. Explain the risk to the brand in plain English. End with the practical move (transition, MAP-enforce, or buy them out). Do not invent facts about who owns the seller — work only from the data provided. If `country` is null, OMIT geographic language entirely (do not write 'from — not measured' or anything similar). Plain markdown, no headings.",
+      "Write ONE paragraph, max 80 words, describing what this seller is doing on the brand's listings. Forensic only: name what they're doing in concrete terms, cite their share % and ASINs-won count from the data, and end with the implication for the brand owner (margin pressure, buy-box loss, channel fragmentation). " +
+      "HARD RULES (the dossier is forensic, not prescriptive — solutions live in the Five-Step Framework, NOT here): " +
+      "(1) NEVER recommend MAP enforcement, MAP policy, Minimum Advertised Price, distributor terms changes, wholesale agreement updates, an in-house team, or any DIY tactic. (2) NEVER name a solution at all. No 'enforce', no 'consider', no 'should'. (3) NEVER use the words: vital, crucial, essential, leverage (as verb), stakeholder, ecosystem, synergy, best-in-class, strategic (adjective). (4) Operator voice: direct, specific, no hedging buzzwords. (5) Reference at least one concrete number from the data (share_pct, asins_won, country if present, fulfilment_mix). If the data has no measurable share_pct AND no asins_won, return an empty string — better silent than generic. " +
+      "If `country` is null, OMIT geographic language entirely (do not write 'from — not measured'). Plain markdown, no headings.",
     userPayload: { dossier, brand_name: brand.name, brand_country_match: dossier.country },
     maxTokens: 500,
   });
@@ -289,16 +292,40 @@ function fallbackDossierRisk(
   dossier: Omit<NarrativeResellerDossier, "risk_profile">,
   brand: BrandForReport,
 ): string {
-  const share =
-    dossier.share_pct != null
-      ? `${Math.round(dossier.share_pct * 100)}%`
-      : "— not measured";
+  // Phase 55 — forensic-only fallback. No solutions, no recommendations.
+  // If we have neither share_pct nor asins_won, return empty so the
+  // renderer suppresses the paragraph entirely.
+  const hasShare = dossier.share_pct != null;
+  const hasAsins = dossier.asins_won != null && dossier.asins_won > 0;
+  if (!hasShare && !hasAsins) return "";
+  const share = hasShare
+    ? `${Math.round((dossier.share_pct as number) * 100)}%`
+    : null;
   const country = dossier.country;
   const mix = dossier.fulfilment_mix;
-  const opLine = country
-    ? `They operate from ${country} on a ${mix} model.`
-    : `They operate on a ${mix} model.`;
-  return `${dossier.seller_name} appears to be the dominant seller on ${brand.name}'s catalog, holding ${share} of observed buy-box wins (Keepa). ${opLine} Authorization status should be confirmed with your team — until written terms are confirmed, this seller may be running the channel outside of any contract, which can leak margin and weaken brand control. The pattern fits a classic 3PL diverter: low overhead, limited investment in the brand, often undercutting MSRP to win the buy box. The practical move is one of three: (1) transition them off the listings and enforce MAP plus distribution-agreement controls, (2) bring them on as an authorized partner under written terms, or (3) buy them out on a one-time basis. We will run that decision tree with you in the first two weeks.`;
+  const parts: string[] = [];
+  if (share && hasAsins) {
+    parts.push(
+      `${dossier.seller_name} controls ${share} of buy-box wins across ${dossier.asins_won} ASINs on ${brand.name}'s catalog.`,
+    );
+  } else if (share) {
+    parts.push(
+      `${dossier.seller_name} controls ${share} of buy-box wins on ${brand.name}'s catalog.`,
+    );
+  } else if (hasAsins) {
+    parts.push(
+      `${dossier.seller_name} is winning the buy box on ${dossier.asins_won} of ${brand.name}'s ASINs.`,
+    );
+  }
+  if (country) {
+    parts.push(`Operates from ${country} on a ${mix} model.`);
+  } else if (mix && mix !== "— not measured") {
+    parts.push(`Operates on a ${mix} model.`);
+  }
+  parts.push(
+    `That share is margin and channel control sitting outside ${brand.name}.`,
+  );
+  return parts.join(" ");
 }
 
 // =====================================================================
@@ -657,6 +684,43 @@ const FIVE_STEP_TITLES: { number: number; title: string }[] = [
   { number: 5, title: "Build and Train an In-House Team" },
 ];
 
+// Phase 55 — Hardcoded fallback bullets in Steve's operator voice. Used
+// when the LLM-generated body trips the banned-phrase sanitizer, comes
+// back empty, or otherwise contradicts Phase 1 framing. Each line is
+// 1-2 sentences, references a concrete Amazon mechanic, and sits
+// firmly inside Phase 1 (capture, channel control). Step 5 references
+// the Phase 1 → Phase 2 hand-off without restating Phase 2 in detail.
+const FIVE_STEP_FALLBACK_BULLETS: Record<number, string> = {
+  1: "This report is the audit. We've measured trailing-12-month Amazon revenue, brand-controlled buy-box share, and the seller mix on your listings — those three numbers size the recoverable margin and tell us whether Phase 1 is even worth running.",
+  2: "Brand Registry, A+, brand store, and storefront ownership transfer to the brand owner. Most brands either don't have these or have them stale — clean catalog mapping and fulfillment routing land here so the buy box rotates back to brand-controlled inventory, not into a vacuum.",
+  3: "Brand Registry, Transparency, and third-party offer monitoring run continuously — every offer, every price move, every new listing watched and acted on. Resellers don't survive a serious enforcement program; this is what keeps the channel from re-fragmenting six months in.",
+  4: "We map every active seller, classify each as authorized or unauthorized, and pursue removal in sequence — unauthorized first, authorized through written wholesale terms second. The recoverable margin moves from their P&L to yours without adding a single new customer.",
+  5: "By month 9-12 the brand has the operational scaffolding to maintain Phase 1 results — the playbook, the team, the buy box. Phase 2, when you're ready, adds external strategy and execution capability on top.",
+};
+
+// Phase 55 — Banned-phrase regex sanitizer for Five-Step Framework
+// bodies. The bullets read as templated filler when they contain
+// "vital", "crucial", "essential", "well-structured", "comprehensive",
+// "robust", "establish(ing)", "leverage" (verb), or
+// "strategic" (adjective). On match, we drop the LLM output and
+// substitute the hardcoded fallback for that step.
+const FIVE_STEP_BANNED_PHRASES: RegExp[] = [
+  /\b(?:vital|crucial|essential|well[- ]structured|comprehensive|robust)\b/gi,
+  /\bestablish(?:ing|ed|es|ment)?\b/gi,
+  /\bleverag(?:e|ing|ed|es)\b/gi,
+  /\bstrategic(?:ally)?\b/gi,
+  /\b(?:stakeholders?|ecosystems?|synergy|synergies)\b/gi,
+  /\bbest[- ]in[- ]class\b/gi,
+];
+
+function fiveStepBodyTrippedSanitizer(body: string): boolean {
+  for (const re of FIVE_STEP_BANNED_PHRASES) {
+    re.lastIndex = 0;
+    if (re.test(body)) return true;
+  }
+  return false;
+}
+
 const PLAN_CLOSING =
   "Year 1 is about capture — recovering the margin that's already there. Once your channel is brand-controlled and the leakage is closed, the question changes from 'how do we stop the bleeding' to 'how do we compound this into a meaningful business.' That's Phase 2, and it's a separate engagement we'll outline if and when capture lands. For now, focus on Phase 1 — the result of capture is what we're selling today, and it's what makes Phase 2 possible later.";
 
@@ -669,15 +733,28 @@ export async function llmFiveStepPlan(p: FiveStepInput): Promise<FiveStepOut> {
   // names entirely. The model only ever sees the largest seller the
   // user classified as `reseller`. If no reseller exists, the model is
   // told to render reference copy without naming any seller.
+  // Phase 55 — pre-round the dollar values BEFORE handing them to the
+  // LLM. The Five-Step prompt was previously receiving the un-rounded
+  // float (e.g. 135898.7), the LLM was free-styling the rendered string
+  // ("$135,898" vs "$135,899"), and the executive summary used
+  // Math.round() — producing the off-by-one inconsistency reviewers
+  // flagged. Pre-rounding makes the LLM and the deterministic
+  // formatter share the exact same source value.
+  const annualLeakRounded =
+    p.annualLeak != null ? Math.round(p.annualLeak) : null;
+  const exitLiftRounded =
+    p.exitLift != null ? Math.round(p.exitLift) : null;
+  const revenueRounded =
+    p.revenue != null ? Math.round(p.revenue) : null;
   const safePayload = {
     brandName: p.brandName,
     topReseller: p.topReseller,
     topResellerSharePct: p.topResellerSharePct,
     uniqueSellerCount: p.uniqueSellerCount,
     brandControlledPct: p.brandControlledPct,
-    annualLeak: p.annualLeak,
-    exitLift: p.exitLift,
-    revenue: p.revenue,
+    annualLeak: annualLeakRounded,
+    exitLift: exitLiftRounded,
+    revenue: revenueRounded,
     resellerSellerCount: p.resellerSellerCount ?? null,
     has_resellers: !!p.topReseller,
   };
@@ -713,8 +790,9 @@ export async function llmFiveStepPlan(p: FiveStepInput): Promise<FiveStepOut> {
     userInstruction:
       "Return the Five-Step Framework with these EXACT titles, in order:\n" +
       FIVE_STEP_TITLES.map((s) => `${s.number}. ${s.title}`).join("\n") +
-      "\n\nFor each step write a 2-3 sentence brand-specific body, max ~50 words. Write in second person ('your brand', 'your listings'). Reference the real numbers passed in (revenue, top reseller name + share %, unique seller count, annualLeak, exitLift) where relevant. Especially Steps 1-4 should cite specific numbers; Step 5 talks about the team model.\n\n" +
-      "HARD RULE: The Five-Step Framework is about Phase 1 — capture and channel control. The bullets you write must stay focused on capture: removing resellers, taking the buy box, recovering margin on existing demand. DO NOT make growth promises in the bullets. DO NOT detail advertising, paid media, DTC, new marketplaces, subscriptions, growth campaigns, international expansion, or net-new customer acquisition tactics in the bullets — those belong to Phase 2, which is a separate engagement covered elsewhere in the report. You MAY reference Phase 2 as the destination once capture is complete (e.g. \"this sets up Phase 2\"), but the Five-Step bullets themselves are Phase 1 only.\n\n" +
+      "\n\nFor each step write a 1-2 sentence brand-specific body, max ~45 words. Write in second person ('your brand', 'your listings'). Reference the real numbers passed in (revenue, top reseller name + share %, unique seller count, annualLeak, exitLift) where relevant. Each body must reference ONE of: a dollar number, a percentage, a specific Amazon mechanic (buy box, BSR, A+, FBA, Brand Registry, Transparency, MAP infrastructure, storefront), or a specific transition risk.\n\n" +
+      "HARD RULE — PHASE 1 ONLY: The Five-Step Framework is about Phase 1 — capture and channel control. Bullets stay focused on capture: removing resellers, taking the buy box, recovering margin on existing demand. DO NOT make growth promises. DO NOT detail advertising, paid media, DTC, new marketplaces, subscriptions, growth campaigns, international expansion, or net-new customer acquisition — those belong to Phase 2, covered elsewhere. You MAY reference Phase 2 as the destination once capture is complete (e.g. \"this sets up Phase 2\"), but the bullets themselves are Phase 1.\n\n" +
+      "HARD RULE — VOICE: NEVER use the words: vital, crucial, essential, well-structured, comprehensive, robust, establish (or any inflection: establishing, established, establishment), leverage (as verb), strategic (as adjective), stakeholder, ecosystem, synergy, best-in-class. NEVER use templated phrases like 'Establishing a well-structured Amazon account is crucial.' Operator voice: direct, specific, concrete. If you can't write a step body that satisfies the rules above, return the empty string for `body` and the renderer will use a hardcoded fallback.\n\n" +
       "RESELLER NAMING RULE (CRITICAL): The ONLY seller you may name as a reseller, transition target, or party to be removed is `topReseller` in the data payload. That seller has been pre-filtered through the user's classification snapshot. If `topReseller` is null (or `has_resellers` is false), do NOT name any specific seller in Step 4 — write a brand-controlled reference body explaining that the channel is already brand-controlled and the reseller-transition step is offered as ongoing protection. Never reference any other seller name from training data, and never paraphrase a name the reader supplied elsewhere.\n\n" +
       "For the `closing` field, return verbatim: " + JSON.stringify(PLAN_CLOSING),
     userPayload: safePayload,
@@ -726,15 +804,29 @@ export async function llmFiveStepPlan(p: FiveStepInput): Promise<FiveStepOut> {
   const sanitizer = makeBrandOwnedNamingSanitizer(p.brandControlledNames ?? []);
   const steps = FIVE_STEP_TITLES.map(({ number, title }) => {
     const match = result.steps.find((s) => s.number === number);
-    const fallbackBody = fb.steps.find((s) => s.number === number)!.body;
+    const fbBody = fb.steps.find((s) => s.number === number)!.body;
+    const hardcodedFallback = FIVE_STEP_FALLBACK_BULLETS[number] ?? fbBody;
     const rawBody = (match?.body ?? "").trim();
-    if (!rawBody) return { number, title, body: fallbackBody };
+    if (!rawBody) {
+      // Phase 55 — empty LLM body falls through to the hardcoded
+      // operator-voice fallback rather than to the older templated
+      // fallback that used buzzwords.
+      return { number, title, body: hardcodedFallback };
+    }
     const sanitized = sanitizer(rawBody);
     // Fail-closed: if the LLM tried to name a brand-controlled seller in
-    // a reseller context, drop the body entirely and use the fallback,
-    // which is built from the filtered data and CAN'T name a
-    // brand-controlled seller.
-    return { number, title, body: sanitized.tripped ? fallbackBody : sanitized.text };
+    // a reseller context, drop the body entirely and use the fallback.
+    if (sanitized.tripped) return { number, title, body: hardcodedFallback };
+    // Phase 55 — banned-phrase guard. If the LLM emitted templated
+    // filler ("vital", "crucial", "establish", etc.) we drop the body
+    // and use the operator-voice hardcoded fallback for that step.
+    if (fiveStepBodyTrippedSanitizer(sanitized.text)) {
+      console.warn(
+        `[v2/narrative] five-step body for step ${number} tripped banned-phrase sanitizer; using hardcoded fallback.`,
+      );
+      return { number, title, body: hardcodedFallback };
+    }
+    return { number, title, body: sanitized.text };
   });
   return { steps, closing: PLAN_CLOSING };
 }
