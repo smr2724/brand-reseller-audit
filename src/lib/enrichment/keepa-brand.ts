@@ -271,18 +271,25 @@ export async function enrichBrandWithKeepa(
       llm_budget: 5,
     });
 
-    const sellerRows = classified.map((s) => ({
-      brand_id,
-      seller_name: s.seller_name,
-      seller_id: s.seller_id ?? null,
-      seller_country: s.seller_country,
-      share_pct: s.share_pct,
-      asins_won: s.asins_won,
-      is_fba: s.is_fba,
-      is_brand_controlled: s.classification.is_brand_controlled,
-      classification_reason: s.classification.reason.slice(0, 500),
-      last_seen_at: new Date().toISOString(),
-    }));
+    const sellerRows = classified.map((s) => {
+      // Phase 56 — auto-classify Amazon retail (ATVPDKIKX0DER) as
+      // 'amazon' on import. User can override via the modal. This
+      // complements the DB-level trigger added in migration 0045.
+      const isAmazon = s.seller_id === "ATVPDKIKX0DER";
+      return {
+        brand_id,
+        seller_name: s.seller_name,
+        seller_id: s.seller_id ?? null,
+        seller_country: s.seller_country,
+        share_pct: s.share_pct,
+        asins_won: s.asins_won,
+        is_fba: s.is_fba,
+        is_brand_controlled: s.classification.is_brand_controlled,
+        classification_reason: s.classification.reason.slice(0, 500),
+        classification: isAmazon ? "amazon" : "reseller",
+        last_seen_at: new Date().toISOString(),
+      };
+    });
 
     if (sellerRows.length) {
       const { error: insErr } = await supabase
@@ -294,12 +301,12 @@ export async function enrichBrandWithKeepa(
         // brand_controlled_pct + top_seller below; persistence of the
         // reason on brand_sellers is best-effort transparency.
         const msg = insErr.message ?? "";
-        const looksLikeMissingColumn = /column .* does not exist|is_brand_controlled|classification_reason/i.test(msg);
+        const looksLikeMissingColumn = /column .* does not exist|is_brand_controlled|classification_reason|classification/i.test(msg);
         if (looksLikeMissingColumn) {
           console.warn(
             `[keepa-brand] brand_sellers insert with classification columns failed (${msg}); retrying without them.`,
           );
-          const legacyRows = sellerRows.map(({ is_brand_controlled, classification_reason, ...rest }) => rest);
+          const legacyRows = sellerRows.map(({ is_brand_controlled, classification_reason, classification, ...rest }) => rest);
           const { error: retryErr } = await supabase
             .from("brand_sellers")
             .insert(legacyRows);

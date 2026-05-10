@@ -86,6 +86,9 @@ export interface NarrativeV2 {
  */
 export interface NarrativeQualification {
   verdict: "qualified" | "disqualified" | "needs_review";
+  /** Phase 56 — deterministic segment slug (one of ten). Drives the
+   * report layout-mode router. Null on legacy rows. */
+  segment?: string | null;
   hooks: Array<{
     hook_code: string;
     hook_text: string;

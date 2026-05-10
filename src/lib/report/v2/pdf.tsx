@@ -2276,6 +2276,77 @@ function DisclaimerPage({ brand }: { brand: BrandForReport }) {
   );
 }
 
+// Phase 56 — Segment 4 soft-lead opener (opportunity_softlead mode).
+function SoftLeadPage({
+  brand,
+  derived,
+}: {
+  brand: BrandForReport;
+  derived: DerivedSnapshot;
+}) {
+  const brandOwnedPct = Math.round((derived.shares?.brand_owned ?? 0) * 100);
+  return (
+    <Page size="LETTER" style={styles.page}>
+      <SectionHead eyebrow="You're doing well" title="Brand-controlled, with a leakage gap to close" />
+      <Text style={styles.prose}>
+        {brand.name}, you control a meaningful share of your Amazon channel
+        yourself — roughly {brandOwnedPct}% brand-owned today. That puts you
+        ahead of most. The remaining slice is where unauthorized resellers are
+        still costing you in leakage. Close that gap and you control 100% of
+        sales, profit on existing demand doubles, and you&apos;re set up for
+        Phase 2 growth.
+      </Text>
+      <PageFooter label="Soft Lead" brandName={brand.name} />
+    </Page>
+  );
+}
+
+// Phase 56 — Segment 2 (authorized_network_healthy) callout. Soft,
+// consultative, mirrors web.tsx SectionAuthorizedResellersCap.
+function AuthorizedResellersCapPage() {
+  return (
+    <Page size="LETTER" style={styles.page}>
+      <SectionHead
+        eyebrow="Authorized networks"
+        title="Why even authorized resellers cap your growth"
+      />
+      <Text style={styles.prose}>
+        Authorized resellers can be excellent partners. They hold inventory,
+        they extend reach, and they often grew with your brand. None of that is
+        going away.
+      </Text>
+      <Text style={styles.prose}>
+        But there&apos;s a quieter cost that becomes visible at scale: a
+        fragmented seller base — even an authorized one — caps how aggressively
+        the brand itself can invest in the channel. Each reseller sets their
+        own pricing posture. Each one decides their own inventory cadence.
+        Each one shapes a piece of the customer experience the brand owner
+        doesn&apos;t control.
+      </Text>
+      <Text style={styles.prose}>
+        That fragmentation isn&apos;t a problem at $1M, $2M, or even $5M of
+        Amazon revenue. It becomes the bottleneck somewhere between $5M and
+        $10M, when the brand wants to invest seriously in advertising,
+        content, and listing optimization — and discovers that those
+        investments compound only when 100% of the buy box is brand-controlled.
+      </Text>
+      <Text style={styles.prose}>
+        Diversified Hospitality went through exactly this. Authorized
+        distributors were &ldquo;helping&rdquo; until we ran the numbers.
+        Phase 1 brought all sales under brand control — profit doubled on the
+        same revenue base. Phase 2 then took the channel from $2M to $10M+
+        per year. None of that compounding was possible while the channel was
+        fragmented across resellers, even authorized ones.
+      </Text>
+      <Text style={styles.prose}>
+        We&apos;re not telling you your distributor network is bad.
+        We&apos;re telling you it&apos;s the layer between where you are now
+        and where Phase 2 can take you.
+      </Text>
+    </Page>
+  );
+}
+
 // =====================================================================
 // Tight (short benchmark) layout pages
 // =====================================================================
@@ -2744,8 +2815,29 @@ function AuditV2Document({
       null,
   });
 
-  const isTightShort = derived.is_tight_channel;
-  const isLegacyDiy = !isTightShort && narrative.report_mode === "diy_fit";
+  // Phase 56 — segment-driven routing (Edge F). Mirrors web.tsx.
+  const segment = narrative.qualification?.segment ?? null;
+  const segmentSays = (() => {
+    switch (segment) {
+      case "authorized_network_healthy":
+        return "tight" as const;
+      case "brand_managed_with_leakage":
+        return "opportunity_softlead" as const;
+      case "reseller_controlled":
+      case "mixed_control":
+        return "opportunity" as const;
+      default:
+        return null;
+    }
+  })();
+  const isTightShort =
+    segmentSays === "tight" ||
+    (segmentSays == null && derived.is_tight_channel);
+  const isSoftLead = segmentSays === "opportunity_softlead";
+  const isLegacyDiy =
+    segmentSays == null &&
+    !isTightShort &&
+    narrative.report_mode === "diy_fit";
 
   const revenueLine = narrative.math.lines.find((l) => l.key === "revenue");
   const revenueValue =
@@ -2827,6 +2919,9 @@ function AuditV2Document({
           brand={brand}
           derived={derived}
         />
+        {segment === "authorized_network_healthy" && (
+          <AuthorizedResellersCapPage />
+        )}
         <DiyStepsPage narrative={narrative} brand={brand} />
         <DiyFooterCtaPage narrative={narrative} brand={brand} derived={derived} />
         <MethodologyPage narrative={narrative} brand={brand} />
@@ -2874,6 +2969,7 @@ function AuditV2Document({
         confProfit={confProfit}
         confValue={confValue}
       />
+      {isSoftLead && <SoftLeadPage brand={brand} derived={derived} />}
       <ExecutiveSummaryPage
         narrative={narrative}
         brand={brand}

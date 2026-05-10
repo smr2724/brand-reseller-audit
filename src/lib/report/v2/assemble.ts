@@ -683,23 +683,40 @@ async function loadQualificationForReport(
 ): Promise<NarrativeQualification | null> {
   const admin = createSupabaseAdminClient();
   if (!admin) return null;
-  const { data } = await admin
-    .from("brand_qualifications")
-    .select("icp_verdict, candidate_hooks, state")
-    .eq("brand_id", brandId)
-    .maybeSingle<{
-      icp_verdict: "qualified" | "disqualified" | "needs_review";
-      candidate_hooks: Array<{
-        hook_code?: string;
-        hook_text?: string;
-        evidence?: string;
-        confidence?: number;
-      }> | null;
-      state: string;
-    }>();
-  if (!data || data.state !== "complete") return null;
-  const hooks = Array.isArray(data.candidate_hooks)
-    ? data.candidate_hooks
+  // Phase 56 — try to fetch the `segment` column; fall back to a query
+  // without it for older DBs that haven't run migration 0045.
+  type QualRow = {
+    icp_verdict: "qualified" | "disqualified" | "needs_review";
+    candidate_hooks: Array<{
+      hook_code?: string;
+      hook_text?: string;
+      evidence?: string;
+      confidence?: number;
+    }> | null;
+    state: string;
+    segment?: string | null;
+  };
+  let row: QualRow | null = null;
+  {
+    const res = await admin
+      .from("brand_qualifications")
+      .select("icp_verdict, candidate_hooks, state, segment")
+      .eq("brand_id", brandId)
+      .maybeSingle();
+    if (res.error && /column .* does not exist|segment/i.test(res.error.message ?? "")) {
+      const retry = await admin
+        .from("brand_qualifications")
+        .select("icp_verdict, candidate_hooks, state")
+        .eq("brand_id", brandId)
+        .maybeSingle();
+      row = (retry.data as QualRow | null) ?? null;
+    } else {
+      row = (res.data as QualRow | null) ?? null;
+    }
+  }
+  if (!row || row.state !== "complete") return null;
+  const hooks = Array.isArray(row.candidate_hooks)
+    ? row.candidate_hooks
         .filter((h) => h && typeof h.hook_code === "string")
         .map((h) => ({
           hook_code: String(h.hook_code ?? ""),
@@ -711,7 +728,7 @@ async function loadQualificationForReport(
               : 0,
         }))
     : [];
-  return { verdict: data.icp_verdict, hooks };
+  return { verdict: row.icp_verdict, segment: row.segment ?? null, hooks };
 }
 
 function priceOnlyTtmFallback(bundle: BrandEnrichmentBundle): number | null {
