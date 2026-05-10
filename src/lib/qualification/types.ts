@@ -86,15 +86,44 @@ export type ChannelPattern =
   | "subsidiary_of_giant"
   | string;
 
+/**
+ * Phase 57 — Pitch Math is computed server-side from canonical economics
+ * functions (`computeLegionEconomics` for opportunity-mode brands,
+ * `computeBenchmarkEconomics` for Segment 2 / tight-mode brands). The
+ * narrative LLM no longer touches this field — it produces narrative
+ * markdown only. The 100% recapture story is non-negotiable: every
+ * reseller is removed in Phase 1, so the recoverable slice equals the
+ * reseller-controlled slice.
+ *
+ * Legacy LLM-emitted keys (recoverable_share_pct, blended_margin_*,
+ * defensible_pitch_number_usd, reasoning) are removed. The backfill
+ * script overwrites historical rows with the canonical shape.
+ */
 export interface PitchMath {
-  recoverable_share_pct: number | null;
-  recoverable_revenue_usd: number | null;
-  blended_margin_low: number | null;
-  blended_margin_high: number | null;
-  incremental_profit_low_usd: number | null;
-  incremental_profit_high_usd: number | null;
-  defensible_pitch_number_usd: number | null;
-  reasoning: string | null;
+  ttm_revenue_usd: number;
+  /** Share of revenue currently flowing through resellers (0..1). For
+   *  Segment 2 (authorized_network_healthy) brands this is the authorized
+   *  share — same canonical input either way. */
+  reseller_controlled_share: number;
+  /** TTM revenue × reseller_controlled_share. */
+  reseller_controlled_revenue_usd: number;
+  /** 100% of reseller_controlled_revenue_usd — RCG removes every reseller. */
+  recoverable_revenue_usd: number;
+  /** Current reseller-controlled-state net margin (LEGION_DEFAULTS.reseller_net_margin_pct = 0.105). */
+  current_profit_margin: number;
+  /** Post-Phase-1 brand-controlled-state margin (LEGION_DEFAULTS.current_profit_margin_pct = 0.20). */
+  post_capture_profit_margin: number;
+  /** TTM revenue × current_profit_margin. */
+  current_annual_profit_usd: number;
+  /** TTM revenue × post_capture_profit_margin. */
+  post_capture_annual_profit_usd: number;
+  /** post_capture_annual_profit_usd − current_annual_profit_usd ("profit doubled" math). */
+  delta_profit_usd: number;
+  /** Exit-lift @ EBITDA multiple — passthrough from the canonical economics function. */
+  exit_lift_usd: number;
+  /** Which canonical function this came from. Hard-coded; the LLM cannot
+   *  set it. Renderers may key off this for the tight-mode card variant. */
+  source: "computeLegionEconomics" | "computeBenchmarkEconomics";
 }
 
 export interface QualificationRow {

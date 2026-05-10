@@ -79,6 +79,43 @@ export interface IcpVars {
   computed_qualified: string;
 }
 
+/**
+ * Phase 57 — 100% recapture rule. The previous narrative prompt asked the
+ * LLM to produce a `pitch_math` JSON with `recoverable_share_pct: 65`
+ * and free-text "industry-standard reclaim is 60-70%" justification.
+ * That contradicted RCG's actual offer (every reseller removed in
+ * Phase 1 → 100% recapture). The narrative is now markdown-only;
+ * `pitch_math` is computed server-side from canonical economics.
+ */
+const PITCH_MATH_RULES_BLOCK = `RCG RECOVERS 100% OF RESELLER-CONTROLLED REVENUE.
+
+The RCG offer is to take the full channel — every reseller is removed (unauthorized through enforcement, authorized through wholesale terms). The brand owns 100% of the buy box at the end of Phase 1. There is no discount factor, no industry-standard reclaim percentage, no partial-recovery ceiling.
+
+FORBIDDEN PHRASES — never write any of these:
+- "industry-standard reclaim is X%"
+- "achievable reclaim"
+- "achievable recovery"
+- "realistic capture share"
+- "realistic capture rate"
+- "recapturable portion"
+- "recoverable share"
+- "X% can be recovered"
+- "typical recovery rate"
+- "blended capture ratio"
+- ANY sentence that implies the brand can only get back some-but-not-all of what is currently leaking
+
+FORBIDDEN MATH — never compute or supply:
+- A recoverable_revenue figure smaller than the reseller-controlled revenue
+- A recoverable_share less than 100%
+- A blended margin range — the canonical margin constants are 10.5% (current reseller-controlled state) and 20% (post-RCG-capture brand-controlled state). DO NOT supply margin numbers in the narrative; they are computed elsewhere and will be displayed in the UI.
+
+You may describe the QUALITATIVE story:
+- "Today, resellers control X% of sales."
+- "After Phase 1, the brand controls 100% of sales."
+- "Profit doubles on the same revenue base because the brand keeps the full margin instead of sharing it with resellers."
+
+But you may not produce numerical estimates of margin, reclaim ratio, or recoverable revenue. Those numbers are computed by canonical economics functions and rendered server-side.`;
+
 const HARD_RULES_BLOCK = `HARD RULES — INTERNALIZE BEFORE REASONING:
 
 WHO RCG SELLS TO (positive ICP):
@@ -195,6 +232,8 @@ export function narrativePrompt(vars: NarrativeVars): {
 } {
   const system = `${HARD_RULES_BLOCK}
 
+${PITCH_MATH_RULES_BLOCK}
+
 You are writing an analyst memo for Steve, the operator of a small Amazon
 channel-control consulting practice (Rolle Consulting Group). Steve is reviewing
 a brand we've already disambiguated, screened against ICP, and generated outreach
@@ -271,13 +310,15 @@ CONTENT — QUALIFIED BRANDS
    Bath & Body Works").
 4. "Hard truth" calibration when standard pitch math doesn't fully apply
    (e.g. trademark-holder mismatch, dominant single legitimate seller).
-5. Pitch math revision in prose: recoverable share %, conservative reclaim %
-   (60-70% is the industry standard with Brand Registry + MAP + test-buy
-   takedowns), revenue moved, listing/A+/ad lift %, blended margin range,
-   incremental annual profit range, defensible pitch number.
+5. Qualitative capture story (NO NUMBERS — the Pitch Math card renders the
+   canonical numbers separately). Describe who controls the channel today,
+   what the brand owns after Phase 1 (100%), and that profit doubles on the
+   same revenue base because the brand keeps the full margin instead of
+   sharing it with resellers. Do NOT estimate recoverable %, blended
+   margin, or pitch dollars in prose — those are rendered server-side.
 6. Strongest hook framing: which angle Steve should lead with for outreach.
-7. Close with **Recommendation**: pursue / pursue with calibrated pitch / pursue
-   with caveats. Specific dollar number to anchor outreach on.
+7. Close with **Recommendation**: pursue / pursue with caveats. Reference
+   the Pitch Math card for the dollar anchor — do not invent a number.
 
 BRAND-ASSOCIATED SELLERS (separate structured field)
 Look at the seller list. Flag ANY seller that is likely:
@@ -302,17 +343,11 @@ Choose ONE short snake_case tag: dealer_led_oem, split_ip_split_ops,
 independent_owner_operator, pe_holdco, subsidiary_of_giant. Or null if no
 obvious pattern. This is for grouping/filtering later, not the user copy.
 
-PITCH MATH (qualified only — set to null when disqualified or needs_review)
-Numbers must be derivable from the TTM revenue + brand-controlled share already
-provided. Do NOT invent. If you cannot derive a number, leave it null.
-- recoverable_share_pct: % of revenue currently leaking to unauthorized resellers
-  that can be reclaimed (60-70% is the industry-standard reclaim rate)
-- recoverable_revenue_usd: dollar value of that recoverable slice
-- blended_margin_low / blended_margin_high: net margin range after FBA/ads
-  (typical apothecary/cosmetics 15-25%; vary by category)
-- incremental_profit_low_usd / incremental_profit_high_usd
-- defensible_pitch_number_usd: the conservative number to anchor outreach on
-- reasoning: 1-2 sentences explaining the assumptions
+PITCH MATH — DO NOT EMIT. Phase 57 removed pitch_math from your output.
+The qualification pipeline computes pitch_math server-side from canonical
+economics functions (computeLegionEconomics / computeBenchmarkEconomics)
+and persists it directly. Your job is the narrative_markdown only. Any
+pitch_math you emit will be discarded.
 
 OUTPUT — STRICT JSON
 {
@@ -323,17 +358,7 @@ OUTPUT — STRICT JSON
   "false_positive_flags": [
     { "flag": "short label", "explanation": "1-2 sentences" }
   ],
-  "channel_pattern": "dealer_led_oem|split_ip_split_ops|independent_owner_operator|pe_holdco|subsidiary_of_giant|null",
-  "pitch_math": null | {
-    "recoverable_share_pct": number|null,
-    "recoverable_revenue_usd": number|null,
-    "blended_margin_low": number|null,
-    "blended_margin_high": number|null,
-    "incremental_profit_low_usd": number|null,
-    "incremental_profit_high_usd": number|null,
-    "defensible_pitch_number_usd": number|null,
-    "reasoning": "string|null"
-  }
+  "channel_pattern": "dealer_led_oem|split_ip_split_ops|independent_owner_operator|pe_holdco|subsidiary_of_giant|null"
 }`;
 
   const user = `Brand: ${vars.brand_name}

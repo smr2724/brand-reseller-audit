@@ -51,15 +51,21 @@ interface FalsePositiveFlag {
   explanation: string;
 }
 
+// Phase 57 — Pitch Math is now computed server-side from canonical
+// economics functions. The LLM no longer touches this field; the shape
+// here is the new canonical projection (100% recapture).
 interface PitchMath {
-  recoverable_share_pct: number | null;
-  recoverable_revenue_usd: number | null;
-  blended_margin_low: number | null;
-  blended_margin_high: number | null;
-  incremental_profit_low_usd: number | null;
-  incremental_profit_high_usd: number | null;
-  defensible_pitch_number_usd: number | null;
-  reasoning: string | null;
+  ttm_revenue_usd: number;
+  reseller_controlled_share: number;
+  reseller_controlled_revenue_usd: number;
+  recoverable_revenue_usd: number;
+  current_profit_margin: number;
+  post_capture_profit_margin: number;
+  current_annual_profit_usd: number;
+  post_capture_annual_profit_usd: number;
+  delta_profit_usd: number;
+  exit_lift_usd: number;
+  source: "computeLegionEconomics" | "computeBenchmarkEconomics";
 }
 
 interface QualificationRow {
@@ -726,56 +732,122 @@ function FalsePositiveFlagsCard({
   );
 }
 
+/**
+ * Phase 57 — Pitch Math card, 100% recapture framing. The card mirrors
+ * the canonical server-computed `pitch_math` object. Tight-mode brands
+ * (Segment 2 → `computeBenchmarkEconomics`) get a soft framing line so
+ * the reader knows the math reflects "if the authorized network were
+ * transitioned and the brand controlled 100% of sales."
+ */
 function PitchMathCard({ math }: { math: PitchMath }) {
-  const fmtUsd = (v: number | null) =>
-    v == null ? "—" : `$${Math.round(v).toLocaleString("en-US")}`;
-  const fmtPct = (v: number | null) =>
-    v == null ? "—" : `${(v * (v <= 1 ? 100 : 1)).toFixed(0)}%`;
-  const marginRange =
-    math.blended_margin_low == null && math.blended_margin_high == null
-      ? "—"
-      : `${fmtPct(math.blended_margin_low)} – ${fmtPct(math.blended_margin_high)}`;
-  const profitRange =
-    math.incremental_profit_low_usd == null &&
-    math.incremental_profit_high_usd == null
-      ? "—"
-      : `${fmtUsd(math.incremental_profit_low_usd)} – ${fmtUsd(math.incremental_profit_high_usd)}`;
+  const fmtUsd = (v: number) =>
+    !Number.isFinite(v) ? "—" : `$${Math.round(v).toLocaleString("en-US")}`;
+  const fmtPctFromFrac = (v: number) =>
+    !Number.isFinite(v) ? "—" : `${Math.round(v * 100)}%`;
+  const fmtMarginPct = (v: number) =>
+    !Number.isFinite(v) ? "—" : `${(v * 100).toFixed(1)}%`;
+  const isTight = math.source === "computeBenchmarkEconomics";
+  const recapShareLabel = isTight
+    ? "Currently controlled by authorized resellers"
+    : "Currently controlled by resellers";
+  const currentProfitLabel = isTight
+    ? "Current profit (authorized-network state)"
+    : "Current profit (reseller-controlled)";
+  const postProfitLabel = isTight
+    ? "Post-transition profit (brand-controlled)"
+    : "Post-Phase-1 profit (brand-controlled)";
+
   return (
     <div className="rounded border border-green-700/60 bg-green-900/15 p-4 mb-3">
-      <div className="text-xs uppercase text-green-300 mb-2">Pitch math</div>
-      <div className="grid sm:grid-cols-2 gap-3 text-sm">
+      <div className="text-xs uppercase text-green-300 mb-3">Pitch math</div>
+
+      <div className="space-y-1 text-sm">
+        <Row label="TTM Amazon revenue" value={fmtUsd(math.ttm_revenue_usd)} />
+        <Row
+          label={recapShareLabel}
+          value={fmtPctFromFrac(math.reseller_controlled_share)}
+        />
+      </div>
+
+      <div className="my-3 border-t border-green-700/40" />
+
+      <div className="space-y-1 text-sm">
+        <Row label="RCG Phase 1 recapture" value="100%" />
+        <Row label="Recoverable revenue" value={fmtUsd(math.recoverable_revenue_usd)} />
+      </div>
+
+      <div className="my-3 border-t border-green-700/40" />
+
+      <div className="space-y-1 text-sm">
+        <Row
+          label={currentProfitLabel}
+          value={fmtUsd(math.current_annual_profit_usd)}
+          sub={`($${Math.round(math.ttm_revenue_usd).toLocaleString("en-US")} × ${fmtMarginPct(math.current_profit_margin)})`}
+        />
+        <Row
+          label={postProfitLabel}
+          value={fmtUsd(math.post_capture_annual_profit_usd)}
+          sub={`($${Math.round(math.ttm_revenue_usd).toLocaleString("en-US")} × ${fmtMarginPct(math.post_capture_profit_margin)})`}
+        />
+      </div>
+
+      <div className="my-3 border-t border-green-700/40" />
+
+      <div className="grid sm:grid-cols-2 gap-3">
         <div>
-          <div className="text-xs text-[var(--text-muted)]">Recoverable share</div>
-          <div className="font-medium">{fmtPct(math.recoverable_share_pct)}</div>
-        </div>
-        <div>
-          <div className="text-xs text-[var(--text-muted)]">Recoverable revenue</div>
-          <div className="font-medium">{fmtUsd(math.recoverable_revenue_usd)}</div>
-        </div>
-        <div>
-          <div className="text-xs text-[var(--text-muted)]">Blended margin range</div>
-          <div className="font-medium">{marginRange}</div>
-        </div>
-        <div>
-          <div className="text-xs text-[var(--text-muted)]">
-            Incremental annual profit
+          <div className="text-xs text-green-300/80 uppercase">
+            Δ profit (the &quot;doubled&quot; number)
           </div>
-          <div className="font-medium">{profitRange}</div>
+          <div className="text-2xl font-semibold text-green-100">
+            {fmtUsd(math.delta_profit_usd)}
+            <span className="text-xs font-normal text-green-200/70">/year</span>
+          </div>
+        </div>
+        <div>
+          <div className="text-xs text-green-300/80 uppercase">
+            Exit lift @ 7× EBITDA
+          </div>
+          <div className="text-2xl font-semibold text-green-100">
+            {fmtUsd(math.exit_lift_usd)}
+          </div>
         </div>
       </div>
-      <div className="mt-3 pt-3 border-t border-green-700/40">
-        <div className="text-xs text-green-300/80 uppercase">
-          Defensible pitch number
+
+      {isTight && (
+        <div className="mt-3 text-xs text-green-200/70 italic">
+          Math reflects the brand controlling 100% of sales after authorized
+          resellers transition. Phase 2 still requires direct brand control of
+          the channel.
         </div>
-        <div className="text-2xl font-semibold text-green-100">
-          {fmtUsd(math.defensible_pitch_number_usd)}
-        </div>
-        {math.reasoning && (
-          <div className="text-xs text-[var(--text-muted)] mt-2">
-            {math.reasoning}
-          </div>
+      )}
+
+      <div className="mt-3 text-[10px] text-[var(--text-muted)] tracking-wide uppercase">
+        Source: {math.source} (canonical)
+      </div>
+    </div>
+  );
+}
+
+function Row({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <div className="text-[var(--text-muted)]">
+        {label}
+        {sub && (
+          <span className="ml-2 text-xs text-[var(--text-muted)] opacity-70">
+            {sub}
+          </span>
         )}
       </div>
+      <div className="font-medium tabular-nums">{value}</div>
     </div>
   );
 }

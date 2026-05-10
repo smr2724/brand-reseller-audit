@@ -17,6 +17,8 @@ import {
   narrativePrompt,
 } from "./prompts";
 import { computeSegment, type Segment } from "./segments";
+import { computePitchMath } from "./pitch-math";
+import { sanitizeNarrativeMarkdown } from "./narrative-sanitizer";
 import type {
   BrandAssociatedSeller,
   CandidateEntity,
@@ -458,12 +460,16 @@ export async function runQualification(
     totalTokensIn += r.tokens_in;
     totalTokensOut += r.tokens_out;
     totalCost += estimateCost(DEFAULT_MAIN_MODEL, r.tokens_in, r.tokens_out);
+    // Phase 57 — `pitch_math` is no longer accepted from the LLM. The
+    // narrative prompt forbids it; we compute the canonical pitch_math
+    // server-side below using `computeLegionEconomics` /
+    // `computeBenchmarkEconomics`. Any pitch_math the LLM still emits is
+    // silently discarded.
     const parsed = r.parsed as {
       narrative_markdown?: string;
       brand_associated_sellers?: BrandAssociatedSeller[];
       false_positive_flags?: FalsePositiveFlag[];
       channel_pattern?: string | null;
-      pitch_math?: PitchMath | null;
     };
     if (typeof parsed?.narrative_markdown === "string") {
       const md = parsed.narrative_markdown.trim();
@@ -507,16 +513,41 @@ export async function runQualification(
         );
       }
     }
-    if (
-      icp_verdict === "qualified" &&
-      parsed?.pitch_math &&
-      typeof parsed.pitch_math === "object"
-    ) {
-      pitch_math = parsed.pitch_math;
-    }
   } catch (e) {
     // Non-fatal — leave narrative null, legacy short reasoning still renders.
     if (!llmError) llmError = e instanceof Error ? e.message : String(e);
+  }
+
+  // Phase 57 — sanitize the narrative for partial-reclaim hedging. If
+  // any forbidden phrase landed (the LLM is supposed to refuse, but the
+  // sanitizer is the backstop) we substitute the sentence with a pointer
+  // to the Pitch Math card and log the removed text into error_message.
+  let sanitizer_removals: string[] = [];
+  if (narrative_markdown) {
+    const sanitized = sanitizeNarrativeMarkdown(narrative_markdown);
+    if (sanitized.removed.length > 0) {
+      narrative_markdown = sanitized.cleaned;
+      sanitizer_removals = sanitized.removed;
+      console.warn(
+        "[qualification] narrative_markdown tripped reclaim sanitizer",
+        brandId,
+        { removed: sanitized.removed },
+      );
+    }
+  }
+
+  // Phase 57 — server-compute pitch_math from the canonical economics
+  // functions. For tight-mode (Segment 2) brands the share is the
+  // authorized slice; for every other qualified segment the share is the
+  // unauthorized reseller slice (which is what RCG removes in Phase 1).
+  if (icp_verdict === "qualified" && finalSegment.qualified) {
+    const isTight = finalSegment.segment === "authorized_network_healthy";
+    const resellerControlledShare = isTight ? shares.authorized : shares.unauthorized;
+    pitch_math = computePitchMath({
+      ttm_revenue_usd: ttm,
+      reseller_controlled_share: resellerControlledShare,
+      segment: finalSegment.segment,
+    });
   }
 
   // 7b. Phase 51 — verdict reconciliation belt-and-suspenders.
@@ -604,7 +635,10 @@ export async function runQualification(
     uspto_called: !!uspto?.called,
     total_cost_usd: Number(totalCost.toFixed(4)),
     state: "complete" as const,
-    error_message: llmError,
+    error_message:
+      sanitizer_removals.length > 0
+        ? `${llmError ? llmError + " | " : ""}reclaim_sanitizer_removed: ${JSON.stringify(sanitizer_removals).slice(0, 800)}`
+        : llmError,
     updated_at: nowIso,
   };
 
