@@ -929,124 +929,11 @@ function ExecutiveSummaryPage({
   );
 }
 
-function ChannelControlPage({
-  narrative,
-  brand,
-  bundle,
-  derived,
-  confSellerControl,
-}: {
-  narrative: NarrativeV2;
-  brand: BrandForReport;
-  bundle: BrandEnrichmentBundle | null;
-  derived: DerivedSnapshot;
-  confSellerControl: ConfidenceLabel;
-}) {
-  const sellers = narrative.reseller_reality.top_sellers ?? [];
-  const top = pickTopReseller(narrative, derived);
-  const topShare = pickTopResellerShare(narrative, derived);
-  const sellerCount = bundle?.keepa?.unique_seller_count ?? sellers.length ?? null;
-  const asinsWithReseller = sellers
-    .filter((s) => {
-      const cls = lookupClassification(derived, s);
-      return cls === "reseller" || (cls == null && s.is_brand_controlled === false);
-    })
-    .reduce((sum, s) => sum + (s.asins_won ?? 0), 0);
-  return (
-    <Page size="LETTER" style={styles.page}>
-      <SectionHead
-        eyebrow="The Channel Control Problem"
-        title="Your Amazon channel appears to be controlled by resellers"
-      />
-      <Text style={styles.prose}>
-        Amazon may already be a meaningful channel for {brand.name}. The problem is that the channel does not appear to be operated by {brand.name} directly.
-      </Text>
-      <Text style={styles.proseCallout}>
-        <Text style={styles.bold}>You may already have a meaningful Amazon business. The issue is that someone else appears to be operating it.</Text>
-      </Text>
+// Phase 58 — ChannelControlPage removed entirely. The persuasive
+// argument it carried lives in the new Reseller Reality consolidation
+// page above.
 
-      <View style={styles.channelGrid}>
-        <ChannelCard
-          label="Brand-controlled buy box"
-          value={`${Math.round(derived.non_reseller_share * 100)}%`}
-          tone="good"
-          confidence={confSellerControl}
-        />
-        <ChannelCard
-          label="Reseller-controlled buy box"
-          value={`${Math.round(derived.reseller_share * 100)}%`}
-          tone="warn"
-          confidence={confSellerControl}
-        />
-        <ChannelCard
-          label="Top reseller"
-          value={top ?? "— not measured"}
-          sub={
-            topShare != null
-              ? `~${Math.round(topShare * 100)}% buy-box share`
-              : null
-          }
-        />
-        <ChannelCard
-          label="Observed sellers"
-          value={sellerCount != null ? String(sellerCount) : "— not measured"}
-        />
-        <ChannelCard
-          label="ASINs with reseller activity"
-          value={asinsWithReseller > 0 ? String(asinsWithReseller) : "— not measured"}
-        />
-        <ChannelCard
-          label="Brand-owned Amazon presence"
-          value={derived.shares.brand_owned > 0 ? "Yes" : "Unknown"}
-          sub="Confirm with your team"
-        />
-      </View>
-
-      <BuyBoxPanel
-        derived={derived}
-        legacyPct={bundle?.keepa?.brand_controlled_pct ?? null}
-      />
-
-      <PageFooter label="Channel Control" brandName={brand.name} />
-    </Page>
-  );
-}
-
-function CustomerExperiencePage({ brand }: { brand: BrandForReport }) {
-  return (
-    <Page size="LETTER" style={styles.page}>
-      <SectionHead
-        eyebrow="The Customer Experience Problem"
-        title="It's not just margin — it's brand control"
-      />
-      <Text style={styles.prose}>
-        This is not just a reseller margin problem. It is a brand control problem. When third-party sellers control the channel, they influence pricing, packaging, availability, listing quality, customer expectations, and the buying experience. They may benefit from the demand your brand created without investing in the long-term health of the brand.
-      </Text>
-      <Text style={styles.prose}>
-        Resellers can sell product. But they rarely represent the brand the way the brand owner would.
-      </Text>
-      <View style={styles.card}>
-        <Text style={styles.h3}>Typical customer experience risks when resellers control the channel</Text>
-        <BulletList
-          items={[
-            "Inconsistent pricing across listings",
-            "Inconsistent packaging and product configurations",
-            "Outdated or incomplete listings",
-            "Poor images, weak content, and missing A+ pages",
-            "Inventory inconsistency and stock-outs",
-            "Customer confusion about which listing is “official”",
-            "Bad reviews caused by the wrong seller experience",
-            "Lack of long-term brand investment from third parties",
-          ]}
-        />
-      </View>
-      <Text style={styles.proseCallout}>
-        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.customerExperience} That is what allowed the Amazon channel to scale — relevant for {brand.name} too. ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
-      </Text>
-      <PageFooter label="Customer Experience" brandName={brand.name} />
-    </Page>
-  );
-}
+// Phase 58 — CustomerExperiencePage removed entirely.
 
 function TopProductsPage({
   narrative,
@@ -1065,7 +952,7 @@ function TopProductsPage({
   return (
     <Page size="LETTER" style={styles.page}>
       <SectionHead
-        eyebrow="Evidence Snapshot · Top Marketplace Signals"
+        eyebrow="Top Products"
         title="Where the demand sits — and what each listing looks like"
         source="Keepa /product · BSR + price · 365-day avg"
       />
@@ -1079,12 +966,8 @@ function TopProductsPage({
       {sorted.map((a) => (
         <AsinScoreRow key={a.asin} score={a} />
       ))}
-      {cx.whats_broken.length > 0 && (
-        <View style={[styles.card, { marginTop: 10 }]}>
-          <Text style={styles.h3}>What&apos;s broken right now</Text>
-          <BulletList items={cx.whats_broken.map((c, i) => <Text key={i} style={styles.bulletText}>{c}</Text>)} />
-        </View>
-      )}
+      {/* Phase 58 — "What's broken right now" block removed across all
+          modes that previously rendered it. */}
       <Text style={[styles.small, { marginTop: 8 }]}>
         Per-ASIN revenue and units are directional estimates from Keepa BSR + buy-box price (365-day avg). Replace with seller&apos;s actual TTM during diligence.
       </Text>
@@ -1295,179 +1178,59 @@ function ResellerRealityPage({
   );
 }
 
-function ResellerDossierPage({
-  narrative,
-  brand,
-  derived,
-}: {
-  narrative: NarrativeV2;
-  brand: BrandForReport;
-  derived: DerivedSnapshot;
-}) {
-  const d = narrative.reseller_dossier;
-  const dossierIsReseller = (() => {
-    if (!d) return false;
-    const synthetic: ResellerRow = {
-      rank: 0,
-      seller_name: d.seller_name,
-      share_pct: d.share_pct ?? null,
-      asins_won: d.asins_won ?? null,
-      is_fba: d.is_fba ?? null,
-      country: d.country ?? null,
-    };
-    const cls = lookupClassification(derived, synthetic);
-    if (cls === "reseller") return true;
-    if (cls == null) return true;
-    return false;
-  })();
-  const filteredDossier = dossierIsReseller ? d : null;
-  const friendly = filteredDossier ? friendlySellerName(filteredDossier.seller_name) : null;
-  const resellerSellers = (narrative.reseller_reality.top_sellers ?? []).filter((s) => {
-    const cls = lookupClassification(derived, s);
-    if (cls === "reseller") return true;
-    if (cls == null && s.is_brand_controlled === false) return true;
-    return false;
-  });
-  // Phase 47 — Module 3 hook: geographic_diversion (PDF parity).
-  const geoHook = pickHook(
-    narrative.qualification,
-    "geographic_diversion",
-    derived.is_tight_channel,
-  );
-  const intlResellers = geoHook
-    ? resellerSellers.filter((s) => {
-        const c = (s.country ?? "").trim().toUpperCase();
-        return c && c !== "US" && c !== "USA" && c !== "UNITED STATES";
-      })
-    : [];
+// ====================================================================
+// Phase 58 — Reseller Reality (consolidation prose)
+//
+// Persuasion centerpiece for `reseller_controlled` mode. Verbatim copy
+// approved by the user — do not paraphrase, shorten, or "improve" it.
+// Mirrors `SectionResellerRealityConsolidation` in web.tsx: standalone
+// "Then we did the math." beat, bold Phase 1 / Phase 2, italicized
+// closing questions.
+// ====================================================================
+
+function ResellerRealityConsolidationPage({ brand }: { brand: BrandForReport }) {
   return (
-    <Page size="LETTER" style={styles.page}>
+    <Page size="LETTER" style={styles.page} wrap>
       <SectionHead
-        eyebrow="Did You Authorize These Sellers?"
-        title={filteredDossier ? `Inside ${friendly}` : "Reseller dossier"}
-        source="Keepa · seller profile · filtered to your reseller classifications"
+        eyebrow="Reseller Reality"
+        title="The question isn't whether your resellers are authorized — it's whether your channel is consolidated."
       />
-      {geoHook && (
-        <View style={styles.bannerWarn}>
-          <Text>
-            <Text style={styles.bold}>Geographic diversion:</Text> {geoHook.hook_text}
-          </Text>
-          {intlResellers.length > 0 && (
-            <View style={{ marginTop: 4 }}>
-              {intlResellers.slice(0, 6).map((s, i) => (
-                <Text key={`geo-${i}`} style={styles.small}>
-                  • {s.seller_name}
-                  {s.country ? ` — ${s.country}` : ""}
-                </Text>
-              ))}
-            </View>
-          )}
-          {geoHook.evidence ? (
-            <Text style={[styles.small, { marginTop: 4 }]}>{geoHook.evidence}</Text>
-          ) : null}
-        </View>
-      )}
-      {filteredDossier ? (
-        <>
-          <View style={styles.factGrid}>
-            <View style={styles.fact}>
-              <Text style={styles.factLbl}>Seller name</Text>
-              <Text style={styles.factVal}>{friendly ?? filteredDossier.seller_name}</Text>
-            </View>
-            <View style={styles.fact}>
-              <Text style={styles.factLbl}>Marketplace ID</Text>
-              <Text style={styles.factVal}>{filteredDossier.seller_id ?? "— not measured"}</Text>
-            </View>
-            <View style={styles.fact}>
-              <Text style={styles.factLbl}>Country</Text>
-              <Text style={styles.factVal}>{prettyCountry(filteredDossier.country) ?? "— not measured"}</Text>
-            </View>
-            <View style={styles.fact}>
-              <Text style={styles.factLbl}>Buy-box share</Text>
-              <Text style={styles.factVal}>{pctFmt(filteredDossier.share_pct)}</Text>
-            </View>
-            <View style={styles.fact}>
-              <Text style={styles.factLbl}>ASINs won</Text>
-              <Text style={styles.factVal}>{filteredDossier.asins_won != null ? String(filteredDossier.asins_won) : "— not measured"}</Text>
-            </View>
-            <View style={styles.fact}>
-              <Text style={styles.factLbl}>Fulfilment</Text>
-              <Text style={styles.factVal}>{filteredDossier.fulfilment_mix}</Text>
-            </View>
-            <View style={styles.fact}>
-              <Text style={styles.factLbl}>Authorization status</Text>
-              <Text style={styles.factVal}>Authorization unknown — confirm with your team</Text>
-            </View>
-          </View>
-          {filteredDossier.top_asins.length > 0 && (
-            <View style={[styles.card, { marginTop: 6 }]}>
-              <Text style={styles.h3}>Top ASINs they win</Text>
-              {filteredDossier.top_asins.map((a) => (
-                <Text key={a.asin} style={[styles.body, { fontSize: 9, marginBottom: 2 }]}>
-                  <Text style={[styles.bold, { color: P.gold }]}>{a.asin}</Text>{"  "}
-                  {a.title ? a.title.slice(0, 80) : "— not measured"}
-                  {a.buy_box_price != null ? `  ·  $${Number(a.buy_box_price).toFixed(2)}` : ""}
-                </Text>
-              ))}
-            </View>
-          )}
-          {(() => {
-            // Phase 55 — forensic dossier prose. Suppress entirely
-            // when sanitization fails or the LLM/fallback returned
-            // nothing.
-            const cleaned = sanitizeDossierProse(filteredDossier.risk_profile, {
-              sellerName: friendlySellerName(filteredDossier.seller_name) ?? filteredDossier.seller_name ?? "This seller",
-              sharePct: filteredDossier.share_pct ?? null,
-              asinsWon: filteredDossier.asins_won ?? null,
-            });
-            if (!cleaned) return null;
-            return (
-              <View style={styles.proseCallout}>
-                {paragraphs(cleaned).map((p, i) => (
-                  <Text key={i} style={{ marginBottom: 4 }}>{p}</Text>
-                ))}
-              </View>
-            );
-          })()}
-          {resellerSellers.length > 0 && (
-            <View style={[styles.card, { marginTop: 8 }]}>
-              <Text style={styles.h3}>Sellers to confirm authorization on</Text>
-              {resellerSellers.slice(0, 8).map((s, i) => (
-                <SellerInitialBadge key={`auth-${i}`} name={friendlySellerName(s.seller_name)} />
-              ))}
-              <Text style={[styles.small, { marginTop: 6 }]}>
-                Authorization status should be confirmed with your team. We&apos;ll review which sellers are authorized, which relationships matter, and which accounts should be transitioned, restricted, or monitored.
-              </Text>
-            </View>
-          )}
-        </>
-      ) : derived.is_tight_channel ? (
-        <Text style={styles.body}>
-          No third-party reseller activity to investigate based on your classifications. The channel appears tightly brand-controlled.
-        </Text>
-      ) : resellerSellers.length === 0 ? (
-        <Text style={styles.body}>
-          No third-party reseller activity to investigate based on your classifications.
-        </Text>
-      ) : (
-        <>
-          <Text style={styles.prose}>
-            The dominant share is held by sellers you&apos;ve classified as brand-controlled. Below are the third-party sellers we&apos;d still recommend confirming authorization on:
-          </Text>
-          <View style={styles.card}>
-            {resellerSellers.slice(0, 8).map((s, i) => (
-              <SellerInitialBadge key={`auth2-${i}`} name={friendlySellerName(s.seller_name)} />
-            ))}
-            <Text style={[styles.small, { marginTop: 6 }]}>
-              Authorization status should be confirmed with your team.
-            </Text>
-          </View>
-        </>
-      )}
-      <PageFooter label="Reseller Dossier" brandName={brand.name} />
+      <Text style={styles.prose}>
+        You may already have authorized resellers on Amazon — and you may believe your network is healthy. That belief is reasonable. Most brand owners in your revenue range hold it. None of what we&apos;re about to say is meant to take that away from you.
+      </Text>
+      <Text style={styles.prose}>
+        What we&apos;ve learned, after running this play across dozens of brands, is that the question isn&apos;t whether your resellers are{" "}
+        <Text style={{ fontFamily: "Helvetica-Oblique" }}>authorized</Text>. It&apos;s whether your channel is{" "}
+        <Text style={{ fontFamily: "Helvetica-Oblique" }}>consolidated</Text>. A fragmented seller base — even an authorized one — caps how aggressively the brand itself can invest in the channel. Pricing gets noisy. Listings get edited by people who don&apos;t own the P&amp;L. Advertising dollars compete with sellers who have no incentive to grow the catalog beyond their bestsellers. The brand ends up underwriting an ecosystem instead of running one.
+      </Text>
+      <Text style={styles.prose}>
+        This usually isn&apos;t visible until a brand starts pushing past $5M in revenue. Below that, the math works. Above that, the cracks start showing — and most brand owners assume they&apos;re hitting a ceiling that&apos;s about the product, the category, or the algorithm. It&apos;s almost never any of those things.
+      </Text>
+      <Text style={styles.prose}>
+        The clearest example we have is Diversified Hospitality. When we took over their Amazon channel, we assumed — like they did — that their existing reseller network was their growth engine. They had authorized partners. Sales were steady. Nothing looked broken.
+      </Text>
+      <Text style={styles.prose}>Then we did the math.</Text>
+      <Text style={styles.prose}>
+        The resellers weren&apos;t holding the brand back from $2M to $3M. They were holding the brand back from $2M to $10M. Once we consolidated control — pricing, listings, advertising, inventory positioning, all of it under one cohesive strategy owned by the brand — the channel grew more than 5x. That growth didn&apos;t come from removing bad actors. It came from removing fragmentation. The brand finally had one P&amp;L, one voice, one strategy on Amazon. That&apos;s when the real number showed up.
+      </Text>
+      <Text style={styles.prose}>
+        We think of this as two phases.{" "}
+        <Text style={styles.bold}>Phase 1 is consolidation</Text>: bringing the channel back under the brand&apos;s direct control so the economics stop leaking and the strategy stops competing with itself.{" "}
+        <Text style={styles.bold}>Phase 2 is growth</Text>: running that consolidated channel like a real business, with a dedicated Chief Amazon Officer function, full P&amp;L ownership, and the kind of compounding investment that only makes sense once the brand controls every lever.
+      </Text>
+      <Text style={styles.prose}>
+        If you walk away from this report thinking your reseller network is fine, that&apos;s a fair conclusion to reach. Most brand owners do — until they see what the consolidated version of their own channel looks like. The question we&apos;d leave you with isn&apos;t{" "}
+        <Text style={{ fontFamily: "Helvetica-Oblique" }}>&ldquo;are my resellers a problem?&rdquo;</Text> It&apos;s{" "}
+        <Text style={{ fontFamily: "Helvetica-Oblique" }}>&ldquo;how much growth am I leaving on the table because nobody owns the whole picture?&rdquo;</Text>
+      </Text>
+      <PageFooter label="Reseller Reality" brandName={brand.name} />
     </Page>
   );
 }
+
+// Phase 58 — ResellerDossierPage removed entirely. The "Did You
+// Authorize These Sellers?" and "Top ASINs they win" sub-sections were
+// two of the five removed sections.
 
 function FinancialBridgePage({
   narrative,
@@ -1625,42 +1388,8 @@ function FinancialBridgePage({
   );
 }
 
-function SafeTransitionPage({ brand }: { brand: BrandForReport }) {
-  return (
-    <Page size="LETTER" style={styles.page}>
-      <SectionHead
-        eyebrow="The Safe Path to Taking Control"
-        title="How we reclaim the channel without blowing up wholesale"
-      />
-      <Text style={styles.prose}>
-        The biggest objection to bringing Amazon under brand control is fear of disrupting wholesale relationships. The process below is strategic, careful, and respectful of the relationships that matter.
-      </Text>
-      <Text style={styles.proseCallout}>
-        <Text style={styles.bold}>The goal is not to create a reseller war. The goal is to bring the Amazon customer experience under brand control in a way that protects the business.</Text>
-      </Text>
-      <View style={styles.card}>
-        <BulletList
-          items={[
-            "Identify authorized vs. authorization-unknown sellers",
-            "Review distributor and reseller terms",
-            "Map which relationships matter to the broader business",
-            "Create sell-through windows where needed",
-            "Update future Amazon resale restrictions",
-            "Prepare inventory before transitioning listings",
-            "Avoid customer availability gaps",
-            "Maintain important wholesale relationships where possible",
-            "Transition Amazon toward brand-owned control over 6–12 months",
-            "Monitor listings after transition",
-          ]}
-        />
-      </View>
-      <Text style={styles.small}>
-        We&apos;ll confirm which sellers are authorized, which relationships matter, and which accounts should be transitioned, restricted, or monitored.
-      </Text>
-      <PageFooter label="Safe Transition" brandName={brand.name} />
-    </Page>
-  );
-}
+// Phase 58 — SafeTransitionPage removed; the transition narrative is
+// folded into the Five-Step Framework page.
 
 function FrameworkPage({
   narrative,
@@ -2250,6 +1979,34 @@ function MethodologyPage({
             </Text>,
           ]}
         />
+      </View>
+
+      {/* Phase 58 — Variation handling methodology moved here from
+          mid-report (where it sat next to the top-products grid). */}
+      <View style={styles.card}>
+        <Text style={styles.h3}>Methodology · Variation handling</Text>
+        <Text style={{ fontSize: 10, lineHeight: 1.5, color: P.ink }}>
+          Some ASINs in this brand share a parent listing with sibling
+          variations (e.g. a 4-pack and a 12-pack of the same product).
+          Amazon&apos;s sales rank is often shared across variations, which
+          causes raw third-party sales estimators to over-count sales on
+          inactive variations. We attribute group-level sales to each
+          variation using a combined signal:{" "}
+          <Text style={styles.bold}>recent review activity (last 90 days)</Text>{" "}
+          plus{" "}
+          <Text style={styles.bold}>
+            Buy Box win frequency (how often each variation actually held
+            the Buy Box recently)
+          </Text>
+          . When some siblings have Buy Box history and others don&apos;t, the
+          absence of Buy Box activity is itself evidence the listing hasn&apos;t
+          been selling — those variations correctly receive minimal
+          attributed sales.{" "}
+          <Text style={styles.bold}>
+            These per-ASIN sales numbers are estimates derived from Keepa
+            rank, review, and Buy Box data, not direct sales reporting.
+          </Text>
+        </Text>
       </View>
 
       <Text style={[styles.small, { marginTop: 8 }]}>
@@ -2940,11 +2697,8 @@ function AuditV2Document({
           bundle={bundle ?? null}
           derived={derived}
         />
-        <ResellerDossierPage
-          narrative={narrative}
-          brand={brand}
-          derived={derived}
-        />
+        {/* Phase 58 — ResellerDossierPage removed; "Did You Authorize
+            These Sellers?" / "Top ASINs They Win" gone in all modes. */}
         <TopProductsPage narrative={narrative} brand={brand} maxCards={10} />
         <DiyStepsPage narrative={narrative} brand={brand} />
         <DiyFooterCtaPage narrative={narrative} brand={brand} derived={derived} />
@@ -2954,6 +2708,13 @@ function AuditV2Document({
     );
   }
 
+  // Phase 58 — opportunity-mode ordering:
+  //   Hero → Exec Summary → Reseller Reality (new consolidation prose
+  //   for reseller_controlled; existing data-led page for other segments)
+  //   → Financial Opportunity → Five-Step Framework → Phase 2 →
+  //   Diversified case study → Why Steve / RCG → CTA → Methodology.
+  // The Channel Control, Top Products (Evidence Snapshot), CX, Safe
+  // Transition, and Reseller Dossier pages were dropped.
   return (
     <Document>
       <HeroPage
@@ -2977,26 +2738,16 @@ function AuditV2Document({
         revenue={revenueValue}
         profit={profitOpportunity}
       />
-      <ChannelControlPage
-        narrative={narrative}
-        brand={brand}
-        bundle={bundle ?? null}
-        derived={derived}
-        confSellerControl={confSellerControl}
-      />
-      <CustomerExperiencePage brand={brand} />
-      <TopProductsPage narrative={narrative} brand={brand} maxCards={10} />
-      <ResellerRealityPage
-        narrative={narrative}
-        brand={brand}
-        bundle={bundle ?? null}
-        derived={derived}
-      />
-      <ResellerDossierPage
-        narrative={narrative}
-        brand={brand}
-        derived={derived}
-      />
+      {segment === "reseller_controlled" ? (
+        <ResellerRealityConsolidationPage brand={brand} />
+      ) : (
+        <ResellerRealityPage
+          narrative={narrative}
+          brand={brand}
+          bundle={bundle ?? null}
+          derived={derived}
+        />
+      )}
       <FinancialBridgePage
         narrative={narrative}
         brand={brand}
@@ -3006,11 +2757,10 @@ function AuditV2Document({
         assumptions={a}
         revenueBadge={revenueBadge}
       />
-      <SafeTransitionPage brand={brand} />
       <FrameworkPage narrative={narrative} brand={brand} derived={derived} />
       <PhaseTwoPage brand={brand} />
-      <WhySteveRollePage brand={brand} />
       <CaseStudyDiversifiedHospitalityPage brand={brand} />
+      <WhySteveRollePage brand={brand} />
       <CtaPage narrative={narrative} brand={brand} />
       <MethodologyPage narrative={narrative} brand={brand} />
       <DisclaimerPage brand={brand} />

@@ -292,7 +292,9 @@ export function PublicReportV2({
           <>
             <SectionDiyCover narrative={narrative} brand={brand} />
             <SectionResellerReality narrative={narrative} bundle={bundle} derived={derived} />
-            <SectionResellerDossier narrative={narrative} derived={derived} />
+            {/* Phase 58 — SectionResellerDossier removed; "Did You Authorize
+                These Sellers?" / "Top ASINs They Win" copy is gone in all
+                modes that previously rendered it. */}
             <SectionTopProducts narrative={narrative} />
             <SectionDiySteps narrative={narrative} brand={brand} />
             <SectionDiyFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} derived={derived} />
@@ -301,6 +303,15 @@ export function PublicReportV2({
           </>
         ) : (
           <>
+            {/* Phase 58 — Section ordering:
+                Cover → Exec Summary → Reseller Reality → Financial
+                Opportunity → Five-Step Framework → Phase 2 → Diversified
+                case study → Why Steve / RCG → CTA → Methodology. The
+                Channel Control, Top Products (Evidence Snapshot), and
+                Reseller Dossier ("Did You Authorize These Sellers?")
+                sections were removed in Phase 58, and the Financial
+                Opportunity static bridge body was deduped — only the
+                expandable math card remains. */}
             {/* 1. Hero / Executive Punch */}
             <SectionCover
               narrative={narrative}
@@ -320,25 +331,16 @@ export function PublicReportV2({
               brand={brand}
               derived={derived}
             />
-            {/* 3. Channel Control Problem */}
-            <SectionChannelControl
-              narrative={narrative}
-              brand={brand}
-              bundle={bundle}
-              derived={derived}
-              confSellerControl={confSellerControl}
-            />
-            {/* 4. Customer Experience Problem */}
-            <SectionCustomerExperience brand={brand} />
-            {/* 5. Evidence — top products surfaces ASINs in the main body
-                before the dossier dives into a single seller. Per the
-                executive spec, the reader should see the top 5–10 ASINs
-                right after CX, then the reseller landscape, then the
-                single-seller dossier. */}
-            <SectionTopProducts narrative={narrative} />
-            <SectionResellerReality narrative={narrative} bundle={bundle} derived={derived} />
-            <SectionResellerDossier narrative={narrative} derived={derived} />
-            {/* 6. Financial Opportunity (line-by-line bridge) */}
+            {/* 3. Reseller Reality — the persuasion fulcrum. The new
+                Phase 58 consolidation prose is reseller_controlled only.
+                Other segments (mixed_control, legacy) keep the existing
+                data-led Reseller Reality. */}
+            {segment === "reseller_controlled" ? (
+              <SectionResellerRealityConsolidation />
+            ) : (
+              <SectionResellerReality narrative={narrative} bundle={bundle} derived={derived} />
+            )}
+            {/* 4. Financial Opportunity — expandable math card only */}
             <LegionMathSection
               reportToken={reportToken}
               reportGeneratedAt={narrative.generated_at ?? null}
@@ -356,18 +358,17 @@ export function PublicReportV2({
               revenueConfirmedSource={revenueConfirmedSource}
               revenueEstimatorSuggestion={revenueEstimatorSuggestion}
             />
-            {/* 7. Safe Transition Plan */}
-            <SectionSafeTransition />
-            {/* 8. Five-Step Framework */}
+            {/* 5. Five-Step Framework */}
             <SectionPlan narrative={narrative} derived={derived} />
-            {/* 8.5 Phase 54 — Phase 2 / fractional CAO */}
+            {/* 6. Phase 2 / fractional CAO */}
             <SectionPhaseTwo brand={brand} />
-            {/* 9. Why Steve / RCG */}
-            <SectionWhySteveRolle />
-            {/* 9.5 Phase 44 — Diversified Hospitality case study (opportunity-only) */}
+            {/* 7. Diversified Hospitality case study */}
             <SectionCaseStudyDiversifiedHospitality brand={brand} />
+            {/* 8. Why Steve / RCG */}
+            <SectionWhySteveRolle />
+            {/* 9. CTA */}
             <SectionFooterCta narrative={narrative} brand={brand} pdfUrl={pdfUrl} callHref={callHref} />
-            {/* 10. Methodology Appendix (collapsible, low) */}
+            {/* 10. Methodology Appendix (now hosts variation handling) */}
             <SectionMethodology narrative={narrative} brand={brand} />
             {/* 11. Disclaimer */}
             <SectionDisclaimer />
@@ -462,7 +463,6 @@ function SideNav({ mode }: { mode: ReportLayoutMode }) {
             ["s-cover", "The good news"],
             ["s-methodology", "Audit scope"],
             ["s-reseller-reality", "Reseller reality"],
-            ["s-dossier", "Reseller dossier"],
             ["s-products", "Top products"],
             ["s-diy", "3 steps to wrap this up"],
             ["s-cta", "Want help later?"],
@@ -470,17 +470,12 @@ function SideNav({ mode }: { mode: ReportLayoutMode }) {
         : [
             ["s-cover", "Executive punch"],
             ["s-summary", "Executive summary"],
-            ["s-channel-control", "Channel control"],
-            ["s-cx", "Customer experience"],
-            ["s-products", "Top products"],
             ["s-reseller-reality", "Reseller reality"],
-            ["s-dossier", "Reseller dossier"],
             ["s-math", "Financial opportunity"],
-            ["s-transition", "Safe transition"],
             ["s-plan", "Five-step framework"],
             ["s-phase-two", "Phase 2 — what comes next"],
-            ["s-why", "Why Steve / RCG"],
             [CASE_STUDY_ANCHOR_ID, "Case study"],
+            ["s-why", "Why Steve / RCG"],
             ["s-cta", "Recommended next step"],
             ["s-methodology", "Methodology appendix"],
           ];
@@ -874,6 +869,33 @@ function SectionMethodology({
         </ul>
       </div>
 
+      {/* Phase 58 — Variation handling methodology was moved from
+          mid-report (next to the top-products grid) to live alongside
+          the rest of the methodology content. */}
+      <div className="rv2-method-card">
+        <div className="rv2-method-card-title">Methodology · Variation handling</div>
+        <p className="rv2-method-card-body">
+          Some ASINs in this brand share a parent listing with sibling variations
+          (e.g. a 4-pack and a 12-pack of the same product). Amazon&apos;s sales rank
+          is often shared across variations, which causes raw third-party sales
+          estimators to over-count sales on inactive variations. We attribute
+          group-level sales to each variation using a combined signal:{" "}
+          <strong>recent review activity (last 90 days)</strong> plus{" "}
+          <strong>
+            Buy Box win frequency (how often each variation actually held the Buy
+            Box recently)
+          </strong>
+          . When some siblings have Buy Box history and others don&apos;t, the
+          absence of Buy Box activity is itself evidence the listing hasn&apos;t
+          been selling — those variations correctly receive minimal attributed
+          sales.{" "}
+          <strong>
+            These per-ASIN sales numbers are estimates derived from Keepa rank,
+            review, and Buy Box data, not direct sales reporting.
+          </strong>
+        </p>
+      </div>
+
       <div className="rv2-method-sources">
         <span>Keepa snapshot · {formatLongDate(keepaFresh)}</span>
         <span className="rv2-method-sources-sep">·</span>
@@ -1069,6 +1091,48 @@ function SectionResellerReality({
   );
 }
 
+// ====================================================================
+// Phase 58 — Reseller Reality (new consolidation prose)
+//
+// Persuasion centerpiece for `reseller_controlled` mode. Verbatim copy
+// approved by the user — do not paraphrase, shorten, or "improve" it.
+// Renders as flowing prose with the standalone "Then we did the math."
+// beat, Phase 1 / Phase 2 bolds, and italicized closing questions.
+// ====================================================================
+
+function SectionResellerRealityConsolidation() {
+  return (
+    <section id="s-reseller-reality" className="rv2-section rv2-section-alt">
+      <SectionHead
+        eyebrow="Reseller Reality"
+        title="The question isn't whether your resellers are authorized — it's whether your channel is consolidated."
+      />
+      <p className="rv2-prose">
+        You may already have authorized resellers on Amazon — and you may believe your network is healthy. That belief is reasonable. Most brand owners in your revenue range hold it. None of what we&apos;re about to say is meant to take that away from you.
+      </p>
+      <p className="rv2-prose">
+        What we&apos;ve learned, after running this play across dozens of brands, is that the question isn&apos;t whether your resellers are <em>authorized</em>. It&apos;s whether your channel is <em>consolidated</em>. A fragmented seller base — even an authorized one — caps how aggressively the brand itself can invest in the channel. Pricing gets noisy. Listings get edited by people who don&apos;t own the P&amp;L. Advertising dollars compete with sellers who have no incentive to grow the catalog beyond their bestsellers. The brand ends up underwriting an ecosystem instead of running one.
+      </p>
+      <p className="rv2-prose">
+        This usually isn&apos;t visible until a brand starts pushing past $5M in revenue. Below that, the math works. Above that, the cracks start showing — and most brand owners assume they&apos;re hitting a ceiling that&apos;s about the product, the category, or the algorithm. It&apos;s almost never any of those things.
+      </p>
+      <p className="rv2-prose">
+        The clearest example we have is Diversified Hospitality. When we took over their Amazon channel, we assumed — like they did — that their existing reseller network was their growth engine. They had authorized partners. Sales were steady. Nothing looked broken.
+      </p>
+      <p className="rv2-prose">Then we did the math.</p>
+      <p className="rv2-prose">
+        The resellers weren&apos;t holding the brand back from $2M to $3M. They were holding the brand back from $2M to $10M. Once we consolidated control — pricing, listings, advertising, inventory positioning, all of it under one cohesive strategy owned by the brand — the channel grew more than 5x. That growth didn&apos;t come from removing bad actors. It came from removing fragmentation. The brand finally had one P&amp;L, one voice, one strategy on Amazon. That&apos;s when the real number showed up.
+      </p>
+      <p className="rv2-prose">
+        We think of this as two phases. <strong>Phase 1 is consolidation</strong>: bringing the channel back under the brand&apos;s direct control so the economics stop leaking and the strategy stops competing with itself. <strong>Phase 2 is growth</strong>: running that consolidated channel like a real business, with a dedicated Chief Amazon Officer function, full P&amp;L ownership, and the kind of compounding investment that only makes sense once the brand controls every lever.
+      </p>
+      <p className="rv2-prose">
+        If you walk away from this report thinking your reseller network is fine, that&apos;s a fair conclusion to reach. Most brand owners do — until they see what the consolidated version of their own channel looks like. The question we&apos;d leave you with isn&apos;t <em>&ldquo;are my resellers a problem?&rdquo;</em> It&apos;s <em>&ldquo;how much growth am I leaving on the table because nobody owns the whole picture?&rdquo;</em>
+      </p>
+    </section>
+  );
+}
+
 function ResellerBar({
   row,
   maxShare,
@@ -1191,232 +1255,9 @@ function BuyBoxPanel({
   );
 }
 
-// ====================================================================
-// Section 3 — Reseller Dossier
-// ====================================================================
-
-function SectionResellerDossier({
-  narrative,
-  derived,
-}: {
-  narrative: NarrativeV2;
-  derived: DerivedSnapshot;
-}) {
-  const d = narrative.reseller_dossier;
-  // Phase 40 Goal A3 — filter the dossier subject through the snapshot:
-  // sellers classified brand_owned/authorized/amazon must NOT appear.
-  // If the dossier subject is a brand-controlled seller, swallow the
-  // dossier and render the tight-channel acknowledgement.
-  const dossierIsReseller = (() => {
-    if (!d) return false;
-    const synthetic: ResellerRow = {
-      rank: 0,
-      seller_name: d.seller_name,
-      share_pct: d.share_pct ?? null,
-      asins_won: d.asins_won ?? null,
-      is_fba: d.is_fba ?? null,
-      country: d.country ?? null,
-    };
-    const cls = lookupClassification(derived, synthetic);
-    if (cls === "reseller") return true;
-    if (cls == null) return true; // Legacy: assume reseller by default.
-    return false;
-  })();
-
-  const filteredDossier = dossierIsReseller ? d : null;
-  const friendly = filteredDossier
-    ? friendlySellerName(filteredDossier.seller_name)
-    : null;
-
-  // Phase 47 — Module 3 hook: geographic diversion highlight box in the
-  // seller dossier. Lists international / non-domestic sellers from the
-  // reseller subset (Phase 46: only sellers classified as `reseller`).
-  const geoHook = pickHook(
-    narrative.qualification,
-    "geographic_diversion",
-    derived.is_tight_channel,
-  );
-  const intlResellers = (() => {
-    if (!geoHook) return [];
-    const sellers = narrative.reseller_reality.top_sellers ?? [];
-    const resellers = sellers.filter((s) => {
-      const cls = lookupClassification(derived, s);
-      if (cls === "reseller") return true;
-      if (cls == null && s.is_brand_controlled === false) return true;
-      return false;
-    });
-    return resellers.filter((s) => {
-      const c = (s.country ?? "").trim().toUpperCase();
-      return c && c !== "US" && c !== "USA" && c !== "UNITED STATES";
-    });
-  })();
-
-  // Count classified resellers for the "Did you authorize these?" block.
-  const resellerSellers = (narrative.reseller_reality.top_sellers ?? []).filter(
-    (s) => {
-      const cls = lookupClassification(derived, s);
-      if (cls === "reseller") return true;
-      if (cls == null && s.is_brand_controlled === false) return true;
-      return false;
-    },
-  );
-
-  return (
-    <section id="s-dossier" className="rv2-section">
-      <SectionHead
-        eyebrow="Did You Authorize These Sellers?"
-        title={filteredDossier ? `Inside ${friendly}` : "Reseller dossier"}
-        source="Keepa · seller profile · filtered to your reseller classifications"
-      />
-      {/* Phase 47 — Module 3 hook: geographic diversion highlight box. */}
-      {geoHook && (
-        <div className="rv2-banner rv2-banner-warn">
-          <strong>Geographic diversion:</strong>{" "}
-          <span>{geoHook.hook_text}</span>
-          {intlResellers.length > 0 && (
-            <ul style={{ marginTop: 6 }}>
-              {intlResellers.slice(0, 6).map((s, i) => (
-                <li key={`geo-${i}`}>
-                  {s.seller_name}
-                  {s.country ? ` — ${s.country}` : ""}
-                </li>
-              ))}
-            </ul>
-          )}
-          {geoHook.evidence && (
-            <div className="rv2-prose" style={{ marginTop: 6 }}>
-              {geoHook.evidence}
-            </div>
-          )}
-        </div>
-      )}
-      {filteredDossier ? (
-        <>
-          <div className="rv2-dossier-grid">
-            <Fact label="Seller name" value={friendly ?? filteredDossier.seller_name} />
-            <Fact
-              label="Marketplace ID"
-              value={filteredDossier.seller_id ?? "— not measured"}
-            />
-            <Fact
-              label="Country"
-              value={prettyCountry(filteredDossier.country) ?? "— not measured"}
-            />
-            <Fact
-              label="Buy-box share"
-              value={
-                filteredDossier.share_pct != null
-                  ? `${Math.round(filteredDossier.share_pct * 100)}%`
-                  : "— not measured"
-              }
-            />
-            <Fact
-              label="ASINs won"
-              value={
-                filteredDossier.asins_won != null
-                  ? String(filteredDossier.asins_won)
-                  : "— not measured"
-              }
-            />
-            <Fact label="Fulfilment" value={filteredDossier.fulfilment_mix} />
-            <Fact
-              label="Authorization status"
-              value="Authorization unknown — confirm with your team"
-            />
-          </div>
-
-          {filteredDossier.top_asins.length > 0 && (
-            <div className="rv2-dossier-asins">
-              <div className="rv2-dossier-subtitle">Top ASINs they win</div>
-              <ul>
-                {filteredDossier.top_asins.map((a) => (
-                  <li key={a.asin}>
-                    <span className="rv2-asin">{a.asin}</span>
-                    <span className="rv2-asin-title">
-                      {a.title ?? "— not measured"}
-                    </span>
-                    <span className="rv2-asin-price">
-                      {a.buy_box_price != null
-                        ? `$${Number(a.buy_box_price).toFixed(2)}`
-                        : "—"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {(() => {
-            // Phase 55 — forensic dossier prose. Suppress entirely
-            // when sanitization fails or the LLM/fallback returned
-            // nothing. Better silent than filler.
-            const cleaned = sanitizeDossierProse(filteredDossier.risk_profile, {
-              sellerName: friendly ?? filteredDossier.seller_name ?? "This seller",
-              sharePct: filteredDossier.share_pct ?? null,
-              asinsWon: filteredDossier.asins_won ?? null,
-            });
-            if (!cleaned) return null;
-            return (
-              <div className="rv2-prose rv2-prose-callout">{paragraphs(cleaned)}</div>
-            );
-          })()}
-
-          {resellerSellers.length > 0 && (
-            <div className="rv2-checklist">
-              <div className="rv2-checklist-title">
-                Sellers to confirm authorization on
-              </div>
-              <ul>
-                {resellerSellers.slice(0, 8).map((s, i) => {
-                  const friendly = friendlySellerName(s.seller_name);
-                  return (
-                    <li key={`auth-${i}`}>
-                      <SellerInitialBadge name={friendly} />
-                      <span>{friendly}</span>
-                    </li>
-                  );
-                })}
-              </ul>
-              <div className="rv2-checklist-note">
-                Authorization status should be confirmed with your team. We&apos;ll review which sellers are authorized, which relationships matter, and which accounts should be transitioned, restricted, or monitored.
-              </div>
-            </div>
-          )}
-        </>
-      ) : derived.is_tight_channel ? (
-        <p className="rv2-muted rv2-prose">
-          No third-party reseller activity to investigate based on your classifications. The channel appears tightly brand-controlled.
-        </p>
-      ) : resellerSellers.length === 0 ? (
-        <p className="rv2-muted rv2-prose">
-          No third-party reseller activity to investigate based on your classifications.
-        </p>
-      ) : (
-        <>
-          <p className="rv2-prose">
-            The dominant share is held by sellers you&apos;ve classified as brand-controlled. Below are the third-party sellers we&apos;d still recommend confirming authorization on:
-          </p>
-          <div className="rv2-checklist">
-            <ul>
-              {resellerSellers.slice(0, 8).map((s, i) => {
-                const friendly = friendlySellerName(s.seller_name);
-                return (
-                  <li key={`auth2-${i}`}>
-                    <SellerInitialBadge name={friendly} />
-                    <span>{friendly}</span>
-                  </li>
-                );
-              })}
-            </ul>
-            <div className="rv2-checklist-note">
-              Authorization status should be confirmed with your team.
-            </div>
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
+// Phase 58 — SectionResellerDossier removed entirely. "Did You Authorize
+// These Sellers?" and the embedded "Top ASINs they win" subsection were
+// two of the five sections cut in Phase 58.
 
 // ====================================================================
 // Section 4 — Top Products & Listing Health (per-ASIN economics)
@@ -1449,7 +1290,7 @@ function SectionTopProducts({
   return (
     <section id="s-products" className="rv2-section rv2-section-alt">
       <SectionHead
-        eyebrow="Evidence Snapshot · Top Marketplace Signals"
+        eyebrow="Top Products"
         title="Where the demand sits — and what each listing looks like"
         source={
           hasVariations
@@ -1476,18 +1317,9 @@ function SectionTopProducts({
         </p>
       )}
 
-      {cx.whats_broken.length > 0 && (
-        <div className="rv2-callouts">
-          <div className="rv2-block-title">What's broken right now</div>
-          <ul>
-            {cx.whats_broken.map((c, i) => (
-              <li key={i}>{c}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {hasVariations && <VariationMethodologyPanel />}
+      {/* Phase 58 — "What's Broken Right Now" block removed; the
+          variation handling methodology now lives in SectionMethodology
+          at the bottom of the report. */}
 
       <p className="rv2-muted-small">
         Per-ASIN revenue and units are directional estimates from Keepa BSR + buy-box price (365-day avg). Replace with seller's actual TTM during diligence.
@@ -1496,37 +1328,8 @@ function SectionTopProducts({
   );
 }
 
-/**
- * Phase 31 — methodology disclosure. Renders only when the brand has
- * at least one parent variation group (size ≥ 2). The user explicitly
- * requested that reports including ASINs from variation groups
- * notate (1) the presence of variations and (2) the methodology used,
- * so the reader knows the per-ASIN numbers are estimates and how they
- * were derived.
- */
-function VariationMethodologyPanel() {
-  return (
-    <aside className="rv2-method-panel" aria-labelledby="rv2-method-title">
-      <div id="rv2-method-title" className="rv2-method-kicker">
-        Methodology · Variation handling
-      </div>
-      <p className="rv2-method-body">
-        Some ASINs in this brand share a parent listing with sibling variations
-        (e.g. a 4-pack and a 12-pack of the same product). Amazon's sales rank
-        is often shared across variations, which causes raw third-party sales
-        estimators to over-count sales on inactive variations. We attribute
-        group-level sales to each variation using a combined signal: <strong>
-        recent review activity (last 90 days)</strong> plus <strong>Buy Box win
-        frequency (how often each variation actually held the Buy Box recently)
-        </strong>. When some siblings have Buy Box history and others don't, the
-        absence of Buy Box activity is itself evidence the listing hasn't been
-        selling — those variations correctly receive minimal attributed sales.
-        <strong> These per-ASIN sales numbers are estimates derived from Keepa
-        rank, review, and Buy Box data, not direct sales reporting.</strong>
-      </p>
-    </aside>
-  );
-}
+// Phase 58 — VariationMethodologyPanel was moved into SectionMethodology
+// (see the Methodology · Variation handling card there).
 
 function AsinScoreCard({ score }: { score: CxAuditAsinScore }) {
   const facts: { label: string; value: string }[] = [];
@@ -2076,14 +1879,7 @@ function SectionHead({ eyebrow, title, source }: { eyebrow: string; title: strin
   );
 }
 
-function Fact({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rv2-fact">
-      <div className="rv2-fact-lbl">{label}</div>
-      <div className="rv2-fact-val">{value}</div>
-    </div>
-  );
-}
+// Phase 58 — Fact helper removed; only used by the deleted Reseller Dossier.
 
 function RcgCallout({
   kicker,
@@ -2186,85 +1982,12 @@ function SectionExecutiveSummary({
   );
 }
 
-function SectionChannelControl({
-  narrative,
-  brand,
-  bundle,
-  derived,
-  confSellerControl,
-}: {
-  narrative: NarrativeV2;
-  brand: PublicReportV2Brand;
-  bundle: BrandEnrichmentBundle | null;
-  derived: DerivedSnapshot;
-  confSellerControl: ConfidenceLabel;
-}) {
-  const sellers = narrative.reseller_reality.top_sellers ?? [];
-  const top = pickTopReseller(narrative, derived);
-  const topShare = pickTopResellerShare(narrative, derived);
-  const sellerCount = bundle?.keepa?.unique_seller_count ?? sellers.length ?? null;
-  const asinsWithReseller = sellers.filter((s) => {
-    const cls = lookupClassification(derived, s);
-    return cls === "reseller" || (cls == null && s.is_brand_controlled === false);
-  }).reduce((sum, s) => sum + (s.asins_won ?? 0), 0);
-
-  return (
-    <section id="s-channel-control" className="rv2-section rv2-section-alt">
-      <SectionHead
-        eyebrow="The Channel Control Problem"
-        title="Your Amazon channel appears to be controlled by resellers"
-      />
-      <p className="rv2-prose">
-        Amazon may already be a meaningful channel for {brand.name}. The problem is that the channel does not appear to be operated by {brand.name} directly.
-      </p>
-      <p className="rv2-prose rv2-prose-callout">
-        <strong>You may already have a meaningful Amazon business. The issue is that someone else appears to be operating it.</strong>
-      </p>
-
-      <div className="rv2-channel-cards">
-        <ChannelCard
-          label="Brand-controlled buy box"
-          value={`${Math.round(derived.non_reseller_share * 100)}%`}
-          tone="good"
-          confidence={confSellerControl}
-        />
-        <ChannelCard
-          label="Reseller-controlled buy box"
-          value={`${Math.round(derived.reseller_share * 100)}%`}
-          tone="warn"
-          confidence={confSellerControl}
-        />
-        <ChannelCard
-          label="Top reseller"
-          value={top ?? "— not measured"}
-          sub={
-            topShare != null
-              ? `~${Math.round(topShare * 100)}% buy-box share`
-              : null
-          }
-        />
-        <ChannelCard
-          label="Observed sellers"
-          value={sellerCount != null ? String(sellerCount) : "— not measured"}
-        />
-        <ChannelCard
-          label="ASINs with reseller activity"
-          value={asinsWithReseller > 0 ? String(asinsWithReseller) : "— not measured"}
-        />
-        <ChannelCard
-          label="Brand-owned Amazon presence"
-          value={derived.shares.brand_owned > 0 ? "Yes" : "Unknown"}
-          sub="Confirm with your team"
-        />
-      </div>
-
-      <BuyBoxPanel
-        derived={derived}
-        legacyPct={bundle?.keepa?.brand_controlled_pct ?? null}
-      />
-    </section>
-  );
-}
+// Phase 58 — SectionChannelControl, SectionCustomerExperience, and
+// SectionSafeTransition were removed in opportunity mode. The new
+// Reseller Reality consolidation prose absorbs the channel-control / CX
+// argument, and the Five-Step Framework covers the transition narrative.
+// ChannelCard is retained because tight-mode (SectionTightBuyBox) still
+// renders it.
 
 function ChannelCard({
   label,
@@ -2299,77 +2022,6 @@ function ChannelCard({
   );
 }
 
-function SectionCustomerExperience({ brand }: { brand: PublicReportV2Brand }) {
-  return (
-    <section id="s-cx" className="rv2-section">
-      <SectionHead
-        eyebrow="The Customer Experience Problem"
-        title="It's not just margin — it's brand control"
-      />
-      <p className="rv2-prose">
-        This is not just a reseller margin problem. It is a brand control problem. When third-party sellers control the channel, they influence pricing, packaging, availability, listing quality, customer expectations, and the buying experience. They may benefit from the demand your brand created without investing in the long-term health of the brand.
-      </p>
-      <p className="rv2-prose">
-        Resellers can sell product. But they rarely represent the brand the way the brand owner would.
-      </p>
-
-      <div className="rv2-cx-list">
-        <div className="rv2-cx-list-title">Typical customer experience risks when resellers control the channel</div>
-        <ul>
-          <li>Inconsistent pricing across listings</li>
-          <li>Inconsistent packaging and product configurations</li>
-          <li>Outdated or incomplete listings</li>
-          <li>Poor images, weak content, and missing A+ pages</li>
-          <li>Inventory inconsistency and stock-outs</li>
-          <li>Customer confusion about which listing is &ldquo;official&rdquo;</li>
-          <li>Bad reviews caused by the wrong seller experience</li>
-          <li>Lack of long-term brand investment from third parties</li>
-        </ul>
-      </div>
-
-      <p className="rv2-prose rv2-prose-callout">
-        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.customerExperience} That is what allowed the Amazon channel to scale — relevant for {brand.name} too.{" "}
-        <a href={DIVERSIFIED_CASE_STUDY_HREF} className="rv2-case-study-link">
-          {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.referenceLinkLabel}
-        </a>.
-      </p>
-    </section>
-  );
-}
-
-function SectionSafeTransition() {
-  return (
-    <section id="s-transition" className="rv2-section rv2-section-alt">
-      <SectionHead
-        eyebrow="The Safe Path to Taking Control"
-        title="How we reclaim the channel without blowing up wholesale"
-      />
-      <p className="rv2-prose">
-        The biggest objection to bringing Amazon under brand control is fear of disrupting wholesale relationships. The process below is strategic, careful, and respectful of the relationships that matter.
-      </p>
-      <p className="rv2-prose rv2-prose-callout">
-        <strong>The goal is not to create a reseller war. The goal is to bring the Amazon customer experience under brand control in a way that protects the business.</strong>
-      </p>
-      <div className="rv2-cx-list">
-        <ul>
-          <li>Identify authorized vs. authorization-unknown sellers</li>
-          <li>Review distributor and reseller terms</li>
-          <li>Map which relationships matter to the broader business</li>
-          <li>Create sell-through windows where needed</li>
-          <li>Update future Amazon resale restrictions</li>
-          <li>Prepare inventory before transitioning listings</li>
-          <li>Avoid customer availability gaps</li>
-          <li>Maintain important wholesale relationships where possible</li>
-          <li>Transition Amazon toward brand-owned control over 6–12 months</li>
-          <li>Monitor listings after transition</li>
-        </ul>
-      </div>
-      <p className="rv2-muted-small">
-        We&apos;ll confirm which sellers are authorized, which relationships matter, and which accounts should be transitioned, restricted, or monitored.
-      </p>
-    </section>
-  );
-}
 
 // ====================================================================
 // Phase 54 — Phase 2 / Fractional Chief Amazon Officer section.
@@ -3126,60 +2778,8 @@ function sanitizeForbidden(input: string | null | undefined): string {
   return s.trim();
 }
 
-// Phase 55 — Dossier-specific sanitizer. The reseller dossier is
-// FORENSIC, not prescriptive. The Five-Step Framework is where solutions
-// live. If the LLM (or a stale narrative_json from before the prompt
-// rewrite) recommends MAP enforcement, an in-house team, or otherwise
-// contradicts RCG's pitch, we strip the recommendation rather than ship
-// it. Returns the sanitized text and a `tripped` flag the caller can use
-// to fall back to a hardcoded forensic line if too much was removed.
-const DOSSIER_FORBIDDEN_PHRASES: RegExp[] = [
-  /\bMAP (?:policy|policies|enforcement|program)\b/gi,
-  /\bMinimum Advertised Price\b/gi,
-  /\b(?:enforce|enforcing) (?:a |an )?MAP\b/gi,
-  /\b(?:build|develop|establish|stand up) (?:a |an )?in[- ]house team\b/gi,
-  /\bin[- ]house team\b/gi,
-  /\bdistribut(?:or|ion) (?:agreement|terms?|controls?)\b/gi,
-  /\bwholesale (?:agreement|terms?)\b/gi,
-  /\bcease[- ]and[- ]desist\b/gi,
-  /\b(?:vital|crucial|essential|best[- ]in[- ]class|stakeholder|ecosystem|synergy)\b/gi,
-  /\bleverag(?:e|ing|ed)\b/gi,
-  /\bbuy them out\b/gi,
-  /\b(?:transition them off|transition off the listings)\b/gi,
-];
-
-const DOSSIER_FORENSIC_FALLBACK_RE = (sellerName: string, sharePct: number | null, asinsWon: number | null): string => {
-  const share = sharePct != null ? `${Math.round(sharePct * 100)}%` : null;
-  if (share && asinsWon != null && asinsWon > 0) {
-    return `${sellerName} controls ${share} of the buy box across ${asinsWon} ASINs.`;
-  }
-  if (share) return `${sellerName} controls ${share} of the buy box.`;
-  if (asinsWon != null && asinsWon > 0) return `${sellerName} wins the buy box on ${asinsWon} ASINs.`;
-  return "";
-};
-
-function sanitizeDossierProse(
-  input: string | null | undefined,
-  fallback: { sellerName: string; sharePct: number | null; asinsWon: number | null },
-): string {
-  if (!input) return "";
-  let s = sanitizeForbidden(String(input));
-  let tripped = false;
-  for (const re of DOSSIER_FORBIDDEN_PHRASES) {
-    if (re.test(s)) {
-      tripped = true;
-      // Reset lastIndex on global regexes so the next test() call starts fresh.
-      re.lastIndex = 0;
-    }
-  }
-  if (tripped) {
-    if (typeof console !== "undefined" && typeof console.warn === "function") {
-      console.warn("[v2/web] dossier prose tripped forbidden-phrase sanitizer; falling back to forensic line.");
-    }
-    return DOSSIER_FORENSIC_FALLBACK_RE(fallback.sellerName, fallback.sharePct, fallback.asinsWon);
-  }
-  return s;
-}
+// Phase 58 — Dossier-specific sanitizer + forbidden-phrase regexes were
+// removed alongside the Reseller Dossier section.
 
 // ====================================================================
 // Helpers
@@ -3198,60 +2798,9 @@ function friendlySellerName(name: string | null | undefined): string {
   return n;
 }
 
-/**
- * Phase 41b — circular initial badge for the reseller checklist.
- * Replaces the literal "?" decoration that read as a missing-icon
- * fallback. Strips a leading "Unknown 3P" prefix so the initial reflects
- * the actual seller name when available; falls back to "?" if the name
- * is empty.
- */
-function sellerInitial(name: string): string {
-  const cleaned = name.replace(/^Unknown 3P seller(?:\s*\(ID:.*\))?$/i, "").trim();
-  const source = cleaned || name;
-  const ch = source.replace(/[^A-Za-z0-9]/g, "").charAt(0);
-  return ch ? ch.toUpperCase() : "?";
-}
-
-function SellerInitialBadge({ name }: { name: string }) {
-  return (
-    <span className="rv2-seller-initial" aria-hidden>
-      {sellerInitial(name)}
-    </span>
-  );
-}
-
-const COUNTRY_NAMES: Record<string, string> = {
-  US: "United States",
-  GB: "United Kingdom",
-  UK: "United Kingdom",
-  CA: "Canada",
-  DE: "Germany",
-  FR: "France",
-  IT: "Italy",
-  ES: "Spain",
-  JP: "Japan",
-  AU: "Australia",
-  MX: "Mexico",
-  CN: "China",
-  IN: "India",
-  BR: "Brazil",
-  NL: "Netherlands",
-  PL: "Poland",
-  SE: "Sweden",
-  TR: "Turkey",
-  AE: "United Arab Emirates",
-  SG: "Singapore",
-  HK: "Hong Kong",
-  TW: "Taiwan",
-  KR: "South Korea",
-};
-
-function prettyCountry(c: string | null | undefined): string | null {
-  if (!c) return null;
-  const k = c.trim().toUpperCase();
-  if (!k) return null;
-  return COUNTRY_NAMES[k] ?? k;
-}
+// Phase 58 — sellerInitial / SellerInitialBadge / COUNTRY_NAMES /
+// prettyCountry removed; they were only consumed by the deleted
+// Reseller Dossier section.
 
 function money(n: number | null | undefined): string {
   if (n == null) return "— not measured";
