@@ -735,39 +735,6 @@ function renderHeroHeadline(args: {
   return `${args.brandName} appears to have a meaningful Amazon channel — but based on our audit, ${args.brandControlledPct}% of the buy box appears to be brand-controlled.`;
 }
 
-function renderHeroSubheadline(args: {
-  brandName: string;
-  auditScope: NarrativeV2["audit_scope"] | null;
-  topReseller: string | null;
-  topResellerSharePct: number | null;
-}): string {
-  const totalAsins = args.auditScope?.asins_found_total ?? null;
-  const includedAsins = args.auditScope?.asins_included_count ?? null;
-  const reseller = args.topReseller;
-  const resellerShare =
-    args.topResellerSharePct != null
-      ? `${Math.round(args.topResellerSharePct * 100)}%`
-      : null;
-  if (totalAsins != null && includedAsins != null && reseller && resellerShare) {
-    return `Our analysis found ${totalAsins.toLocaleString("en-US")} ASINs associated with ${args.brandName}, with ${includedAsins.toLocaleString("en-US")} included in this audit. Across those listings, third-party sellers appear to control the Amazon channel, including ${reseller}, which accounts for roughly ${resellerShare} of observed buy-box activity.`;
-  }
-  if (reseller && resellerShare) {
-    return `Across the audited listings, third-party sellers appear to control the Amazon channel, including ${reseller}, which accounts for roughly ${resellerShare} of observed buy-box activity.`;
-  }
-  return `Across the audited listings, third-party sellers appear to be involved in the Amazon channel for ${args.brandName}.`;
-}
-
-function renderValueLine(args: {
-  profit: number | null;
-  value: number | null;
-  ebitdaMultiple: string;
-}): string {
-  if (args.profit != null && args.value != null) {
-    return `Based on conservative marketplace estimates, bringing this channel under brand control could create approximately ${moneyFmt(args.profit)} in annual profit recapture and up to ${moneyFmt(args.value)} in business value at a ${args.ebitdaMultiple}× EBITDA multiple.`;
-  }
-  return `Based on conservative marketplace estimates, bringing this channel under brand control could create meaningful annual profit recapture and business value — see the financial bridge below.`;
-}
-
 // =====================================================================
 // Opportunity (long) layout pages
 // =====================================================================
@@ -799,13 +766,6 @@ function HeroPage({
 }) {
   const brandPct = Math.round(derived.non_reseller_share * 100);
   const headline = renderHeroHeadline({ brandName: brand.name, revenue, brandControlledPct: brandPct });
-  const subheadline = renderHeroSubheadline({
-    brandName: brand.name,
-    auditScope: narrative.audit_scope ?? null,
-    topReseller: pickTopReseller(narrative, derived),
-    topResellerSharePct: pickTopResellerShare(narrative, derived),
-  });
-  const valueLine = renderValueLine({ profit, value, ebitdaMultiple });
   return (
     <Page size="LETTER" style={styles.page}>
       <Text style={styles.eyebrow}>Amazon Channel Ownership Audit</Text>
@@ -815,8 +775,6 @@ function HeroPage({
         {longDate(narrative.generated_at)} · By Rolle Consulting Group
       </Text>
       <Text style={[styles.h1, { marginTop: 16 }]}>{headline}</Text>
-      <Text style={styles.prose}>{subheadline}</Text>
-      <Text style={styles.heroValueLine}>{valueLine}</Text>
 
       <View style={styles.kpiRow}>
         <BigStat
@@ -1199,7 +1157,7 @@ function ResellerRealityConsolidationPage({ brand }: { brand: BrandForReport }) 
         You may already have authorized resellers on Amazon — and you may believe your network is healthy. That belief is reasonable. Most brand owners in your revenue range hold it. None of what we&apos;re about to say is meant to take that away from you.
       </Text>
       <Text style={styles.prose}>
-        What we&apos;ve learned, after running this play across dozens of brands, is that the question isn&apos;t whether your resellers are{" "}
+        What we&apos;ve learned is that the question isn&apos;t whether your resellers are{" "}
         <Text style={{ fontFamily: "Helvetica-Oblique" }}>authorized</Text>. It&apos;s whether your channel is{" "}
         <Text style={{ fontFamily: "Helvetica-Oblique" }}>consolidated</Text>. A fragmented seller base — even an authorized one — caps how aggressively the brand itself can invest in the channel. Pricing gets noisy. Listings get edited by people who don&apos;t own the P&amp;L. Advertising dollars compete with sellers who have no incentive to grow the catalog beyond their bestsellers. The brand ends up underwriting an ecosystem instead of running one.
       </Text>
@@ -1458,18 +1416,11 @@ function FrameworkPage({
                   <View style={[styles.bannerWarn, { marginTop: 8, marginBottom: 0 }]}>
                     <Text style={styles.eyebrow}>Case study</Text>
                     <Text style={{ fontSize: 9, color: P.ink, lineHeight: 1.5 }}>
-                      {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep4} ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
+                      {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep4}
                     </Text>
                   </View>
                 )}
-                {i === 4 && (
-                  <View style={[styles.bannerWarn, { marginTop: 8, marginBottom: 0 }]}>
-                    <Text style={styles.eyebrow}>Team model</Text>
-                    <Text style={{ fontSize: 9, color: P.ink, lineHeight: 1.5 }}>
-                      {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep5} ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
-                    </Text>
-                  </View>
-                )}
+                {/* Phase 59 — Step 5 "Team model" callout removed per spec. */}
               </View>
             );
           })}
@@ -1513,14 +1464,7 @@ function FrameworkPage({
                   </Text>
                 </View>
               )}
-              {i === 4 && (
-                <View style={[styles.bannerWarn, { marginTop: 8, marginBottom: 0 }]}>
-                  <Text style={styles.eyebrow}>Team model</Text>
-                  <Text style={{ fontSize: 9, color: P.ink, lineHeight: 1.5 }}>
-                    {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep5} ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
-                  </Text>
-                </View>
-              )}
+              {/* Phase 59 — Step 5 "Team model" callout removed per spec. */}
             </View>
           ))}
         </View>
@@ -1605,14 +1549,10 @@ function CaseStudyDiversifiedHospitalityPage({
     <Page size="LETTER" style={styles.page} wrap>
       <SectionHead
         eyebrow="Case Study"
-        title="How Diversified Hospitality turned Amazon from a reseller-controlled channel into a $10M brand-owned revenue stream"
+        title="How Diversified Hospitality doubled its Amazon profit at flat revenue by taking the channel back from resellers"
       />
-      <Text style={[styles.prose, { fontStyle: "italic", color: P.muted }]}>
-        Why we share this: when a brand owner takes Amazon back from
-        resellers, the unlock is not just margin recapture — it is the
-        ability to invest in listings, packaging, customer experience,
-        and long-term channel strategy in a way resellers never will.
-        That same shift is the opportunity in front of {brand.name}.
+      <Text style={styles.prose}>
+        When RCG took over Diversified Hospitality&apos;s Amazon channel, customer experience metrics improved immediately. Amazon sales stayed at roughly $2M before and after the transition — and Diversified Hospitality&apos;s profit on those sales doubled in that same period by being the one selling them. They didn&apos;t lose a single customer. They didn&apos;t add one either. The entire profit lift came from removing the reseller layer and letting the brand keep the margin that was already there.
       </Text>
       <Text style={[styles.prose, { fontFamily: "Helvetica-Oblique" }]}>
         {cs.preface}
@@ -1670,12 +1610,11 @@ function CaseStudyDiversifiedHospitalityPage({
       ))}
       <BulletList
         items={[
-          "Amazon became a major profit center",
+          "Amazon became a brand-controlled profit center",
           "Customer experience became more consistent",
           "Cash flow improved significantly because Amazon paid faster than reseller terms",
-          "Diversified paid down more than $5 million in accounts payable across 2022 and 2023",
-          "The increased profitability materially improved the value of the business",
-          "Once Phase 1 stabilized, Phase 2 (running the channel as a real brand investment) compounded revenue from ~$2M to $10M+ per year",
+          "Diversified paid down more than $5 million in accounts payable across the capture period",
+          "The increased profitability materially improved the underlying business",
         ]}
       />
 
@@ -1733,7 +1672,7 @@ function WhySteveRollePage({ brand }: { brand: BrandForReport }) {
         title="Operator-led, not agency"
       />
       <Text style={styles.prose}>
-        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.whySteveBio} ({DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.pdfReferenceLabel}.)
+        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.whySteveBio}
       </Text>
       <Text style={styles.prose}>
         More recently, Steve helped <Text style={styles.bold}>Legion Chemicals</Text> grow from $0 to roughly a <Text style={styles.bold}>$1M ARR</Text> Amazon run rate in less than 10 months.

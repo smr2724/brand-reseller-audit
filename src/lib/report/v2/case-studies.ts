@@ -67,7 +67,7 @@ export type DiversifiedCaseStudy = {
 export const DIVERSIFIED_HOSPITALITY_CASE_STUDY: DiversifiedCaseStudy = {
   preface: "This is not theory. Steve has already done this from the brand-owner side.",
   headline:
-    "How Diversified Hospitality turned Amazon from a reseller-controlled channel into a $10M brand-owned revenue stream",
+    "How Diversified Hospitality doubled its Amazon profit at flat revenue by taking the channel back from resellers",
   sections: {
     situation: {
       paragraphs: [
@@ -137,32 +137,28 @@ export const DIVERSIFIED_HOSPITALITY_CASE_STUDY: DiversifiedCaseStudy = {
         },
       ],
     },
+    // Phase 59 — Case study is now strictly the Phase 1 / capture
+    // story: flat revenue (~$2M before and after), doubled profit,
+    // zero customer growth. All references to $8.34M / $9.02M / $10M
+    // were removed per spec — Phase 2 growth belongs only in the
+    // Phase 2 / CAO section, never in the case study.
     results: {
       paragraphs: [
-        "The results split cleanly into two phases — and the distinction matters.",
-        "Phase 1 — capture. Before Diversified took control, total Amazon sales of Diversified-branded products were less than $2 million annually through reseller activity. Phase 1 was not about growing that revenue. It was about closing the leakage. Revenue stayed roughly flat at ~$2 million during the capture period — but the profit on those sales doubled, because the margin that resellers had been pocketing now flowed back to the brand. Diversified used the recovered margin to pay down more than $5 million in accounts payable across 2022 and 2023, and the channel was finally running under brand control.",
-        "Phase 2 — growth. Once the channel was brand-controlled, Diversified could invest in it the way only a brand owner can: listings, packaging, inventory planning, pricing strategy, customer experience, and long-term positioning. That is when the revenue compounded. The channel grew to:",
+        "Phase 1 — capture. Before Diversified took control, total Amazon sales of Diversified-branded products were running at roughly $2 million annually through reseller activity. Phase 1 was not about growing that revenue. It was about closing the leakage. Revenue stayed roughly flat at ~$2 million during the capture period — but the profit on those sales doubled, because the margin that resellers had been pocketing now flowed back to the brand. Diversified did not lose a single customer, and did not add one either; the entire profit lift came from removing the reseller layer. Diversified used the recovered margin to pay down more than $5 million in accounts payable across the capture period, and the channel was finally running under brand control.",
       ],
-      bullets: [
-        "$8.34 million in Amazon revenue in 2022",
-        "$9-10 million in Amazon revenue each year thereafter",
-      ],
+      bullets: [],
       tail: [
-        "That is roughly a 5x increase from the reseller-controlled baseline — and that growth happened in Phase 2, not Phase 1.",
-        "The key was not simply “removing resellers.” The key was that the brand owner finally had the ability and incentive to invest in the channel properly — and that only became possible once Phase 1 was done.",
+        "The key was not simply “removing resellers.” The key was that the brand owner finally had the ability and incentive to invest in the channel properly.",
         "The financial impact went beyond revenue:",
       ],
     },
-    // Phase 55 — collapsed "The Lesson" + "Why This Matters" into a
-    // single closing section per all-three-reviewer feedback. Keeps the
-    // canonical Phase 1 vs Phase 2 framing once, drops the duplicate
-    // "what makes it healthy / what makes it valuable" restatement, and
-    // ends on the question this report exists to answer.
+    // Phase 59 — Lesson narrows to the Phase 1 / capture story. The
+    // Phase 2 framing remains in the dedicated Phase 2 / CAO section
+    // of the report.
     lesson: {
       paragraphs: [
-        "Phase 1 made the business healthy. Phase 2 made it valuable.",
-        "Phase 1 — taking control of the channel and recovering the margin already in existing demand — closes the leak: profit doubles at flat revenue, cash flow improves, the brand stops subsidizing other people's businesses. Phase 2 — running the controlled channel as a real brand investment — is where revenue compounds and enterprise value gets created. You cannot get to Phase 2 without doing Phase 1 first, and most brands stop at Phase 1 leaving the bigger prize on the table.",
-        "If your products are already generating meaningful Amazon revenue through third-party sellers, the question is not whether Amazon works. The question is whether someone else should keep operating that channel, or whether your brand should own it. This audit is sized around answering that first question for your brand.",
+        "Phase 1 — taking control of the channel and recovering the margin already in existing demand — closes the leak: profit doubles at flat revenue, cash flow improves, the brand stops subsidizing other people's businesses.",
+        "If your products are already generating meaningful Amazon revenue through third-party sellers, the question is not whether Amazon works. The question is whether someone else should keep operating that channel, or whether your brand should own it. This audit is sized around answering that question for your brand.",
       ],
     },
     whyThisMatters: {
@@ -177,22 +173,20 @@ export const DIVERSIFIED_HOSPITALITY_CASE_STUDY: DiversifiedCaseStudy = {
     "This case reflects Steve Rolle's prior operational experience at Diversified Hospitality Solutions. Past results do not guarantee future outcomes; your channel and brand will have unique dynamics.",
   snippets: {
     whySteveBio:
-      "Steve Rolle has lived this problem as a brand owner, not just as a consultant. At Diversified Hospitality, reseller-controlled Amazon activity created inconsistent listings, pricing issues, and margin leakage. Phase 1 brought the channel under brand control and doubled profit on the existing ~$2M revenue base; Phase 2 compounded the controlled channel from there. Portfolio context: see Why Rolle Consulting.",
+      "Steve Rolle has lived this problem as a brand owner, not just as a consultant. At Diversified Hospitality, reseller-controlled Amazon activity created inconsistent listings, pricing issues, and margin leakage. Steve led the channel transition that doubled Diversified's Amazon profit on a flat ~$2M revenue base by removing the reseller layer and bringing the channel under brand control.",
     customerExperience:
       "At Diversified Hospitality, the biggest unlock was not only capturing reseller margin. The bigger unlock was that the brand owner finally controlled the customer experience, listings, packaging, inventory, pricing, reviews, and long-term channel strategy.",
     frameworkStep4:
-      "When we did this for Diversified Hospitality, customer experience metrics improved immediately and Amazon sales went from $8.34M (2022) to $9.02M (2023) — without adding a single new customer. They also paid down $5M in AP from the recovered margin.",
-    frameworkStep5:
-      "Your team will typically be 1-2 US-based members supported by offshore for logistics, ops, customer service, and listing management — the same model that runs Diversified Hospitality today.",
-    narrativeStep5:
-      "Your team will typically be 1-2 US-based members supported by offshore for logistics, ops, customer service, and listing management — same model that runs Diversified Hospitality today.",
+      "When we did this for Diversified Hospitality, customer experience metrics improved immediately and Amazon profit on the existing ~$2M revenue base doubled — without adding a single new customer. The recovered margin paid down more than $5M in AP across the capture period.",
+    frameworkStep5: "",
+    narrativeStep5: "",
     whyRcgBio:
-      "Steve Rolle ran Diversified Hospitality on Amazon as the operator before he ran it as a consultant. Phase 1 doubled the profit on a ~$2M revenue baseline by removing resellers and taking channel control. Phase 2 compounded that controlled channel into $10M+/year and doubled enterprise value at exit. Across the brands RCG operates today, we've sold over $60M on Amazon since 2018.",
+      "Steve Rolle ran Diversified Hospitality on Amazon as the operator before he ran it as a consultant. He led the channel transition that doubled the brand's Amazon profit on a flat ~$2M revenue base by removing resellers and taking direct channel control. Across the brands RCG operates today, we've sold over $60M on Amazon since 2018.",
     cardSummary:
       "Reclaimed the catalog from a long tail of unauthorized resellers and rebuilt brand-controlled distribution.",
-    cardMetric: "$10M/year brand-controlled · 2× enterprise value at exit",
-    referenceLinkLabel: "Read the full case study below",
-    pdfReferenceLabel: "See full case study in the appendix",
+    cardMetric: "Doubled Amazon profit at flat ~$2M revenue · zero customer loss",
+    referenceLinkLabel: "Read the full case study",
+    pdfReferenceLabel: "Full case study available on request",
   },
 };
 

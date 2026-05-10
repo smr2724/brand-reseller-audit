@@ -234,7 +234,6 @@ export function PublicReportV2({
             <SectionTightHero
               narrative={narrative}
               brand={brand}
-              callHref={callHref}
               revenue={revenueValue}
               benchmark={benchmark}
               derived={derived}
@@ -316,7 +315,6 @@ export function PublicReportV2({
             <SectionCover
               narrative={narrative}
               brand={brand}
-              callHref={callHref}
               derived={derived}
               confRevenue={confRevenue}
               confSellerControl={confSellerControl}
@@ -363,7 +361,7 @@ export function PublicReportV2({
             {/* 6. Phase 2 / fractional CAO */}
             <SectionPhaseTwo brand={brand} />
             {/* 7. Diversified Hospitality case study */}
-            <SectionCaseStudyDiversifiedHospitality brand={brand} />
+            <SectionCaseStudyDiversifiedHospitality />
             {/* 8. Why Steve / RCG */}
             <SectionWhySteveRolle />
             {/* 9. CTA */}
@@ -499,7 +497,6 @@ function SideNav({ mode }: { mode: ReportLayoutMode }) {
 function SectionCover({
   narrative,
   brand,
-  callHref,
   derived,
   confRevenue,
   confSellerControl,
@@ -508,7 +505,6 @@ function SectionCover({
 }: {
   narrative: NarrativeV2;
   brand: PublicReportV2Brand;
-  callHref: string;
   derived: DerivedSnapshot;
   confRevenue: ConfidenceLabel;
   confSellerControl: ConfidenceLabel;
@@ -530,17 +526,6 @@ function SectionCover({
     revenue,
     brandControlledPct,
   });
-  const subheadline = renderHeroSubheadline({
-    brandName: brand.name,
-    auditScope: narrative.audit_scope ?? null,
-    topReseller: pickTopReseller(narrative, derived),
-    topResellerSharePct: pickTopResellerShare(narrative, derived),
-  });
-  const valueLine = renderValueLine({
-    profit,
-    value,
-    ebitdaMultiple,
-  });
 
   return (
     <section id="s-cover" className="rv2-section rv2-section-cover">
@@ -552,8 +537,6 @@ function SectionCover({
         </div>
       </div>
       <h1 className="rv2-h1">{headline}</h1>
-      <p className="rv2-prose rv2-cover-subhead">{subheadline}</p>
-      <p className="rv2-prose rv2-cover-valueline">{valueLine}</p>
 
       <div className="rv2-kpi-grid rv2-kpi-grid-3">
         <BigStat
@@ -585,12 +568,6 @@ function SectionCover({
           </span>
         </div>
       </div>
-
-      <div className="rv2-cover-actions">
-        <a className="rv2-btn rv2-btn-primary" href={callHref}>
-          Book a 15-minute review
-        </a>
-      </div>
     </section>
   );
 }
@@ -604,40 +581,6 @@ function renderHeroHeadline(args: {
     return `${args.brandName} may already have a ${money(args.revenue)} Amazon channel — but based on our audit, ${args.brandControlledPct}% of the buy box appears to be brand-controlled.`;
   }
   return `${args.brandName} appears to have a meaningful Amazon channel — but based on our audit, ${args.brandControlledPct}% of the buy box appears to be brand-controlled.`;
-}
-
-function renderHeroSubheadline(args: {
-  brandName: string;
-  auditScope: NarrativeV2["audit_scope"] | null;
-  topReseller: string | null;
-  topResellerSharePct: number | null;
-}): string {
-  const totalAsins = args.auditScope?.asins_found_total ?? null;
-  const includedAsins = args.auditScope?.asins_included_count ?? null;
-  const reseller = args.topReseller;
-  const resellerShare =
-    args.topResellerSharePct != null
-      ? `${Math.round(args.topResellerSharePct * 100)}%`
-      : null;
-
-  if (totalAsins != null && includedAsins != null && reseller && resellerShare) {
-    return `Our analysis found ${totalAsins.toLocaleString("en-US")} ASINs associated with ${args.brandName}, with ${includedAsins.toLocaleString("en-US")} included in this audit. Across those listings, third-party sellers appear to control the Amazon channel, including ${reseller}, which accounts for roughly ${resellerShare} of observed buy-box activity.`;
-  }
-  if (reseller && resellerShare) {
-    return `Across the audited listings, third-party sellers appear to control the Amazon channel, including ${reseller}, which accounts for roughly ${resellerShare} of observed buy-box activity.`;
-  }
-  return `Across the audited listings, third-party sellers appear to be involved in the Amazon channel for ${args.brandName}.`;
-}
-
-function renderValueLine(args: {
-  profit: number | null;
-  value: number | null;
-  ebitdaMultiple: string;
-}): string {
-  if (args.profit != null && args.value != null) {
-    return `Based on conservative marketplace estimates, bringing this channel under brand control could create approximately ${money(args.profit)} in annual profit recapture and up to ${money(args.value)} in business value at a ${args.ebitdaMultiple}× EBITDA multiple.`;
-  }
-  return `Based on conservative marketplace estimates, bringing this channel under brand control could create meaningful annual profit recapture and business value — see the financial bridge below.`;
 }
 
 function pickTopReseller(
@@ -1111,24 +1054,38 @@ function SectionResellerRealityConsolidation() {
         You may already have authorized resellers on Amazon — and you may believe your network is healthy. That belief is reasonable. Most brand owners in your revenue range hold it. None of what we&apos;re about to say is meant to take that away from you.
       </p>
       <p className="rv2-prose">
-        What we&apos;ve learned, after running this play across dozens of brands, is that the question isn&apos;t whether your resellers are <em>authorized</em>. It&apos;s whether your channel is <em>consolidated</em>. A fragmented seller base — even an authorized one — caps how aggressively the brand itself can invest in the channel. Pricing gets noisy. Listings get edited by people who don&apos;t own the P&amp;L. Advertising dollars compete with sellers who have no incentive to grow the catalog beyond their bestsellers. The brand ends up underwriting an ecosystem instead of running one.
+        What we&apos;ve learned is that the question isn&apos;t whether your resellers are <em>authorized</em>. It&apos;s whether your channel is <em>consolidated</em>. A fragmented seller base — even an authorized one — caps how aggressively the brand itself can invest in the channel. Pricing gets noisy. Listings get edited by people who don&apos;t own the P&amp;L. Advertising dollars compete with sellers who have no incentive to grow the catalog beyond their bestsellers. The brand ends up underwriting an ecosystem instead of running one.
       </p>
-      <p className="rv2-prose">
-        This usually isn&apos;t visible until a brand starts pushing past $5M in revenue. Below that, the math works. Above that, the cracks start showing — and most brand owners assume they&apos;re hitting a ceiling that&apos;s about the product, the category, or the algorithm. It&apos;s almost never any of those things.
-      </p>
-      <p className="rv2-prose">
-        The clearest example we have is Diversified Hospitality. When we took over their Amazon channel, we assumed — like they did — that their existing reseller network was their growth engine. They had authorized partners. Sales were steady. Nothing looked broken.
-      </p>
-      <p className="rv2-prose">Then we did the math.</p>
-      <p className="rv2-prose">
-        The resellers weren&apos;t holding the brand back from $2M to $3M. They were holding the brand back from $2M to $10M. Once we consolidated control — pricing, listings, advertising, inventory positioning, all of it under one cohesive strategy owned by the brand — the channel grew more than 5x. That growth didn&apos;t come from removing bad actors. It came from removing fragmentation. The brand finally had one P&amp;L, one voice, one strategy on Amazon. That&apos;s when the real number showed up.
-      </p>
-      <p className="rv2-prose">
-        We think of this as two phases. <strong>Phase 1 is consolidation</strong>: bringing the channel back under the brand&apos;s direct control so the economics stop leaking and the strategy stops competing with itself. <strong>Phase 2 is growth</strong>: running that consolidated channel like a real business, with a dedicated Chief Amazon Officer function, full P&amp;L ownership, and the kind of compounding investment that only makes sense once the brand controls every lever.
-      </p>
-      <p className="rv2-prose">
-        If you walk away from this report thinking your reseller network is fine, that&apos;s a fair conclusion to reach. Most brand owners do — until they see what the consolidated version of their own channel looks like. The question we&apos;d leave you with isn&apos;t <em>&ldquo;are my resellers a problem?&rdquo;</em> It&apos;s <em>&ldquo;how much growth am I leaving on the table because nobody owns the whole picture?&rdquo;</em>
-      </p>
+      {/* Phase 59 — Web only: everything below the first body paragraph
+          collapses into an expandable disclosure. PDF stays fully inline
+          (see PDF renderer). Preserve the exact prose unchanged when
+          expanded. */}
+      <details className="rv2-reseller-reality-details">
+        <summary className="rv2-reseller-reality-summary">
+          <span className="rv2-reseller-reality-summary-label">
+            Read the full reasoning — including the Diversified Hospitality breakdown
+          </span>
+          <span className="rv2-reseller-reality-summary-hint">(click to expand)</span>
+        </summary>
+        <div className="rv2-reseller-reality-body">
+          <p className="rv2-prose">
+            This usually isn&apos;t visible until a brand starts pushing past $5M in revenue. Below that, the math works. Above that, the cracks start showing — and most brand owners assume they&apos;re hitting a ceiling that&apos;s about the product, the category, or the algorithm. It&apos;s almost never any of those things.
+          </p>
+          <p className="rv2-prose">
+            The clearest example we have is Diversified Hospitality. When we took over their Amazon channel, we assumed — like they did — that their existing reseller network was their growth engine. They had authorized partners. Sales were steady. Nothing looked broken.
+          </p>
+          <p className="rv2-prose">Then we did the math.</p>
+          <p className="rv2-prose">
+            The resellers weren&apos;t holding the brand back from $2M to $3M. They were holding the brand back from $2M to $10M. Once we consolidated control — pricing, listings, advertising, inventory positioning, all of it under one cohesive strategy owned by the brand — the channel grew more than 5x. That growth didn&apos;t come from removing bad actors. It came from removing fragmentation. The brand finally had one P&amp;L, one voice, one strategy on Amazon. That&apos;s when the real number showed up.
+          </p>
+          <p className="rv2-prose">
+            We think of this as two phases. <strong>Phase 1 is consolidation</strong>: bringing the channel back under the brand&apos;s direct control so the economics stop leaking and the strategy stops competing with itself. <strong>Phase 2 is growth</strong>: running that consolidated channel like a real business, with a dedicated Chief Amazon Officer function, full P&amp;L ownership, and the kind of compounding investment that only makes sense once the brand controls every lever.
+          </p>
+          <p className="rv2-prose">
+            If you walk away from this report thinking your reseller network is fine, that&apos;s a fair conclusion to reach. Most brand owners do — until they see what the consolidated version of their own channel looks like. The question we&apos;d leave you with isn&apos;t <em>&ldquo;are my resellers a problem?&rdquo;</em> It&apos;s <em>&ldquo;how much growth am I leaving on the table because nobody owns the whole picture?&rdquo;</em>
+          </p>
+        </div>
+      </details>
     </section>
   );
 }
@@ -1630,29 +1587,10 @@ function PlanStepCard({
       {callout === "step4" && (
         <RcgCallout
           kicker="Case study"
-          body={
-            <>
-              {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep4}{" "}
-              <a href={DIVERSIFIED_CASE_STUDY_HREF} className="rv2-case-study-link">
-                {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.referenceLinkLabel}
-              </a>.
-            </>
-          }
+          body={DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep4}
         />
       )}
-      {callout === "step5" && (
-        <RcgCallout
-          kicker="Team model"
-          body={
-            <>
-              {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.frameworkStep5}{" "}
-              <a href={DIVERSIFIED_CASE_STUDY_HREF} className="rv2-case-study-link">
-                {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.referenceLinkLabel}
-              </a>.
-            </>
-          }
-        />
-      )}
+      {/* Phase 59 — Step 5 "Team Model" callout removed per spec. */}
     </div>
   );
 }
@@ -2064,10 +2002,7 @@ function SectionWhySteveRolle() {
         title="Operator-led, not agency"
       />
       <p className="rv2-prose">
-        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.whySteveBio}{" "}
-        <a href={DIVERSIFIED_CASE_STUDY_HREF} className="rv2-case-study-link">
-          {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.referenceLinkLabel}
-        </a>.
+        {DIVERSIFIED_HOSPITALITY_CASE_STUDY.snippets.whySteveBio}
       </p>
       <p className="rv2-prose">
         More recently, Steve helped <strong>Legion Chemicals</strong> grow from $0 to roughly a <strong>$1M ARR</strong> Amazon run rate in less than 10 months.
@@ -2101,11 +2036,7 @@ function SectionWhySteveRolle() {
 // `:target` to auto-expand when the reader follows a snippet link.
 // ====================================================================
 
-function SectionCaseStudyDiversifiedHospitality({
-  brand,
-}: {
-  brand: PublicReportV2Brand;
-}) {
+function SectionCaseStudyDiversifiedHospitality() {
   const cs = DIVERSIFIED_HOSPITALITY_CASE_STUDY;
   return (
     <section
@@ -2114,16 +2045,10 @@ function SectionCaseStudyDiversifiedHospitality({
     >
       <SectionHead
         eyebrow="Case Study"
-        title={`How Diversified Hospitality turned Amazon from a reseller-controlled channel into a $10M brand-owned revenue stream`}
+        title="How Diversified Hospitality doubled its Amazon profit at flat revenue by taking the channel back from resellers"
       />
       <p className="rv2-prose">
-        <em>
-          Why we share this: when a brand owner takes Amazon back from
-          resellers, the unlock is not just margin recapture — it is the
-          ability to invest in listings, packaging, customer experience,
-          and long-term channel strategy in a way resellers never will.
-          That same shift is the opportunity in front of {brand.name}.
-        </em>
+        When RCG took over Diversified Hospitality&apos;s Amazon channel, customer experience metrics improved immediately. Amazon sales stayed at roughly $2M before and after the transition — and Diversified Hospitality&apos;s profit on those sales doubled in that same period by being the one selling them. They didn&apos;t lose a single customer. They didn&apos;t add one either. The entire profit lift came from removing the reseller layer and letting the brand keep the margin that was already there.
       </p>
       <details className="rv2-case-study-details">
         <summary className="rv2-case-study-summary">
@@ -2201,7 +2126,7 @@ function SectionCaseStudyDiversifiedHospitality({
             </p>
           ))}
           <ul className="rv2-case-study-list">
-            <li>Amazon became a major profit center</li>
+            <li>Amazon became a brand-controlled profit center</li>
             <li>Customer experience became more consistent</li>
             <li>
               Cash flow improved significantly because Amazon paid faster
@@ -2209,12 +2134,9 @@ function SectionCaseStudyDiversifiedHospitality({
             </li>
             <li>
               Diversified paid down more than $5 million in accounts
-              payable across 2022 and 2023
+              payable across the capture period
             </li>
-            <li>The increased profitability materially improved the value of the business</li>
-            <li>
-              Once Phase 1 stabilized, Phase 2 (running the channel as a real brand investment) compounded revenue from ~$2M to $10M+ per year
-            </li>
+            <li>The increased profitability materially improved the underlying business</li>
           </ul>
 
           <h3 className="rv2-h3 rv2-case-study-h3">The Lesson</h3>
@@ -2293,7 +2215,6 @@ function SectionCaseStudyDiversifiedHospitality({
 function SectionTightHero({
   narrative,
   brand,
-  callHref,
   revenue,
   benchmark,
   derived,
@@ -2304,7 +2225,6 @@ function SectionTightHero({
 }: {
   narrative: NarrativeV2;
   brand: PublicReportV2Brand;
-  callHref: string;
   revenue: number | null;
   benchmark: { current_profit_annual: number; business_value: number } | null;
   derived: DerivedSnapshot;
@@ -2340,12 +2260,6 @@ function SectionTightHero({
             <ConfidencePill level={confSellerControl} />
           </span>
         </div>
-      </div>
-
-      <div className="rv2-cover-actions">
-        <a className="rv2-btn rv2-btn-primary" href={callHref}>
-          Book a 15-minute review
-        </a>
       </div>
 
       {/* Compact revenue-led signal at the top of the cover. The full
@@ -3954,6 +3868,52 @@ function V2Styles() {
       }
       .rv2-section-case-study:target .rv2-case-study-details:not([open]) .rv2-case-study-body {
         display: block;
+      }
+
+      /* Phase 59 — Reseller Reality expandable disclosure (web only).
+         Visual treatment mirrors the case-study + math-card expand. */
+      .rv2-reseller-reality-details {
+        margin-top: 18px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.02);
+      }
+      .rv2-reseller-reality-summary {
+        padding: 14px 20px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        list-style: none;
+      }
+      .rv2-reseller-reality-summary::-webkit-details-marker { display: none; }
+      .rv2-reseller-reality-summary::after {
+        content: "▾";
+        color: var(--gold);
+        font-size: 14px;
+        transition: transform 0.15s ease;
+      }
+      .rv2-reseller-reality-details[open] .rv2-reseller-reality-summary::after {
+        transform: rotate(180deg);
+      }
+      .rv2-reseller-reality-summary-label {
+        font-weight: 600;
+        color: var(--text);
+        font-size: 14px;
+      }
+      .rv2-reseller-reality-summary-hint {
+        color: var(--text-muted);
+        font-size: 12px;
+        margin-left: auto;
+        margin-right: 8px;
+      }
+      .rv2-reseller-reality-details[open] .rv2-reseller-reality-summary-hint {
+        display: none;
+      }
+      .rv2-reseller-reality-body {
+        padding: 8px 20px 24px;
+        border-top: 1px solid var(--border-soft);
       }
 
       /* Disclaimer */
