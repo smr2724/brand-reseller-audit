@@ -199,19 +199,11 @@ export function LegionMathSection(props: LegionMathSectionProps) {
         <div className="rv2-source">Directional estimates · transparent line-by-line bridge</div>
       </div>
 
-      {/* Phase 41b — always-visible bridge body. The 5 spec lines that
-          take TTM revenue → recoverable share → reseller net margin →
-          annual profit recapture → 7× EBITDA → business value lift.
-          Values are computed via computeLegionEconomics() (same `out`
-          object as Tier 1 / Tier 2). Renders even before the user
-          clicks "Show full math" so the bridge is never empty. */}
-      <BridgeBody
-        revenue={revenue}
-        out={out}
-        assumptions={assumptions}
-        brandControlledPct={brandControlledPct}
-        revenueBadge={props.revenueBadge}
-      />
+      {/* Phase 58 — the always-visible BridgeBody was the duplicate "top
+          static card" called out in the spec: it surfaced the same
+          delta_profit / exit_lift values as the Tier 1 hero stats below
+          plus the Tier 2 full P&L. Deleted in Phase 58; the expandable
+          card below is now the single source of math truth. */}
 
       {/* Tier 1 — exactly 5 hero rows. */}
       <div className="rv4-tier1">
@@ -312,160 +304,10 @@ export function LegionMathSection(props: LegionMathSectionProps) {
   );
 }
 
-// ====================================================================
-// Phase 41b — Bridge body
-// Always-visible line-by-line bridge under the section header. Six rows
-// per the executive spec: TTM revenue → recoverable share of buy-box →
-// reseller net margin → annual profit recapture → EBITDA multiple →
-// business value lift. Values come from `out` (computeLegionEconomics);
-// no math is inlined here.
-// ====================================================================
-
-function BridgeBody({
-  revenue,
-  out,
-  assumptions,
-  brandControlledPct,
-  revenueBadge,
-}: {
-  revenue: number | null;
-  out: LegionOutputs;
-  assumptions: LegionAssumptions;
-  brandControlledPct: number | null;
-  revenueBadge: "actual" | "estimate" | "confirmed" | null;
-}) {
-  const haveRevenue = revenue != null && revenue > 0;
-  const recoverableShare =
-    brandControlledPct != null
-      ? Math.max(0, Math.min(1, 1 - brandControlledPct))
-      : 1;
-  const revConf: BridgeConfidence =
-    revenueBadge === "confirmed" || revenueBadge === "actual"
-      ? "High"
-      : revenueBadge === "estimate"
-        ? "Medium"
-        : "Medium";
-  const profitConf: BridgeConfidence =
-    revenueBadge === "confirmed" || revenueBadge === "actual" ? "High" : "Medium";
-
-  const rows: BridgeRow[] = [
-    {
-      key: "revenue",
-      label: "TTM Amazon revenue",
-      value: haveRevenue ? money(revenue!) : "— not measured",
-      note:
-        revenueBadge === "confirmed"
-          ? "Confirmed by user"
-          : revenueBadge === "actual"
-            ? "From your records"
-            : "Keepa-based estimate",
-      confidence: revConf,
-      op: null,
-    },
-    {
-      key: "recoverable",
-      label: "× Recoverable share of buy-box",
-      value: pct(recoverableShare, 1),
-      note:
-        brandControlledPct != null && brandControlledPct > 0
-          ? `1 − brand-owned / authorized / Amazon (${pct(brandControlledPct, 1)})`
-          : "1 − brand-owned − authorized − Amazon",
-      confidence: "High",
-      op: "×",
-    },
-    {
-      key: "net_margin",
-      label: "× Reseller net margin",
-      value: pct(assumptions.reseller_net_margin_pct, 1),
-      note: "Net of Amazon fees, FBA, ads, returns, inbound shipping",
-      confidence: "Medium",
-      op: "×",
-    },
-    {
-      key: "profit",
-      label: "= Estimated annual profit recapture",
-      value: haveRevenue ? money(out.delta_profit) : "— not measured",
-      note: "Δ profit per year — incremental EBITDA on the recoverable slice",
-      confidence: profitConf,
-      op: "=",
-      total: true,
-    },
-    {
-      key: "ebitda_mult",
-      label: `× ${assumptions.ebitda_multiple}× EBITDA multiple`,
-      value: `${assumptions.ebitda_multiple}×`,
-      note: "Lower-mid market private-business comparable; pressure-test on a call",
-      confidence: "Assumption-based",
-      op: "×",
-    },
-    {
-      key: "value",
-      label: "= Estimated business value lift",
-      value: haveRevenue ? money(out.exit_lift) : "— not measured",
-      note: "Multiple applied to incremental EBITDA",
-      confidence: "Assumption-based",
-      op: "=",
-      total: true,
-    },
-  ];
-
-  return (
-    <div className="rv4-bridge" role="table" aria-label="Financial bridge">
-      <div className="rv4-bridge-head" role="row">
-        <div role="columnheader">Line</div>
-        <div role="columnheader" className="rv2-num">Value</div>
-        <div role="columnheader">Source / Note</div>
-        <div role="columnheader">Confidence</div>
-      </div>
-      {rows.map((r) => (
-        <div
-          key={r.key}
-          role="row"
-          className={`rv4-bridge-row${r.total ? " rv4-bridge-row-total" : ""}`}
-        >
-          <div role="cell" className="rv4-bridge-label">{r.label}</div>
-          <div role="cell" className="rv4-bridge-value rv2-num">{r.value}</div>
-          <div role="cell" className="rv4-bridge-note">{r.note}</div>
-          <div role="cell" className="rv4-bridge-conf">
-            <BridgePill level={r.confidence} />
-          </div>
-        </div>
-      ))}
-      <p className="rv2-muted-small rv4-bridge-footnote">
-        Bridge driven by your audit inputs. Numbers above the &ldquo;Show full math&rdquo; toggle update live when you tweak assumptions.
-      </p>
-    </div>
-  );
-}
-
-type BridgeConfidence = "Low" | "Medium" | "High" | "Assumption-based";
-
-interface BridgeRow {
-  key: string;
-  label: string;
-  value: string;
-  note: string;
-  confidence: BridgeConfidence;
-  op: "×" | "=" | null;
-  total?: boolean;
-}
-
-function BridgePill({ level }: { level: BridgeConfidence }) {
-  const tone =
-    level === "High"
-      ? "high"
-      : level === "Medium"
-        ? "med"
-        : level === "Low"
-          ? "low"
-          : "assumption";
-  return (
-    <span className={`rv2-conf rv2-conf-${tone}`}>
-      <span className="rv2-conf-dot" aria-hidden />
-      <span className="rv2-conf-label">{level}</span>
-    </span>
-  );
-}
+// Phase 58 — BridgeBody / BridgePill / BridgeRow / BridgeConfidence were
+// removed (they were the duplicate "top static card" called out in the
+// Phase 58 spec). The expandable Tier 1 + Tier 2 card below remains the
+// single source of math truth.
 
 // ====================================================================
 // Tier 1 hero stat cards
