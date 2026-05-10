@@ -127,20 +127,48 @@ export function PublicReportV2({
       null,
   });
 
-  // Phase 41a — short / tight-channel layout. Triggered when the
-  // persisted classification snapshot shows reseller share < 5% AND
-  // brand-owned + authorized share >= 90%. `derived.is_tight_channel`
-  // already requires `has_snapshot`, so legacy reports without a
-  // classification snapshot fall through to the long opportunity layout
-  // (or the legacy `diy_fit` rendering, if present).
-  const isTightShort = derived.is_tight_channel;
+  // Phase 56 — segment-driven routing (Edge F: deterministic segment
+  // wins over snapshot math). When the qualification row carries a
+  // segment, use it directly:
+  //   - reseller_controlled        → opportunity (full)
+  //   - mixed_control              → opportunity (full)
+  //   - brand_managed_with_leakage → opportunity_softlead (softer lead)
+  //   - authorized_network_healthy → tight (Phase 41a layout)
+  // Disqualified segments (5-10) are suppressed upstream in /r/[token];
+  // if one slips through we fall back to opportunity to avoid a blank
+  // page. Legacy reports without a segment fall through to the prior
+  // snapshot-math rules so they render unchanged.
+  const segment = narrative.qualification?.segment ?? null;
+  const segmentSays = (() => {
+    switch (segment) {
+      case "authorized_network_healthy":
+        return "tight" as const;
+      case "brand_managed_with_leakage":
+        return "opportunity_softlead" as const;
+      case "reseller_controlled":
+      case "mixed_control":
+        return "opportunity" as const;
+      default:
+        return null;
+    }
+  })();
+
+  // Phase 41a — short / tight-channel layout. Triggered by either the
+  // segment classification or (legacy fallback) the snapshot math.
+  const isTightShort =
+    segmentSays === "tight" ||
+    (segmentSays == null && derived.is_tight_channel);
+
+  // Phase 56 — softer-lead opportunity variant for Segment 4.
+  const isSoftLead = segmentSays === "opportunity_softlead";
 
   // Phase 24 — legacy diy_fit mode. Older reports without a
   // classification snapshot may still be tagged `diy_fit` by
   // `decideReportMode`; we keep the legacy DIY rendering path for them
-  // so existing public URLs render unchanged.
+  // so existing public URLs render unchanged. Segment-driven routing
+  // takes precedence when present.
   const isLegacyDiy =
-    !isTightShort && narrative.report_mode === "diy_fit";
+    segmentSays == null && !isTightShort && narrative.report_mode === "diy_fit";
 
   // Pull the seed values for the editable math input panel out of
   // narrative_json + the persisted ReportAssumptions row. Anything
@@ -241,6 +269,10 @@ export function PublicReportV2({
               narrative={narrative}
               derived={derived}
             />
+            {/* Phase 56 — Segment 2 callout: even authorized resellers cap growth */}
+            {segment === "authorized_network_healthy" && (
+              <SectionAuthorizedResellersCap />
+            )}
             {/* 7. Three concrete steps to seal the leak yourself */}
             <SectionDiySteps narrative={narrative} brand={brand} />
             {/* 8. Soft CTA */}
@@ -280,6 +312,8 @@ export function PublicReportV2({
               confProfit={confProfit}
               confValue={confValue}
             />
+            {/* Phase 56 — Segment 4 (brand_managed_with_leakage) soft lead */}
+            {isSoftLead && <SectionSoftLead brand={brand} derived={derived} />}
             {/* 2. Executive Summary Box */}
             <SectionExecutiveSummary
               narrative={narrative}
@@ -2931,6 +2965,128 @@ function SectionDisclaimer() {
         <p>
           All revenue, profit, and margin estimates are directional and based on available marketplace data, third-party tools, and reasonable assumptions. Actual results depend on costs, pricing, inventory, reseller agreements, fulfillment method, Amazon fees, and execution.
         </p>
+      </div>
+    </section>
+  );
+}
+
+// Phase 56 — Segment 4 (brand_managed_with_leakage) soft lead callout.
+// Renders only in opportunity_softlead mode, immediately after the
+// standard cover. Acknowledges the brand is doing well on its own
+// before transitioning into the leakage / Phase 2 framing.
+function SectionSoftLead({
+  brand,
+  derived,
+}: {
+  brand: PublicReportV2Brand;
+  derived: DerivedSnapshot;
+}) {
+  const brandOwnedPct = Math.round((derived.shares?.brand_owned ?? 0) * 100);
+  return (
+    <section className="rv2-section">
+      <div className="rv2-section-inner">
+        <div
+          style={{
+            border: "1px solid var(--border-soft)",
+            borderLeft: "3px solid var(--gold)",
+            background: "rgba(201,169,106,0.06)",
+            padding: "20px 24px",
+            borderRadius: "0 10px 10px 0",
+            marginTop: 12,
+          }}
+        >
+          <div
+            style={{
+              fontWeight: 700,
+              fontSize: 13,
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              color: "var(--gold)",
+              marginBottom: 8,
+            }}
+          >
+            You&apos;re doing well
+          </div>
+          <p style={{ margin: 0, color: "var(--text)", lineHeight: 1.65 }}>
+            {brand.name}, you control a meaningful share of your Amazon channel
+            yourself — roughly {brandOwnedPct}% brand-owned today. That puts you
+            ahead of most. The remaining slice is where unauthorized resellers
+            are still costing you in leakage. Close that gap and you control
+            100% of sales, profit on existing demand doubles, and you&apos;re
+            set up for Phase 2 growth.
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// Phase 56 — Segment 2 (authorized_network_healthy) callout.
+// Renders only in tight-mode for Segment 2 brands. Soft, consultative,
+// keeps with Phase 54 voice. The "missing piece" called out by the
+// user: even authorized resellers cap growth at scale.
+function SectionAuthorizedResellersCap() {
+  return (
+    <section className="rv2-section">
+      <div className="rv2-section-inner">
+        <div
+          style={{
+            border: "1px solid var(--border-soft)",
+            borderRadius: 10,
+            padding: "22px 24px",
+            background: "rgba(255,255,255,0.02)",
+            marginTop: 12,
+          }}
+        >
+          <h3
+            style={{
+              fontSize: 18,
+              fontWeight: 700,
+              color: "var(--text)",
+              margin: "0 0 12px",
+              lineHeight: 1.3,
+            }}
+          >
+            Why even authorized resellers cap your growth
+          </h3>
+          <div style={{ display: "grid", gap: 14, color: "var(--text)", lineHeight: 1.65 }}>
+            <p style={{ margin: 0 }}>
+              Authorized resellers can be excellent partners. They hold
+              inventory, they extend reach, and they often grew with your
+              brand. None of that is going away.
+            </p>
+            <p style={{ margin: 0 }}>
+              But there&apos;s a quieter cost that becomes visible at scale: a
+              fragmented seller base — even an authorized one — caps how
+              aggressively the brand itself can invest in the channel. Each
+              reseller sets their own pricing posture. Each one decides their
+              own inventory cadence. Each one shapes a piece of the customer
+              experience the brand owner doesn&apos;t control.
+            </p>
+            <p style={{ margin: 0 }}>
+              That fragmentation isn&apos;t a problem at $1M, $2M, or even $5M
+              of Amazon revenue. It becomes the bottleneck somewhere between
+              $5M and $10M, when the brand wants to invest seriously in
+              advertising, content, and listing optimization — and discovers
+              that those investments compound only when 100% of the buy box
+              is brand-controlled.
+            </p>
+            <p style={{ margin: 0 }}>
+              Diversified Hospitality went through exactly this. Authorized
+              distributors were &ldquo;helping&rdquo; until we ran the
+              numbers. Phase 1 brought all sales under brand control —
+              profit doubled on the same revenue base. Phase 2 then took the
+              channel from $2M to $10M+ per year. None of that compounding
+              was possible while the channel was fragmented across resellers,
+              even authorized ones.
+            </p>
+            <p style={{ margin: 0 }}>
+              We&apos;re not telling you your distributor network is bad.
+              We&apos;re telling you it&apos;s the layer between where you are
+              now and where Phase 2 can take you.
+            </p>
+          </div>
+        </div>
       </div>
     </section>
   );

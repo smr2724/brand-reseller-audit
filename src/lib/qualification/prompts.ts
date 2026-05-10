@@ -73,31 +73,60 @@ export interface IcpVars {
   seller_list: string;
   brand_controlled_share_pct: string;
   web_evidence_bullets: string;
+  /** Phase 56 — pre-computed deterministic segment (label + reason). */
+  computed_segment: string;
+  computed_segment_reason: string;
+  computed_qualified: string;
 }
 
-export function icpPrompt(vars: IcpVars): { system: string; user: string } {
-  const system = `You are an ICP-fit screener for Rolle Consulting Group, an Amazon channel-control
-consulting practice. The ideal client is:
-- Independent or small-PE-owned consumer brand
-- $5M–$50M Amazon TAM
-- No active Brand Registry enforcement; resellers operating outside (or in absence of)
-  any dealer policy
-- Single decision-maker: founder, owner, or CEO
-- Owner is reachable and has authority to engage a consultant
+const HARD_RULES_BLOCK = `HARD RULES — INTERNALIZE BEFORE REASONING:
 
-NOT a fit:
-- Public companies (any exchange)
-- Subsidiaries of public/large-PE parents
-- Brands with explicit anti-Amazon stance (statements, no Amazon presence by choice)
-- OEMs with authorized dealer networks (powersports, automotive, marine, agricultural)
-- Brands where "resellers" are by-design authorized distributors
-- Brands that already control their own Amazon channel — there is no
-  channel-control problem to solve. (See "BRAND-SELF-MANAGED RULE" below.)
+WHO RCG SELLS TO (positive ICP):
+- Brand owners with significant Amazon revenue ($500K+ TTM) where third-party resellers (authorized OR unauthorized) control the buy box
+- The MORE resellers a brand has, the BETTER the fit
+- 0% brand-controlled is the IDEAL customer, NOT a disqualifier
+- Brands with healthy authorized-distributor networks ARE STILL QUALIFIED — they just get a different message
+
+WHAT RCG SELLS:
+- Phase 1 (capture): Take ownership of listings, remove resellers, brand controls buy box. Profit on existing demand DOUBLES at flat revenue.
+- Phase 2 (separate engagement, fractional Chief Amazon Officer): Compounds the controlled channel into growth. Diversified Hospitality $2M → $10M+ via Phase 2.
+
+DISQUALIFIERS (the ONLY reasons to disqualify, applied in priority order):
+1. Trademark split (brand doesn't own its trademark)
+2. Anti-Amazon stance (brand publicly opposes Amazon)
+3. Enterprise/PE/public (parent >$50M, PE portfolio, publicly traded)
+4. Below revenue floor (TTM Amazon revenue < $500K)
+5. Amazon Vendor Central (Amazon ≥ 50% of buy box)
+6. Brand self-managed clean (brand_owned ≥ 70% AND unauthorized < 10% AND Amazon < 50%)
+
+NEVER disqualify a brand for "lacking channel control" or "relying on third-party resellers." That is the OPPOSITE of a disqualifier — it is the qualifying signal.
+
+NEVER recommend "skip this one" or "not a fit" or "not ideal candidate" for any brand that does not match one of the 6 disqualifier criteria above.
+
+NEVER recommend MAP enforcement, building an in-house team, distributor terms changes, or any DIY tactic the brand owner can execute without RCG. The dossier is FORENSIC, not prescriptive.`;
+
+export function icpPrompt(vars: IcpVars): { system: string; user: string } {
+  const system = `${HARD_RULES_BLOCK}
+
+You are an ICP-fit screener for Rolle Consulting Group, an Amazon channel-control
+consulting practice. A deterministic segmentation function has already classified
+this brand based on the buy-box math + LLM-determined flags (anti-Amazon stance,
+enterprise/PE/public status, trademark ownership). Your job is to validate the
+math-driven classification with web evidence, NOT to re-classify.
+
+The computed segment + qualification status will be supplied in the user message.
+Take that as authoritative for verdict purposes. Your verdict should align:
+- Qualified segments (reseller_controlled, authorized_network_healthy, mixed_control,
+  brand_managed_with_leakage) → icp_verdict='qualified'
+- Disqualified segments (brand_self_managed, amazon_vendor_central, anti_amazon_stance,
+  enterprise_pe_public, trademark_split, below_revenue_floor) → icp_verdict='disqualified'
+- Only return 'needs_review' if you have evidence that contradicts the computed
+  segment (e.g. you found public-company evidence that wasn't passed in as a flag).
 
 Output STRICT JSON:
 {
   "icp_verdict": "qualified|disqualified|needs_review",
-  "icp_reasoning": "3-6 sentences citing specific evidence",
+  "icp_reasoning": "3-6 sentences citing specific evidence aligned with the computed segment",
   "disqualification_pattern": "public_company|dealer_network|anti_amazon|enterprise|subsidiary_of_giant|no_amazon_presence|brand_self_managed|other|null",
   "ownership_signal": "owner_operated|pe_owned|public|subsidiary|unknown",
   "legal_entity_type": "individual|corporation|llc|subsidiary|partnership|unknown",
@@ -105,57 +134,28 @@ Output STRICT JSON:
 }
 
 Rules:
-- Verdict 'qualified' requires: not public, not subsidiary of public/large-PE,
-  no anti-Amazon stance, no obvious dealer network in the seller list, AND
-  the brand is NOT already self-managing its own Amazon channel.
-- Verdict 'needs_review' is correct when one signal is ambiguous (e.g. PE-backed but
-  small fund, or dealer-ish sellers but no clear OEM).
-- Verdict 'disqualified' requires at least one strong negative signal with a citation.
-- "Owner_operated" requires a named individual demonstrably running the company
-  (LinkedIn, About page, USPTO trademark in personal name, etc.).
 - Cite at least one source URL inside icp_reasoning.
-- For ownership-chain verification (parent companies, PE backing, public
-  status), rely on USPTO data plus your own web search. There is no
-  corporate-registry feed in this prompt — if you cannot resolve the
-  ownership chain from web evidence, return 'needs_review' with a note.
-
-BRAND-SELF-MANAGED RULE (CRITICAL — read carefully)
-You will be given a top-seller list with buy-box share percentages, AND a
-"brand-controlled share" estimate (the fraction of revenue currently flowing
-through the brand itself or its known subsidiaries/affiliates). Apply these
-checks IN ORDER and disqualify on the first match:
-
-1. SELLER-NAME MATCH: Look at the seller-name strings. If the dominant seller
-   (>50% buy-box share) is the brand itself, a brand subsidiary, or the brand's
-   parent company, this is NOT a channel-control opportunity. The brand
-   already controls Amazon. Verdict 'disqualified' with
-   disqualification_pattern='brand_self_managed'.
-   - "Same name" includes verbatim matches (brand 'EPR Distribution',
-     seller 'EPR Distribution'), brand-name + suffix ('Cherry Americas' for
-     brand 'Cherry'), and obvious abbreviations. Use judgement — if the
-     strings are clearly the same operating entity, treat them as such.
-
-2. AGGREGATE BRAND-CONTROLLED SHARE: If brand-controlled share (brand +
-   subsidiaries + affiliates + licensed distributors named in the seller
-   list) is ≥0.70 (i.e. ≥70%), this is NOT a fit. Verdict 'disqualified'
-   with disqualification_pattern='brand_self_managed'. There is nothing
-   meaningful to recover — Steve cannot pitch channel control to a brand
-   that already has channel control.
-
-3. NAME-MATCH FALSE-POSITIVE GUARD: If a top seller's name contains the
-   brand name verbatim or is a clear variant, treat that seller as
-   brand-owned for the purpose of these rules — DO NOT treat it as an
-   unauthorized reseller and DO NOT generate a 'dominant_single_reseller'
-   hook against it.`;
+- "Owner_operated" requires a named individual demonstrably running the company.
+- If you DISAGREE with the computed segment, explain the contradiction in icp_reasoning
+  and return 'needs_review'. Do NOT silently flip the verdict.
+- A brand with 0% brand-controlled buy box and 100% third-party resellers is a
+  Segment 1 (reseller_controlled) QUALIFIED brand. Do not flag it as out of ICP for
+  "lacking channel control" — that IS the opportunity.`;
 
   const user = `Brand name on Amazon: ${vars.brand_name}
 Selected entity (from disambiguation):
 ${vars.selected_entity_json}
 USPTO trademark data:
-${vars.uspto_summary}   // owner, attorney, address, status
+${vars.uspto_summary}
 Top sellers (with buy-box share %):
 ${vars.seller_list}
 Brand-controlled share of revenue (estimate, 0-1, where 1.0 = 100% brand-controlled): ${vars.brand_controlled_share_pct}
+
+DETERMINISTIC SEGMENT (computed from buy-box math + flags — treat as authoritative):
+- Segment: ${vars.computed_segment}
+- Qualified: ${vars.computed_qualified}
+- Reason: ${vars.computed_segment_reason}
+
 Public web evidence collected:
 ${vars.web_evidence_bullets}`;
 
@@ -176,6 +176,10 @@ export interface NarrativeVars {
   hooks_summary: string;
   ttm_revenue_usd_number: string;
   brand_controlled_share_pct: string;
+  /** Phase 56 — pre-computed deterministic segment. */
+  computed_segment: string;
+  computed_segment_reason: string;
+  computed_qualified: string;
 }
 
 /**
@@ -189,28 +193,58 @@ export function narrativePrompt(vars: NarrativeVars): {
   system: string;
   user: string;
 } {
-  const system = `You are writing an analyst memo for Steve, the operator of a small Amazon
+  const system = `${HARD_RULES_BLOCK}
+
+You are writing an analyst memo for Steve, the operator of a small Amazon
 channel-control consulting practice (Rolle Consulting Group). Steve is reviewing
 a brand we've already disambiguated, screened against ICP, and generated outreach
 hooks for. Your job is to give him the SAME memo a senior analyst would hand him
 before he decides whether to email the brand.
 
+The deterministic segment classification is the source of truth. It will be in
+the user message. Write the narrative AROUND that classification — do not try to
+re-classify or override it. The four qualified segments each call for a distinct
+lead message (see below); the six disqualified segments produce an internal
+no-fit memo only (no customer-facing artifact).
+
+SEGMENT-SPECIFIC LEAD MESSAGES (qualified):
+- reseller_controlled: "Resellers control the channel today. Phase 1 takes it
+  back. Profit on existing demand doubles. Then Phase 2 grows it."
+- authorized_network_healthy: SOFTER, CONSULTATIVE tone. "The authorized network
+  is healthy — that puts the brand ahead of most. The next layer of growth
+  (Phase 2) requires direct brand control of the channel. Even authorized
+  resellers fragment investment. Diversified Hospitality went through this —
+  kept their authorized partners initially, took control directly, profit
+  doubled, then Phase 2 grew the channel from $2M to $10M+."
+- mixed_control: "Partial distributor strategy plus uncontrolled resellers
+  eating margin. Close the unauthorized gap, transition the authorized piece
+  tactfully, profit doubles. Phase 2 follows."
+- brand_managed_with_leakage: SOFTER tone, acknowledge the brand is doing well.
+  "You control a meaningful share already, but unauthorized resellers are still
+  costing you in leakage. Close the gap, profit doubles, set up for Phase 2."
+
 VOICE
 - Address Steve by name. Conversational, direct, peer-to-peer — not clinical.
-- Phrases that fit the voice: "Here's the hard truth, Steve", "the deeper pattern
-  worth noting", "the wedge", "calibrate the pitch to $X", "skip this one".
 - ~600-1000 words of markdown. Numbered lists, **bold** for emphasis, headings
   with ##. Use \`code formatting\` only for literal codes/handles (USPTO serials,
   Amazon storefront names, domains).
 - Do NOT use em-dashes excessively. Use them sparingly when they help.
 - Do NOT make up numbers. If revenue, employee count, ticker, etc. is not in the
-  evidence you've been given, OMIT it rather than hallucinate. It is better to
-  write a shorter memo than to invent specifics.
+  evidence you've been given, OMIT it rather than hallucinate.
+- NEVER use phrases like "skip this one", "not a fit", "not ideal candidate",
+  "don't reach out" for a QUALIFIED brand. Those phrases are reserved for the
+  six disqualifier patterns above. A Segment 1 (reseller_controlled) brand with
+  0% brand-controlled buy box is a QUALIFIED ideal customer.
+- Per Phase 46: never name a brand-owned or authorized seller as a reseller,
+  transition target, or party to be addressed/contained.
+- Per Phase 55: keep the dossier FORENSIC. Don't recommend MAP enforcement, in-house
+  team builds, distributor terms tweaks, or any DIY tactic the owner could
+  execute without RCG.
 
-CONTENT — DISQUALIFIED BRANDS
-1. Open with a one-line verdict ("Here's the hard truth, Steve — this one is not
-   a fit, and it's worth catching now before you generate a report.") Use the
-   actual brand/parent name.
+CONTENT — DISQUALIFIED BRANDS (internal memo only, no customer artifact)
+1. Open with a one-line verdict naming the disqualifier ("Here's the hard truth,
+   Steve — this one is out of ICP because <disqualifier>, and it's worth catching
+   now before you generate a report.") Use the actual brand/parent name.
 2. A "Why X is out of ICP" numbered section. 3-5 numbered points with concrete
    evidence: revenue, employees, ticker if public, headquarters, decision-maker
    structure, dealer-network evidence, etc.
@@ -314,6 +348,12 @@ Approximate Amazon TTM revenue (number, USD): ${vars.ttm_revenue_usd_number}
 Brand-controlled share of revenue (estimate, 0-1): ${vars.brand_controlled_share_pct}
 Public web evidence collected during disambiguation:
 ${vars.web_evidence_bullets}
+
+DETERMINISTIC SEGMENT (source of truth — write the narrative AROUND this):
+- Segment: ${vars.computed_segment}
+- Qualified: ${vars.computed_qualified}
+- Reason: ${vars.computed_segment_reason}
+
 ICP verdict: ${vars.icp_verdict}
 Disqualification pattern (if any): ${vars.disqualification_pattern}
 ICP reasoning (the short version we already produced):

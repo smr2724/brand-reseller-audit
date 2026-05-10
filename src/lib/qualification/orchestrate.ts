@@ -16,6 +16,7 @@ import {
   icpPrompt,
   narrativePrompt,
 } from "./prompts";
+import { computeSegment, type Segment } from "./segments";
 import type {
   BrandAssociatedSeller,
   CandidateEntity,
@@ -29,7 +30,10 @@ import type {
   QualificationRow,
 } from "./types";
 
-const DEFAULT_MAIN_MODEL = "gpt-4o";
+// Phase 56 — bump main model to gpt-4.1 (used elsewhere for higher-stakes
+// owner-resolver web search). The qualification narrative drives report
+// routing; the cost premium over gpt-4o is worth it.
+const DEFAULT_MAIN_MODEL = "gpt-4.1";
 const DEFAULT_HOOK_MODEL = "gpt-4o-mini";
 
 interface BrandRow {
@@ -123,8 +127,10 @@ export async function runQualification(
     })
     .eq("id", brandId);
 
-  // 2. Pull seller list + ASIN titles.
-  const [sellerRes, asinRes] = await Promise.all([
+  // 2. Pull seller list + ASIN titles. Phase 56: also fetch the
+  // per-seller `classification` column so we can compute the
+  // deterministic segment without re-classifying.
+  const [sellerRes, asinRes, classRes] = await Promise.all([
     admin
       .from("brand_sellers")
       .select("seller_id, seller_name, share_pct")
@@ -136,9 +142,18 @@ export async function runQualification(
       .select("asin, title")
       .eq("brand_id", brandId)
       .limit(10),
+    admin
+      .from("brand_sellers")
+      .select("seller_id, share_pct, classification")
+      .eq("brand_id", brandId),
   ]);
   const sellers: SellerSnap[] = (sellerRes.data ?? []) as SellerSnap[];
   const asins: AsinSnap[] = (asinRes.data ?? []) as AsinSnap[];
+  const allClassified = (classRes.data ?? []) as Array<{
+    seller_id: string | null;
+    share_pct: number | null;
+    classification: string | null;
+  }>;
 
   const sellerNames: string[] = sellers
     .map((s) => s.seller_name ?? null)
@@ -159,6 +174,22 @@ export async function runQualification(
     (brand.est_monthly_revenue != null ? brand.est_monthly_revenue * 12 : null);
   const ttmText = ttm != null ? `$${Math.round(ttm).toLocaleString("en-US")}` : "unknown";
   const domainText = brand.resolved_owner_domain ?? "(unknown)";
+
+  // 2b. Phase 56 — deterministic segment computation. Aggregates share by
+  // classification bucket; defaults unclassified sellers to 'reseller'
+  // (Edge D). Anti-Amazon stance + enterprise/PE/public flags are filled
+  // in after ICP runs and may flip the segment — we recompute then.
+  const shares = aggregateShares(allClassified);
+  const segmentNoFlags = computeSegment({
+    brand_owned_pct: shares.brand_owned * 100,
+    authorized_pct: shares.authorized * 100,
+    unauthorized_pct: shares.unauthorized * 100,
+    amazon_pct: shares.amazon * 100,
+    ttm_revenue_usd: ttm ?? 0,
+    has_trademark: true, // pessimistic default until USPTO + ICP run
+    is_anti_amazon: false,
+    is_enterprise_pe_public: false,
+  });
 
   // 3. Prompt 1 — disambiguation.
   const dis = disambiguationPrompt({
@@ -232,6 +263,9 @@ export async function runQualification(
     brand_controlled_share_pct: brandControlledShareIcp,
     web_evidence_bullets:
       webEvidence.join("\n") || "(no additional web evidence collected)",
+    computed_segment: segmentNoFlags.segment,
+    computed_segment_reason: segmentNoFlags.reason,
+    computed_qualified: String(segmentNoFlags.qualified),
   });
   let icp_verdict: IcpVerdict = "needs_review";
   let icp_reasoning = "";
@@ -271,6 +305,68 @@ export async function runQualification(
     if (!llmError) llmError = e instanceof Error ? e.message : String(e);
     icp_verdict = "needs_review";
     icp_reasoning = `LLM error during ICP screen: ${e instanceof Error ? e.message : String(e)}`;
+  }
+
+  // 5b. Phase 56 — recompute the final segment now that the ICP screen
+  // has filled in the LLM-determined flags (anti-Amazon stance,
+  // enterprise/PE/public status, trademark ownership inferred from
+  // USPTO data). This is the segment we persist + drive routing on.
+  const isAntiAmazon =
+    disqualification_pattern === "anti_amazon" ||
+    (icp_verdict === "disqualified" && disqualification_pattern === "no_amazon_presence");
+  const isEnterprise =
+    disqualification_pattern === "public_company" ||
+    disqualification_pattern === "enterprise" ||
+    disqualification_pattern === "subsidiary_of_giant" ||
+    ownership_signal === "public" ||
+    ownership_signal === "pe_owned";
+  const hasTrademark =
+    !!uspto?.owner &&
+    selected_entity?.name != null &&
+    // crude string overlap — if the USPTO owner doesn't reference the
+    // brand or selected entity at all, treat as a trademark split signal.
+    (uspto.owner.toLowerCase().includes(brand.name.toLowerCase().split(" ")[0] ?? "") ||
+      uspto.owner.toLowerCase().includes(selected_entity.name.toLowerCase().split(" ")[0] ?? ""));
+  const finalSegment = computeSegment({
+    brand_owned_pct: shares.brand_owned * 100,
+    authorized_pct: shares.authorized * 100,
+    unauthorized_pct: shares.unauthorized * 100,
+    amazon_pct: shares.amazon * 100,
+    ttm_revenue_usd: ttm ?? 0,
+    has_trademark: hasTrademark || !uspto, // give benefit of doubt when USPTO not called
+    is_anti_amazon: isAntiAmazon,
+    is_enterprise_pe_public: isEnterprise,
+  });
+
+  // Edge F per Phase 56 spec — deterministic segment wins. If the
+  // segment says qualified but ICP said disqualified for a soft reason
+  // (or vice versa), reconcile to the segment's verdict.
+  if (finalSegment.qualified && icp_verdict === "disqualified") {
+    console.warn(
+      "[qualification] segment qualified but ICP disqualified — segment wins (Edge F)",
+      brandId,
+      { ICP_verdict: icp_verdict, segment: finalSegment.segment },
+    );
+    icp_verdict = "qualified";
+    disqualification_pattern = null;
+  } else if (!finalSegment.qualified && icp_verdict === "qualified") {
+    console.warn(
+      "[qualification] segment disqualified but ICP qualified — segment wins (Edge F)",
+      brandId,
+      { ICP_verdict: icp_verdict, segment: finalSegment.segment },
+    );
+    icp_verdict = "disqualified";
+    // Map segment back to disqualification_pattern where it fits the enum.
+    const segmentToPattern: Partial<Record<Segment, string>> = {
+      anti_amazon_stance: "anti_amazon",
+      enterprise_pe_public: "enterprise",
+      trademark_split: "other",
+      below_revenue_floor: "other",
+      amazon_vendor_central: "other",
+      brand_self_managed: "brand_self_managed",
+    };
+    disqualification_pattern =
+      segmentToPattern[finalSegment.segment] ?? disqualification_pattern;
   }
 
   // 6. Prompt 3 — hook ranking. Phase 51: only generate when verdict is
@@ -314,7 +410,10 @@ export async function runQualification(
   let narrative_markdown: string | null = null;
   let brand_associated_sellers: BrandAssociatedSeller[] | null = null;
   let false_positive_flags: FalsePositiveFlag[] | null = null;
-  let channel_pattern: ChannelPattern | null = null;
+  // Phase 56 — LLM-emitted channel_pattern is kept only as a hint for
+  // logging. The persisted channel_pattern is overwritten by the
+  // deterministic finalSegment.segment in the row below.
+  let channel_pattern_hint: ChannelPattern | null = null;
   let pitch_math: PitchMath | null = null;
   try {
     const hooksSummary =
@@ -346,6 +445,9 @@ export async function runQualification(
       icp_reasoning,
       disqualification_pattern: disqualification_pattern ?? "none",
       hooks_summary: hooksSummary,
+      computed_segment: finalSegment.segment,
+      computed_segment_reason: finalSegment.reason,
+      computed_qualified: String(finalSegment.qualified),
     });
     const r = await callJsonLLM({
       model: DEFAULT_MAIN_MODEL,
@@ -393,7 +495,17 @@ export async function runQualification(
       parsed.channel_pattern !== "null" &&
       parsed.channel_pattern.length > 0
     ) {
-      channel_pattern = parsed.channel_pattern;
+      channel_pattern_hint = parsed.channel_pattern;
+      if (channel_pattern_hint !== finalSegment.segment) {
+        console.info(
+          "[qualification] LLM channel_pattern hint differs from deterministic segment (segment wins)",
+          brandId,
+          {
+            llm_hint: channel_pattern_hint,
+            deterministic_segment: finalSegment.segment,
+          },
+        );
+      }
     }
     if (
       icp_verdict === "qualified" &&
@@ -478,7 +590,12 @@ export async function runQualification(
     narrative_markdown,
     brand_associated_sellers,
     false_positive_flags,
-    channel_pattern,
+    // Phase 56 — Edge F: deterministic segment is source of truth.
+    // We force channel_pattern to the segment slug so the renderer's
+    // routing logic reads consistent values whether or not the LLM
+    // also emitted a channel_pattern.
+    channel_pattern: finalSegment.segment,
+    segment: finalSegment.segment,
     pitch_math,
     llm_model: model,
     llm_tokens_in: totalTokensIn,
@@ -628,7 +745,69 @@ function estimateCost(model: string, tokensIn: number, tokensOut: number): numbe
   const rates: Record<string, { in: number; out: number }> = {
     "gpt-4o": { in: 0.005, out: 0.015 },
     "gpt-4o-mini": { in: 0.00015, out: 0.0006 },
+    "gpt-4.1": { in: 0.002, out: 0.008 },
   };
   const r = rates[model] ?? { in: 0.001, out: 0.003 };
   return (tokensIn / 1000) * r.in + (tokensOut / 1000) * r.out;
+}
+
+/**
+ * Phase 56 — aggregate buy-box shares by classification bucket.
+ * Defaults `unclassified` / unknown rows to `reseller` (Edge D).
+ * Returns shares as fractions (0..1) that sum to ≤ 1; the segmentation
+ * function multiplies by 100 for its percent-based thresholds.
+ */
+function aggregateShares(
+  rows: Array<{
+    seller_id: string | null;
+    share_pct: number | null;
+    classification: string | null;
+  }>,
+): {
+  brand_owned: number;
+  authorized: number;
+  amazon: number;
+  unauthorized: number;
+} {
+  let brand_owned = 0;
+  let authorized = 0;
+  let amazon = 0;
+  let unauthorized = 0;
+  for (const r of rows) {
+    const share = typeof r.share_pct === "number" ? r.share_pct : 0;
+    if (!Number.isFinite(share) || share <= 0) continue;
+    // Force Amazon retail to the 'amazon' bucket regardless of stored
+    // classification — defense in depth even with the trigger in place.
+    if (r.seller_id === "ATVPDKIKX0DER") {
+      amazon += share;
+      continue;
+    }
+    switch (r.classification) {
+      case "brand_owned":
+        brand_owned += share;
+        break;
+      case "authorized":
+        authorized += share;
+        break;
+      case "amazon":
+        amazon += share;
+        break;
+      case "reseller":
+      default:
+        unauthorized += share;
+        break;
+    }
+  }
+  // share_pct may be 0..1 or 0..100 depending on age of the row; normalize.
+  const sum = brand_owned + authorized + amazon + unauthorized;
+  if (sum > 1.5) {
+    // Treat as 0..100, normalize to 0..1.
+    return {
+      brand_owned: brand_owned / 100,
+      authorized: authorized / 100,
+      amazon: amazon / 100,
+      unauthorized: unauthorized / 100,
+    };
+  }
+  return { brand_owned, authorized, amazon, unauthorized };
 }
