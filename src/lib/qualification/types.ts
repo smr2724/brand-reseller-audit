@@ -19,14 +19,23 @@ export type OwnershipSignal =
 
 export type IcpVerdict = "qualified" | "disqualified" | "needs_review";
 
+// Phase 68 — Migration 0050 widened the disqualification_pattern CHECK
+// constraint with six gate-driven values. Keep this type in sync with the
+// normalizer whitelist so callers don't have to cast.
 export type DisqualificationPattern =
   | "public_company"
+  | "subsidiary_of_public"
+  | "pe_portfolio_large"
   | "dealer_network"
   | "anti_amazon"
   | "enterprise"
   | "subsidiary_of_giant"
   | "no_amazon_presence"
   | "brand_self_managed"
+  | "parent_revenue_ratio_below_threshold"
+  | "no_named_decision_maker"
+  | "buyer_rejection_wins"
+  | "holding_naming_signal_review"
   | "other";
 
 export type QualificationState =
@@ -165,6 +174,20 @@ export interface QualificationRow {
   manual_override: boolean;
   manual_override_reason: string | null;
   manual_override_at: string | null;
+  // Phase 68 — qualification hard gates (migration 0050).
+  parent_entity: unknown | null;
+  controlling_entity_revenue_usd: number | null;
+  controlling_entity_employees: number | null;
+  controlling_entity_ownership_type: string | null;
+  recoverable_to_controlling_ratio: number | null;
+  gate_a_corporate_hierarchy: unknown | null;
+  gate_b_revenue_ratio: unknown | null;
+  gate_c_named_decision_maker: unknown | null;
+  buyer_rejection_simulation: unknown | null;
+  hard_gate_verdict: "pass" | "hard_disqualify" | "needs_review" | null;
+  hard_gate_failure_reason: string | null;
+  hard_gate_failure_gate: string | null;
+  hierarchy_sources: unknown | null;
   state: QualificationState;
   error_message: string | null;
   created_at: string;

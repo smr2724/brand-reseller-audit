@@ -68,6 +68,60 @@ interface PitchMath {
   source: "computeLegionEconomics" | "computeBenchmarkEconomics";
 }
 
+// Phase 68 — hard-gate output shapes mirrored from the server modules.
+interface HierarchySource {
+  type: string;
+  url?: string | null;
+  excerpt?: string | null;
+}
+interface ControllingEntity {
+  name: string;
+  ticker: string | null;
+  exchange: string | null;
+  revenue_usd: number | null;
+  employees: number | null;
+  ownership_type: string;
+  parent_chain: string[];
+  pe_aum_usd?: number | null;
+}
+interface GateAOutput {
+  passed: boolean;
+  verdict: "pass" | "hard_disqualify" | "needs_review";
+  controlling_entity: ControllingEntity | null;
+  verdict_reason: string;
+  sources: HierarchySource[];
+  pattern: string | null;
+}
+interface GateBOutput {
+  passed: boolean;
+  verdict: "pass" | "hard_disqualify" | "needs_review";
+  ratio: number | null;
+  threshold: number;
+  recoverable_revenue_usd: number | null;
+  controlling_entity_revenue_usd: number | null;
+  math_explanation: string;
+}
+interface GateCPersonOutput {
+  full_name: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  linkedin_url: string | null;
+}
+interface GateCOutput {
+  passed: boolean;
+  person: GateCPersonOutput | null;
+  search_trail: string[];
+  reason: string;
+}
+interface RejectionOutput {
+  rejection_lines: string[];
+  hook_strength: number;
+  rejection_strength: number;
+  verdict: "pursue_ok" | "do_not_pursue";
+  rationale: string;
+}
+
 interface QualificationRow {
   id: string;
   brand_id: string;
@@ -92,6 +146,20 @@ interface QualificationRow {
   manual_override: boolean;
   manual_override_reason: string | null;
   manual_override_at: string | null;
+  // Phase 68 — hard-gate columns (migration 0050).
+  hard_gate_verdict: "pass" | "hard_disqualify" | "needs_review" | null;
+  hard_gate_failure_gate: string | null;
+  hard_gate_failure_reason: string | null;
+  parent_entity: ControllingEntity | null;
+  controlling_entity_revenue_usd: number | null;
+  controlling_entity_employees: number | null;
+  controlling_entity_ownership_type: string | null;
+  recoverable_to_controlling_ratio: number | null;
+  gate_a_corporate_hierarchy: GateAOutput | null;
+  gate_b_revenue_ratio: GateBOutput | null;
+  gate_c_named_decision_maker: GateCOutput | null;
+  buyer_rejection_simulation: RejectionOutput | null;
+  hierarchy_sources: HierarchySource[] | null;
   state: string;
   error_message: string | null;
 }
@@ -308,6 +376,16 @@ export default function QualificationReview({
           {err && <div className="text-xs text-red-400">{err}</div>}
         </div>
       </div>
+
+      {/* Phase 68 — hard-gate trail. Renders above the narrative when any
+          hard-gate data exists on the row. */}
+      {row.hard_gate_verdict && (
+        <HardGateTrail
+          row={row}
+          onOverride={() => setShowOverride(true)}
+          overrideApplied={row.manual_override}
+        />
+      )}
 
       {row.icp_reconciliation_note && (
         <div className="mb-3 p-3 rounded border border-amber-700 bg-amber-900/20 text-sm text-amber-200">
@@ -862,4 +940,377 @@ function Row({
       <div className="font-medium tabular-nums">{value}</div>
     </div>
   );
+}
+
+// ---- Phase 68 — Hard Gate Trail ----------------------------------------
+
+/**
+ * Renders the five-gate trail above the narrative memo:
+ *
+ *   [✓] Pattern Prescreen     no auto-disqualify patterns matched
+ *   [✗] Gate A — Hierarchy    Subsidiary of ODP Corporation (NASDAQ: ODP, $7.7B)
+ *   [ ] Gate B — Ratio        skipped (Gate A failed)
+ *   [ ] Gate C — Decision-Maker  skipped
+ *   [ ] Rejection Simulation     skipped
+ *
+ * When the verdict is `needs_review`, an Override → Pursue button is
+ * surfaced. The button reuses the existing OverrideModal which writes
+ * manual_override_reason + manual_override_at + manual_override_by.
+ */
+function HardGateTrail({
+  row,
+  onOverride,
+  overrideApplied,
+}: {
+  row: QualificationRow;
+  onOverride: () => void;
+  overrideApplied: boolean;
+}) {
+  const verdict = row.hard_gate_verdict;
+  if (!verdict) return null;
+
+  const failureGate = row.hard_gate_failure_gate;
+  const gateA = row.gate_a_corporate_hierarchy;
+  const gateB = row.gate_b_revenue_ratio;
+  const gateC = row.gate_c_named_decision_maker;
+  const rejection = row.buyer_rejection_simulation;
+  const parent = row.parent_entity;
+
+  // Compute status per gate. ✓ when the gate ran and passed, ✗ when it
+  // ran and failed, blank when it was skipped because an earlier gate
+  // short-circuited.
+  function status(
+    ran: boolean,
+    passed: boolean,
+    isFailureGate: boolean,
+  ): { icon: string; cls: string } {
+    if (isFailureGate) return { icon: "✗", cls: "text-red-300" };
+    if (!ran) return { icon: " ", cls: "text-[var(--text-muted)] opacity-50" };
+    if (passed) return { icon: "✓", cls: "text-green-300" };
+    return { icon: "✗", cls: "text-red-300" };
+  }
+
+  const prescreenRan = true;
+  const prescreenPassed = failureGate !== "pattern_prescreen";
+  const gateARan = !!gateA;
+  const gateAPassed = gateA?.passed === true;
+  const gateBRan = !!gateB;
+  const gateBPassed = gateB?.passed === true;
+  const gateCRan = !!gateC;
+  const gateCPassed = gateC?.passed === true;
+  const rejectionRan = !!rejection;
+  const rejectionPassed = rejection?.verdict === "pursue_ok";
+
+  const verdictLabel =
+    verdict === "pass"
+      ? "PASSED HARD GATES"
+      : verdict === "hard_disqualify"
+        ? "HARD DISQUALIFY"
+        : "NEEDS REVIEW";
+  const verdictBg =
+    verdict === "pass"
+      ? "bg-green-700/20 border-green-700/60 text-green-200"
+      : verdict === "hard_disqualify"
+        ? "bg-red-700/20 border-red-700/60 text-red-200"
+        : "bg-amber-700/20 border-amber-700/60 text-amber-200";
+
+  return (
+    <div className="mb-3 rounded border border-[var(--border-soft)] p-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs uppercase text-[var(--text-muted)] tracking-wide">
+          Hard Gates
+        </div>
+        <span
+          className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold border ${verdictBg}`}
+        >
+          {verdictLabel}
+        </span>
+      </div>
+      <div className="font-mono text-xs space-y-1 leading-relaxed">
+        <GateRow
+          status={status(prescreenRan, prescreenPassed, failureGate === "pattern_prescreen")}
+          name="Pattern Prescreen"
+          detail={
+            failureGate === "pattern_prescreen"
+              ? `${row.disqualification_pattern ?? "pattern fired"} — ${row.hard_gate_failure_reason ?? ""}`
+              : "no auto-disqualify patterns matched"
+          }
+        />
+        <GateRow
+          status={status(gateARan, gateAPassed, failureGate === "gate_a")}
+          name="Gate A — Hierarchy"
+          detail={
+            !gateARan
+              ? "skipped"
+              : gateAPassed
+                ? `${gateA?.controlling_entity?.name ?? "—"} (${gateA?.controlling_entity?.ownership_type ?? "unknown"})`
+                : describeGateAFailure(gateA, row.hard_gate_failure_reason)
+          }
+          sourcesLine={
+            gateA?.sources && gateA.sources.length > 0
+              ? `└─ Sources: ${gateA.sources
+                  .map((s) => s.type)
+                  .filter((v, i, arr) => arr.indexOf(v) === i)
+                  .join(", ")}`
+              : null
+          }
+        />
+        <GateRow
+          status={status(gateBRan, gateBPassed, failureGate === "gate_b")}
+          name="Gate B — Ratio"
+          detail={
+            !gateBRan
+              ? "skipped"
+              : gateBPassed
+                ? `${formatPct(gateB?.ratio)} of controlling entity revenue`
+                : (gateB?.math_explanation ?? "ratio below threshold")
+          }
+        />
+        <GateRow
+          status={status(gateCRan, gateCPassed, failureGate === "gate_c")}
+          name="Gate C — Decision-Maker"
+          detail={
+            !gateCRan
+              ? "skipped"
+              : gateCPassed
+                ? `${gateC?.person?.full_name ?? "(named)"} — ${gateC?.person?.title ?? "title unknown"}`
+                : (gateC?.reason ?? "no named decision-maker found")
+          }
+        />
+        <GateRow
+          status={status(
+            rejectionRan,
+            rejectionPassed,
+            failureGate === "rejection_sim",
+          )}
+          name="Rejection Simulation"
+          detail={
+            !rejectionRan
+              ? "skipped"
+              : rejectionPassed
+                ? `hook ${rejection?.hook_strength}/10 > rejection ${rejection?.rejection_strength}/10 — pursue`
+                : `hook ${rejection?.hook_strength}/10 vs rejection ${rejection?.rejection_strength}/10 — buyer wins`
+          }
+        />
+      </div>
+
+      {/* Failure-mode detail cards */}
+      {failureGate === "gate_a" && parent && (
+        <ParentEntityCard parent={parent} sources={row.hierarchy_sources} />
+      )}
+      {failureGate === "gate_b" && gateB && <RatioBar gateB={gateB} />}
+      {failureGate === "gate_c" && gateC && <SearchTrailCard gateC={gateC} />}
+      {failureGate === "rejection_sim" && rejection && (
+        <RejectionDetailCard rejection={rejection} />
+      )}
+
+      {verdict === "needs_review" && !overrideApplied && (
+        <div className="mt-3 flex items-center justify-between gap-3 p-2 rounded border border-amber-700 bg-amber-900/20">
+          <div className="text-xs text-amber-200">
+            <strong>Needs review:</strong>{" "}
+            {row.hard_gate_failure_reason ?? "see gate trail above"}
+          </div>
+          <button
+            className="btn btn-ghost text-xs"
+            onClick={onOverride}
+            title="Provide a one-sentence rationale to override → pursue"
+          >
+            Override → Pursue
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GateRow({
+  status,
+  name,
+  detail,
+  sourcesLine,
+}: {
+  status: { icon: string; cls: string };
+  name: string;
+  detail: string;
+  sourcesLine?: string | null;
+}) {
+  return (
+    <div>
+      <div className="flex items-start gap-2">
+        <span className={`inline-block w-5 text-center ${status.cls}`}>
+          [{status.icon}]
+        </span>
+        <span className="font-semibold min-w-[200px] inline-block">{name}</span>
+        <span className="text-[var(--text-muted)]">{detail}</span>
+      </div>
+      {sourcesLine && (
+        <div className="ml-7 text-[var(--text-muted)] opacity-80">
+          {sourcesLine}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ParentEntityCard({
+  parent,
+  sources,
+}: {
+  parent: ControllingEntity;
+  sources: HierarchySource[] | null;
+}) {
+  const edgarSource = sources?.find((s) => s.type === "sec_edgar");
+  const fmtUsd = (v: number | null) =>
+    v == null ? "—" : `$${Math.round(v).toLocaleString("en-US")}`;
+  return (
+    <div className="mt-3 rounded border border-red-700/60 bg-red-900/20 p-3">
+      <div className="text-xs uppercase text-red-300 mb-2">
+        Controlling entity
+      </div>
+      <div className="text-sm">
+        <div className="font-semibold">
+          {parent.name}
+          {parent.ticker && (
+            <span className="ml-2 text-xs text-red-200/80">
+              ({parent.exchange ?? "public"}: {parent.ticker})
+            </span>
+          )}
+        </div>
+        <div className="text-xs text-red-200/80 mt-1">
+          Revenue: {fmtUsd(parent.revenue_usd)} · Employees:{" "}
+          {parent.employees ?? "unknown"} · Ownership:{" "}
+          {parent.ownership_type.replace(/_/g, " ")}
+        </div>
+        {parent.parent_chain && parent.parent_chain.length > 1 && (
+          <div className="text-xs text-red-200/70 mt-1">
+            Chain: {parent.parent_chain.join(" → ")}
+          </div>
+        )}
+        {edgarSource?.url && (
+          <div className="text-xs mt-2">
+            <a
+              className="underline"
+              href={edgarSource.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              SEC EDGAR 10-K
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RatioBar({ gateB }: { gateB: GateBOutput }) {
+  const ratio = gateB.ratio ?? 0;
+  const pct = Math.max(0, Math.min(1, ratio));
+  const thresholdPct = gateB.threshold;
+  const widthPct = Math.max(0.5, pct * 100);
+  const thresholdLeft = thresholdPct * 100;
+  return (
+    <div className="mt-3 rounded border border-red-700/60 bg-red-900/20 p-3">
+      <div className="text-xs uppercase text-red-300 mb-2">Ratio vs threshold</div>
+      <div className="relative h-3 w-full bg-[var(--surface-2,rgba(255,255,255,0.06))] rounded">
+        <div
+          className="absolute top-0 left-0 h-3 bg-red-500/70 rounded"
+          style={{ width: `${widthPct}%` }}
+        />
+        <div
+          className="absolute top-[-2px] h-[16px] w-[2px] bg-amber-300"
+          style={{ left: `${thresholdLeft}%` }}
+          title={`Threshold: ${(thresholdPct * 100).toFixed(1)}%`}
+        />
+      </div>
+      <div className="text-xs text-red-200/80 mt-2">{gateB.math_explanation}</div>
+    </div>
+  );
+}
+
+function SearchTrailCard({ gateC }: { gateC: GateCOutput }) {
+  const trail = gateC.search_trail ?? [];
+  return (
+    <div className="mt-3 rounded border border-red-700/60 bg-red-900/20 p-3">
+      <div className="text-xs uppercase text-red-300 mb-2">
+        Search paths tried (no named human found)
+      </div>
+      {trail.length === 0 ? (
+        <div className="text-xs text-red-200/80">
+          {gateC.reason || "No specific search trail recorded."}
+        </div>
+      ) : (
+        <ul className="list-disc pl-5 space-y-1 text-xs text-red-200/80">
+          {trail.map((t, i) => (
+            <li key={i}>{t}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function RejectionDetailCard({ rejection }: { rejection: RejectionOutput }) {
+  const hookPct = (rejection.hook_strength / 10) * 100;
+  const rejPct = (rejection.rejection_strength / 10) * 100;
+  return (
+    <div className="mt-3 rounded border border-red-700/60 bg-red-900/20 p-3">
+      <div className="text-xs uppercase text-red-300 mb-2">
+        Buyer rejection (verdict: {rejection.verdict.replace(/_/g, " ")})
+      </div>
+      <ul className="space-y-1 text-sm text-red-100 mb-3">
+        {rejection.rejection_lines.map((line, i) => (
+          <li key={i}>&ldquo;{line}&rdquo;</li>
+        ))}
+      </ul>
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <div>
+          <div className="text-red-300/80 mb-1">
+            Hook strength: {rejection.hook_strength}/10
+          </div>
+          <div className="h-2 bg-[var(--surface-2,rgba(255,255,255,0.06))] rounded">
+            <div
+              className="h-2 bg-amber-400/70 rounded"
+              style={{ width: `${hookPct}%` }}
+            />
+          </div>
+        </div>
+        <div>
+          <div className="text-red-300/80 mb-1">
+            Rejection strength: {rejection.rejection_strength}/10
+          </div>
+          <div className="h-2 bg-[var(--surface-2,rgba(255,255,255,0.06))] rounded">
+            <div
+              className="h-2 bg-red-500/70 rounded"
+              style={{ width: `${rejPct}%` }}
+            />
+          </div>
+        </div>
+      </div>
+      {rejection.rationale && (
+        <div className="text-xs text-red-200/80 mt-3 italic">
+          {rejection.rationale}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatPct(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${(v * 100).toFixed(v < 0.001 ? 4 : 1)}%`;
+}
+
+function describeGateAFailure(
+  gateA: GateAOutput | null,
+  fallback: string | null,
+): string {
+  if (!gateA) return fallback ?? "Gate A failed";
+  const e = gateA.controlling_entity;
+  if (e?.ownership_type === "public" && e.ticker) {
+    return `Subsidiary of ${e.name} (${e.exchange ?? "public"}: ${e.ticker}${
+      e.revenue_usd ? `, $${Math.round(e.revenue_usd / 1_000_000_000).toLocaleString()}B` : ""
+    })`;
+  }
+  return gateA.verdict_reason || fallback || "Gate A failed";
 }

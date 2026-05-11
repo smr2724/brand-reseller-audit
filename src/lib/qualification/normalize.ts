@@ -46,23 +46,42 @@ function normalizeEnum<T extends string>(
   return { value: fallback, originalIfClamped: String(raw) };
 }
 
+// Phase 68 — Migration 0050 widened the disqualification_pattern CHECK
+// constraint to admit the 6 new gate-driven values: subsidiary_of_public,
+// pe_portfolio_large, parent_revenue_ratio_below_threshold,
+// no_named_decision_maker, buyer_rejection_wins, holding_naming_signal_review.
+// The normalizer's whitelist is extended to match — otherwise the
+// hard-gate verdicts would round-trip through `other` even though the
+// DB now accepts the more specific values.
 const ALLOWED_DISQUAL_PATTERNS = new Set<
   | "public_company"
+  | "subsidiary_of_public"
+  | "pe_portfolio_large"
   | "dealer_network"
   | "anti_amazon"
   | "enterprise"
   | "subsidiary_of_giant"
   | "no_amazon_presence"
   | "brand_self_managed"
+  | "parent_revenue_ratio_below_threshold"
+  | "no_named_decision_maker"
+  | "buyer_rejection_wins"
+  | "holding_naming_signal_review"
   | "other"
 >([
   "public_company",
+  "subsidiary_of_public",
+  "pe_portfolio_large",
   "dealer_network",
   "anti_amazon",
   "enterprise",
   "subsidiary_of_giant",
   "no_amazon_presence",
   "brand_self_managed",
+  "parent_revenue_ratio_below_threshold",
+  "no_named_decision_maker",
+  "buyer_rejection_wins",
+  "holding_naming_signal_review",
   "other",
 ]);
 
@@ -70,12 +89,18 @@ export function normalizeDisqualificationPattern(
   raw: string | null | undefined,
 ): NormalizeResult<
   | "public_company"
+  | "subsidiary_of_public"
+  | "pe_portfolio_large"
   | "dealer_network"
   | "anti_amazon"
   | "enterprise"
   | "subsidiary_of_giant"
   | "no_amazon_presence"
   | "brand_self_managed"
+  | "parent_revenue_ratio_below_threshold"
+  | "no_named_decision_maker"
+  | "buyer_rejection_wins"
+  | "holding_naming_signal_review"
   | "other"
 > {
   return normalizeEnum(raw, ALLOWED_DISQUAL_PATTERNS, "other");
