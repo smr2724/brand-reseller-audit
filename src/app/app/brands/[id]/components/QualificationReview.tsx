@@ -98,6 +98,11 @@ interface QualificationRow {
 
 interface ApiResp {
   qualification_state: string;
+  // Phase 67 — Postgres-level error message captured by the orchestrator
+  // when an upsert or unexpected throw blocked the qualification run.
+  // Surfaced verbatim in the error panel so failures like CHECK violations
+  // are no longer hidden behind the generic "Run failed." string.
+  qualification_error: string | null;
   qualification: QualificationRow | null;
 }
 
@@ -111,6 +116,9 @@ export default function QualificationReview({
   const router = useRouter();
   const [state, setState] = useState<string>(initialState);
   const [row, setRow] = useState<QualificationRow | null>(null);
+  const [qualificationError, setQualificationError] = useState<string | null>(
+    null,
+  );
   const [running, setRunning] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [showOverride, setShowOverride] = useState(false);
@@ -125,6 +133,7 @@ export default function QualificationReview({
       const data = (await res.json()) as ApiResp;
       setState(data.qualification_state ?? "pending");
       setRow(data.qualification ?? null);
+      setQualificationError(data.qualification_error ?? null);
     } catch {
       /* ignore */
     }
@@ -207,8 +216,11 @@ export default function QualificationReview({
     return (
       <div className="card p-4 mb-4 border-red-700">
         <div className="text-sm font-medium text-red-300">Qualification error</div>
-        <div className="text-xs text-[var(--text-muted)]">
-          {row?.error_message ?? "Run failed."}
+        <div className="text-xs text-[var(--text-muted)] whitespace-pre-wrap break-words">
+          {/* Phase 67 — prefer the Postgres message captured on
+              brands.qualification_error; fall back to the row-level
+              error_message, then the generic "Run failed." sentinel. */}
+          {qualificationError ?? row?.error_message ?? "Run failed."}
         </div>
         <button
           className="btn btn-ghost text-xs mt-2"

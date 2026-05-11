@@ -19,6 +19,13 @@ import {
 import { computeSegment, type Segment } from "./segments";
 import { computePitchMath } from "./pitch-math";
 import { sanitizeNarrativeMarkdown } from "./narrative-sanitizer";
+import {
+  clampNote,
+  normalizeDisqualificationPattern,
+  normalizeIcpVerdict,
+  normalizeLegalEntityType,
+  normalizeOwnershipSignal,
+} from "./normalize";
 import type {
   BrandAssociatedSeller,
   CandidateEntity,
@@ -76,6 +83,49 @@ export async function runQualification(
   brandId: string,
   opts: RunQualificationOpts = {},
 ): Promise<RunQualificationResult> {
+  try {
+    return await runQualificationInner(brandId, opts);
+  } catch (e) {
+    // Phase 67 — top-level catch so any unexpected throw (CHECK violation
+    // during upsert, network blow-up, etc.) lands in
+    // brands.qualification_error instead of silently flipping the state
+    // to 'error' with no narrative. The inner function only catches
+    // expected branches; we don't want the route handler to see a 500
+    // without a stored message.
+    const message = e instanceof Error ? e.message : String(e);
+    const admin = createSupabaseAdminClient();
+    if (admin) {
+      await admin
+        .from("brands")
+        .update({
+          qualification_state: "error",
+          qualification_error: truncateError(message),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", brandId)
+        .then(
+          () => undefined,
+          () => undefined,
+        );
+    }
+    return {
+      ok: false,
+      qualification_id: null,
+      state: "error",
+      error: message,
+    };
+  }
+}
+
+function truncateError(msg: string): string {
+  const s = String(msg ?? "");
+  return s.length > 500 ? s.slice(0, 500) : s;
+}
+
+async function runQualificationInner(
+  brandId: string,
+  opts: RunQualificationOpts,
+): Promise<RunQualificationResult> {
   const admin = createSupabaseAdminClient();
   if (!admin) {
     return {
@@ -120,11 +170,13 @@ export async function runQualification(
     }
   }
 
-  // Mark running.
+  // Mark running. Phase 67 — clear any prior qualification_error so the
+  // stale message doesn't linger if this run succeeds.
   await admin
     .from("brands")
     .update({
       qualification_state: "running",
+      qualification_error: null,
       updated_at: new Date().toISOString(),
     })
     .eq("id", brandId);
@@ -275,6 +327,10 @@ export async function runQualification(
   let ownership_signal: OwnershipSignal = "unknown";
   let legal_entity_type: LegalEntityType = "unknown";
   let legal_entity_country: string | null = null;
+  // Phase 67 — accumulate clamp notes from any LLM enum that landed
+  // outside its CHECK constraint whitelist. Surfaced on selection_reasoning
+  // so an analyst can see what the LLM actually emitted.
+  const clamp_notes: string[] = [];
   try {
     const r = await callJsonLLM({
       model: DEFAULT_MAIN_MODEL,
@@ -285,23 +341,66 @@ export async function runQualification(
     totalTokensOut += r.tokens_out;
     totalCost += estimateCost(DEFAULT_MAIN_MODEL, r.tokens_in, r.tokens_out);
     const parsed = r.parsed as {
-      icp_verdict?: IcpVerdict;
+      icp_verdict?: string;
       icp_reasoning?: string;
       disqualification_pattern?: string | null;
-      ownership_signal?: OwnershipSignal;
-      legal_entity_type?: LegalEntityType;
+      ownership_signal?: string;
+      legal_entity_type?: string;
       legal_entity_country?: string;
     };
-    icp_verdict = parsed?.icp_verdict ?? "needs_review";
+    // Phase 67 — clamp every LLM-driven enum at parse time. Whitelisted
+    // values pass through unchanged; out-of-set values are coerced to
+    // their fallback and the raw string is captured for transparency.
+    const verdictN = normalizeIcpVerdict(parsed?.icp_verdict);
+    icp_verdict = (verdictN.value ?? "needs_review") as IcpVerdict;
+    if (verdictN.originalIfClamped) {
+      clamp_notes.push(
+        clampNote("icp_verdict", verdictN.originalIfClamped, icp_verdict),
+      );
+    }
+
     icp_reasoning = String(parsed?.icp_reasoning ?? "").trim();
-    disqualification_pattern =
-      typeof parsed?.disqualification_pattern === "string" &&
-      parsed.disqualification_pattern.length > 0 &&
-      parsed.disqualification_pattern !== "null"
-        ? parsed.disqualification_pattern
-        : null;
-    ownership_signal = parsed?.ownership_signal ?? "unknown";
-    legal_entity_type = parsed?.legal_entity_type ?? "unknown";
+
+    const disqualN = normalizeDisqualificationPattern(
+      parsed?.disqualification_pattern === "null"
+        ? null
+        : parsed?.disqualification_pattern,
+    );
+    disqualification_pattern = disqualN.value;
+    if (disqualN.originalIfClamped) {
+      clamp_notes.push(
+        clampNote(
+          "disqualification_pattern",
+          disqualN.originalIfClamped,
+          disqualification_pattern ?? "other",
+        ),
+      );
+    }
+
+    const ownershipN = normalizeOwnershipSignal(parsed?.ownership_signal);
+    ownership_signal = (ownershipN.value ?? "unknown") as OwnershipSignal;
+    if (ownershipN.originalIfClamped) {
+      clamp_notes.push(
+        clampNote(
+          "ownership_signal",
+          ownershipN.originalIfClamped,
+          ownership_signal,
+        ),
+      );
+    }
+
+    const legalN = normalizeLegalEntityType(parsed?.legal_entity_type);
+    legal_entity_type = (legalN.value ?? "unknown") as LegalEntityType;
+    if (legalN.originalIfClamped) {
+      clamp_notes.push(
+        clampNote(
+          "legal_entity_type",
+          legalN.originalIfClamped,
+          legal_entity_type,
+        ),
+      );
+    }
+
     legal_entity_country = parsed?.legal_entity_country ?? null;
   } catch (e) {
     if (!llmError) llmError = e instanceof Error ? e.message : String(e);
@@ -584,6 +683,58 @@ export async function runQualification(
   }
 
   // 8. Persist (upsert by brand_id).
+  // Phase 67 — final defense-in-depth clamp. The ICP-parse clamp already
+  // sanitizes raw LLM output, but the segment reconciliation above can
+  // reassign `disqualification_pattern` from a segment→pattern map. The
+  // map values are all whitelisted today; clamp again so a future map
+  // entry cannot accidentally violate the CHECK constraint.
+  {
+    const finalDisqualN = normalizeDisqualificationPattern(
+      disqualification_pattern,
+    );
+    if (finalDisqualN.originalIfClamped) {
+      clamp_notes.push(
+        clampNote(
+          "disqualification_pattern",
+          finalDisqualN.originalIfClamped,
+          finalDisqualN.value ?? "other",
+        ),
+      );
+      disqualification_pattern = finalDisqualN.value;
+    }
+    const finalOwnershipN = normalizeOwnershipSignal(ownership_signal);
+    if (finalOwnershipN.originalIfClamped) {
+      clamp_notes.push(
+        clampNote(
+          "ownership_signal",
+          finalOwnershipN.originalIfClamped,
+          finalOwnershipN.value ?? "unknown",
+        ),
+      );
+      ownership_signal = (finalOwnershipN.value ?? "unknown") as OwnershipSignal;
+    }
+    const finalLegalN = normalizeLegalEntityType(legal_entity_type);
+    if (finalLegalN.originalIfClamped) {
+      clamp_notes.push(
+        clampNote(
+          "legal_entity_type",
+          finalLegalN.originalIfClamped,
+          finalLegalN.value ?? "unknown",
+        ),
+      );
+      legal_entity_type = (finalLegalN.value ?? "unknown") as LegalEntityType;
+    }
+  }
+
+  // Stitch clamp notes onto the analyst-facing selection_reasoning so the
+  // raw LLM strings stay visible alongside the chosen entity reasoning.
+  const selection_reasoning_with_clamps =
+    clamp_notes.length === 0
+      ? selection_reasoning
+      : [selection_reasoning ?? "", ...clamp_notes]
+          .filter((s) => s && s.length > 0)
+          .join("\n\n");
+
   const nowIso = new Date().toISOString();
   const row = {
     brand_id: brandId,
@@ -593,7 +744,7 @@ export async function runQualification(
     ttm_revenue_estimate_usd: ttm,
     candidate_entities,
     selected_entity,
-    selection_reasoning,
+    selection_reasoning: selection_reasoning_with_clamps,
     legal_entity_name: selected_entity?.name ?? null,
     legal_entity_type:
       legal_entity_type !== "unknown"
@@ -648,10 +799,13 @@ export async function runQualification(
     .select("id")
     .single();
   if (upsertErr) {
+    // Phase 67 — surface the real Postgres message so the UI panel can
+    // show it instead of the generic "Run failed." fallback.
     await admin
       .from("brands")
       .update({
         qualification_state: "error",
+        qualification_error: truncateError(upsertErr.message),
         updated_at: nowIso,
       })
       .eq("id", brandId);
@@ -668,6 +822,7 @@ export async function runQualification(
     .update({
       qualification_state: "complete",
       qualification_id: upserted.id,
+      qualification_error: null,
       updated_at: nowIso,
     })
     .eq("id", brandId);
