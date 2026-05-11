@@ -84,7 +84,7 @@ export const DIVERSIFIED_HOSPITALITY_CASE_STUDY: DiversifiedCaseStudy = {
         "Delayed cash flow, because Diversified waited 60–90 days for reseller payments while resellers received faster Amazon payouts",
       ],
       tail: [
-        "The clearest signal was financial: one major reseller generated more than $1.2 million in net income from Diversified's products in a single year, nearly matching Diversified's own total net income.",
+        "The clearest signal was financial: a single reseller was capturing margin on Diversified's products at a scale that rivaled what the brand was earning on the rest of its business.",
         "Amazon had already become a meaningful channel.",
         "Diversified just did not fully own it yet.",
       ],
@@ -144,7 +144,7 @@ export const DIVERSIFIED_HOSPITALITY_CASE_STUDY: DiversifiedCaseStudy = {
     // Phase 2 / CAO section, never in the case study.
     results: {
       paragraphs: [
-        "Phase 1 — capture. Before Diversified took control, total Amazon sales of Diversified-branded products were running at roughly $2 million annually through reseller activity. Phase 1 was not about growing that revenue. It was about closing the leakage. Revenue stayed roughly flat at ~$2 million during the capture period — but the profit on those sales doubled, because the margin that resellers had been pocketing now flowed back to the brand. Diversified did not lose a single customer, and did not add one either; the entire profit lift came from removing the reseller layer. Diversified used the recovered margin to pay down more than $5 million in accounts payable across the capture period, and the channel was finally running under brand control.",
+        "Phase 1 — capture. Before Diversified took control, total Amazon sales of Diversified-branded products were running at roughly ~$2M annually through reseller activity. Phase 1 was not about growing that revenue. It was about closing the leakage. Revenue stayed roughly flat at ~$2M during the capture period — but the profit on those sales doubled, because the margin that resellers had been pocketing now flowed back to the brand. Diversified did not lose a single customer, and did not add one either; the entire profit lift came from removing the reseller layer. The recovered margin was redeployed against working-capital needs across the capture period, and the channel was finally running under brand control.",
       ],
       bullets: [],
       tail: [
@@ -177,11 +177,11 @@ export const DIVERSIFIED_HOSPITALITY_CASE_STUDY: DiversifiedCaseStudy = {
     customerExperience:
       "At Diversified Hospitality, the biggest unlock was not only capturing reseller margin. The bigger unlock was that the brand owner finally controlled the customer experience, listings, packaging, inventory, pricing, reviews, and long-term channel strategy.",
     frameworkStep4:
-      "When we did this for Diversified Hospitality, customer experience metrics improved immediately and Amazon profit on the existing ~$2M revenue base doubled — without adding a single new customer. The recovered margin paid down more than $5M in AP across the capture period.",
+      "When we did this for Diversified Hospitality, customer experience metrics improved immediately and Amazon profit on the existing ~$2M revenue base doubled — without adding a single new customer.",
     frameworkStep5: "",
     narrativeStep5: "",
     whyRcgBio:
-      "Steve Rolle ran Diversified Hospitality on Amazon as the operator before he ran it as a consultant. He led the channel transition that doubled the brand's Amazon profit on a flat ~$2M revenue base by removing resellers and taking direct channel control. Across the brands RCG operates today, we've sold over $60M on Amazon since 2018.",
+      "Steve Rolle ran Diversified Hospitality on Amazon as the operator before he ran it as a consultant. He led the channel transition that doubled the brand's Amazon profit on a flat ~$2M revenue base by removing resellers and taking direct channel control. RCG has carried that same playbook into the brands it operates today.",
     cardSummary:
       "Reclaimed the catalog from a long tail of unauthorized resellers and rebuilt brand-controlled distribution.",
     cardMetric: "Doubled Amazon profit at flat ~$2M revenue · zero customer loss",

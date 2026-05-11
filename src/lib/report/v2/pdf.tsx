@@ -878,9 +878,6 @@ function ExecutiveSummaryPage({
       <SectionHead eyebrow="Executive Summary" title={`What we found for ${brand.name}`} />
       <View style={styles.card}>
         <BulletList items={bullets} />
-        <Text style={[styles.proseCallout, { marginTop: 10 }]}>
-          This is worth a 15-minute review if these sellers are not intentionally authorized to operate your Amazon channel.
-        </Text>
       </View>
       <PageFooter label="Executive Summary" brandName={brand.name} />
     </Page>
@@ -1149,10 +1146,10 @@ function ResellerRealityPage({
 function ResellerRealityConsolidationPage({ brand }: { brand: BrandForReport }) {
   return (
     <Page size="LETTER" style={styles.page} wrap>
-      <SectionHead
-        eyebrow="Reseller Reality"
-        title="The question isn't whether your resellers are authorized — it's whether your channel is consolidated."
-      />
+      <View style={styles.sectionHead}>
+        <Text style={styles.eyebrow}>Reseller Reality</Text>
+        <View style={[styles.goldRule, { marginTop: 4, marginBottom: 8 }]} />
+      </View>
       <Text style={styles.prose}>
         You may already have authorized resellers on Amazon — and you may believe your network is healthy. That belief is reasonable. Most brand owners in your revenue range hold it. None of what we&apos;re about to say is meant to take that away from you.
       </Text>
@@ -1162,7 +1159,7 @@ function ResellerRealityConsolidationPage({ brand }: { brand: BrandForReport }) 
         <Text style={{ fontFamily: "Helvetica-Oblique" }}>consolidated</Text>. A fragmented seller base — even an authorized one — caps how aggressively the brand itself can invest in the channel. Pricing gets noisy. Listings get edited by people who don&apos;t own the P&amp;L. Advertising dollars compete with sellers who have no incentive to grow the catalog beyond their bestsellers. The brand ends up underwriting an ecosystem instead of running one.
       </Text>
       <Text style={styles.prose}>
-        This usually isn&apos;t visible until a brand starts pushing past $5M in revenue. Below that, the math works. Above that, the cracks start showing — and most brand owners assume they&apos;re hitting a ceiling that&apos;s about the product, the category, or the algorithm. It&apos;s almost never any of those things.
+        This usually isn&apos;t visible until a brand starts pushing past $2M in revenue. Below that, the math works. Above that, the cracks start showing — and most brand owners assume they&apos;re hitting a ceiling that&apos;s about the product, the category, or the algorithm. It&apos;s almost never any of those things.
       </Text>
       <Text style={styles.prose}>
         The clearest example we have is Diversified Hospitality. When we took over their Amazon channel, we assumed — like they did — that their existing reseller network was their growth engine. They had authorized partners. Sales were steady. Nothing looked broken.
@@ -1383,7 +1380,6 @@ function FrameworkPage({
   }
   const hasResellers = resellerCount > 0;
   const scrubBrandOwnedNaming = makePlanCopySanitizerPdf(brandControlledNames);
-  const introText = sanitizeForbidden(scrubBrandOwnedNaming(p.intro ?? ""));
   // Phase 47 — Module 3 hook: trademark_split (PDF parity).
   const trademarkHook = pickHook(
     narrative.qualification,
@@ -1395,12 +1391,9 @@ function FrameworkPage({
     return (
       <Page size="LETTER" style={styles.page}>
         <SectionHead
-          eyebrow="6–12 Month Capture Plan"
+          eyebrow="Capture Plan"
           title="The Five-Step Framework"
         />
-        <Text style={styles.prose}>
-          Based on your classifications, the channel is already brand-controlled — there are no third-party resellers to transition off your listings today. The framework below is offered as a reference for protecting that position long-term.
-        </Text>
         <View>
           {steps.map((s, i) => {
             const body =
@@ -1434,10 +1427,9 @@ function FrameworkPage({
   return (
     <Page size="LETTER" style={styles.page}>
       <SectionHead
-        eyebrow="6–12 Month Capture Plan"
+        eyebrow="Capture Plan"
         title="The Five-Step Framework"
       />
-      {introText && <Text style={styles.prose}>{introText}</Text>}
       {trademarkHook && (
         <View style={styles.bannerWarn}>
           <Text>
@@ -1551,9 +1543,6 @@ function CaseStudyDiversifiedHospitalityPage({
         eyebrow="Case Study"
         title="How Diversified Hospitality doubled its Amazon profit at flat revenue by taking the channel back from resellers"
       />
-      <Text style={styles.prose}>
-        When RCG took over Diversified Hospitality&apos;s Amazon channel, customer experience metrics improved immediately. Amazon sales stayed at roughly $2M before and after the transition — and Diversified Hospitality&apos;s profit on those sales doubled in that same period by being the one selling them. They didn&apos;t lose a single customer. They didn&apos;t add one either. The entire profit lift came from removing the reseller layer and letting the brand keep the margin that was already there.
-      </Text>
       <Text style={[styles.prose, { fontFamily: "Helvetica-Oblique" }]}>
         {cs.preface}
       </Text>
@@ -1613,7 +1602,7 @@ function CaseStudyDiversifiedHospitalityPage({
           "Amazon became a brand-controlled profit center",
           "Customer experience became more consistent",
           "Cash flow improved significantly because Amazon paid faster than reseller terms",
-          "Diversified paid down more than $5 million in accounts payable across the capture period",
+          "Recovered margin was redeployed against working-capital needs across the capture period",
           "The increased profitability materially improved the underlying business",
         ]}
       />
@@ -1716,12 +1705,6 @@ function PhaseTwoPage({ brand }: { brand: BrandForReport }) {
         title="What comes next, once capture is complete"
       />
       <Text style={styles.prose}>
-        Phase 1 is about taking control of what&apos;s already yours — recovering the margin sitting in someone else&apos;s pocket on demand you already generate. That&apos;s what this report has covered.
-      </Text>
-      <Text style={styles.prose}>
-        Phase 2 is a different question entirely.
-      </Text>
-      <Text style={styles.prose}>
         Once your channel is brand-controlled and the leakage is closed, the question shifts from &ldquo;how do we stop the bleeding&rdquo; to &ldquo;how do we compound this into a meaningful business.&rdquo; That&apos;s where most brands stall — not because the team isn&apos;t capable, but because the Amazon growth playbook is a moving target. The right agency this year is the wrong one next year. The right team structure at $5M is the wrong one at $15M. The experiments that compound aren&apos;t the ones that look obvious from the outside.
       </Text>
       <Text style={styles.prose}>
@@ -1749,15 +1732,6 @@ function CtaPage({
       <View style={styles.goldRule} />
       <Text style={styles.h2}>
         Schedule a 15-minute Amazon Channel Ownership Review with Steve.
-      </Text>
-      <Text style={styles.prose}>
-        If these sellers are intentionally authorized to operate {brand.name}&apos;s Amazon channel, this may simply be a useful benchmark. If they are not, this could be a meaningful profit recapture and brand-control opportunity.
-      </Text>
-      <Text style={styles.prose}>
-        On the call, we&apos;ll walk through the numbers, confirm which sellers are authorized, pressure-test the assumptions, and determine whether this is worth pursuing.
-      </Text>
-      <Text style={styles.prose}>
-        If Phase 1 lands, we&apos;ll talk about Phase 2 — running the controlled channel as a fractional CAO engagement — as a separate conversation.
       </Text>
       <Text style={[styles.prose, { color: P.muted }]}>
         No pressure. The goal is to confirm whether the opportunity is real, whether the assumptions are fair, and whether taking control is worth exploring.
@@ -1920,33 +1894,7 @@ function MethodologyPage({
         />
       </View>
 
-      {/* Phase 58 — Variation handling methodology moved here from
-          mid-report (where it sat next to the top-products grid). */}
-      <View style={styles.card}>
-        <Text style={styles.h3}>Methodology · Variation handling</Text>
-        <Text style={{ fontSize: 10, lineHeight: 1.5, color: P.ink }}>
-          Some ASINs in this brand share a parent listing with sibling
-          variations (e.g. a 4-pack and a 12-pack of the same product).
-          Amazon&apos;s sales rank is often shared across variations, which
-          causes raw third-party sales estimators to over-count sales on
-          inactive variations. We attribute group-level sales to each
-          variation using a combined signal:{" "}
-          <Text style={styles.bold}>recent review activity (last 90 days)</Text>{" "}
-          plus{" "}
-          <Text style={styles.bold}>
-            Buy Box win frequency (how often each variation actually held
-            the Buy Box recently)
-          </Text>
-          . When some siblings have Buy Box history and others don&apos;t, the
-          absence of Buy Box activity is itself evidence the listing hasn&apos;t
-          been selling — those variations correctly receive minimal
-          attributed sales.{" "}
-          <Text style={styles.bold}>
-            These per-ASIN sales numbers are estimates derived from Keepa
-            rank, review, and Buy Box data, not direct sales reporting.
-          </Text>
-        </Text>
-      </View>
+      {/* Phase 60 — Variation handling methodology card removed per spec. */}
 
       <Text style={[styles.small, { marginTop: 8 }]}>
         Keepa snapshot · {longDate(keepaFresh)}  ·  DataForSEO snapshot · {longDate(dfsFresh)}  ·  Buy-box history window · 90 days
