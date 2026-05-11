@@ -25,6 +25,7 @@ import {
   shouldAbortForWallClock,
   withDeadline,
   logKeepaProgress,
+  classifyTerminalStatus,
   KEEPA_ENRICHMENT_WALL_CLOCK_MS,
   KEEPA_HARD_ASIN_CAP,
 } from "./keepa-run-defense";
@@ -714,8 +715,7 @@ export async function enrichBrandWithKeepa(
     // before Vercel killed us" from other thrown errors that already
     // surface as 'failed'. Both end states satisfy the same invariant:
     // never leave a row at 'running'.
-    const isPhase66Abort = typeof msg === "string" && msg.includes("[phase66]");
-    const terminalStatus = isPhase66Abort ? "error" : "failed";
+    const terminalStatus = classifyTerminalStatus(msg);
     logKeepaProgress({
       brand_id,
       brand_name,

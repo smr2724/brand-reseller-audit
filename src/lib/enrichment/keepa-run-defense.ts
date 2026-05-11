@@ -48,10 +48,12 @@ export const KEEPA_HARD_ASIN_CAP = (() => {
 
 /**
  * Hard wall-clock cap for a single Keepa enrichment run. Vercel's
- * function `maxDuration` is 60s on `/api/enrichment/brands/[id]/keepa`
- * and 300s on the create-from-lookup / recovery paths. The conservative
- * default of 240s keeps a safety margin against the larger ceiling so
- * the orchestrator's terminal DB write always lands before the platform
+ * function `maxDuration` is 300s on the user-facing keepa + verify-brand
+ * routes and on the create-from-lookup / recovery paths (bumped from 60s
+ * in the Phase 66 follow-up after both reviewers flagged that the 240s
+ * budget was dead code under a 60s ceiling). The conservative default
+ * of 240s keeps a safety margin under the 300s ceiling so the
+ * orchestrator's terminal DB write always lands before the platform
  * kills the function. Override via env for one-off large brands.
  */
 export const KEEPA_ENRICHMENT_WALL_CLOCK_MS = (() => {
@@ -186,6 +188,25 @@ export async function withDeadline<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * Phase 66 — Classify a thrown error message into the terminal
+ * enrichment_runs status. Phase 66 proactive aborts (wall-clock, hard
+ * cap, withDeadline timeout) tag their messages with the `[phase66]`
+ * prefix so ops can distinguish "we proactively bailed out before
+ * Vercel killed us" from generic downstream failures. Both outcomes
+ * still flip the row out of `running`, satisfying the no-zombies
+ * invariant.
+ *
+ * Exposed as a named helper so the substring-routing logic in the
+ * orchestrator's catch block is independently unit-testable instead of
+ * being a fragile inline `msg.includes("[phase66]")`.
+ */
+export function classifyTerminalStatus(errorMessage: string): "error" | "failed" {
+  return typeof errorMessage === "string" && errorMessage.includes("[phase66]")
+    ? "error"
+    : "failed";
 }
 
 /**
