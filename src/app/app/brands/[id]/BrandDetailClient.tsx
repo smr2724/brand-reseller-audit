@@ -3,8 +3,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { formatNumber, formatMoney, formatDateTime } from "@/lib/utils";
-import BrandContactsCard from "./BrandContactsCard";
-import BrandOutreachCard from "./BrandOutreachCard";
+import OutreachPicker from "./OutreachPicker";
 import SellerClassificationModal, {
   type ClassificationSnapshotEntry,
 } from "./SellerClassificationModal";
@@ -37,7 +36,6 @@ interface Brand {
   rcg_fees: number | null;
   new_profit: number | null;
   seven_x_multiple_value: number | null;
-  disqualifier_tags: string[];
   keepa_last_enriched_at?: string | null;
   keepa_asin_count?: number | null;
   keepa_unique_seller_count?: number | null;
@@ -106,8 +104,6 @@ export default function BrandDetailClient({
   const router = useRouter();
   const [status, setStatus] = useState(brand.status);
   const [notes, setNotes] = useState(brand.manual_notes ?? "");
-  const [tags, setTags] = useState<string[]>(brand.disqualifier_tags ?? []);
-  const [newTag, setNewTag] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [enriching, setEnriching] = useState(false);
@@ -132,6 +128,21 @@ export default function BrandDetailClient({
     setDfsErr(null);
   }, [brand.enrichment_error, brand.keepa_last_enriched_at, brand.dataforseo_last_enriched_at]);
   const [primaryContact, setPrimaryContact] = useState<{ id: string; full_name: string; first_name: string | null; title: string | null } | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/contacts?brand_id=${brand.id}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        const list = (d.contacts ?? []) as Array<{ id: string; full_name: string; first_name: string | null; title: string | null; is_primary: boolean; disqualified?: boolean }>;
+        const primary = list.find((c) => c.is_primary && !c.disqualified) ?? null;
+        setPrimaryContact(primary);
+      })
+      .catch(() => { if (alive) setPrimaryContact(null); });
+    return () => { alive = false; };
+  }, [brand.id]);
+
   // Phase 30 — "Run scan" button for deferred (bulk-imported) brands and
   // "Retry scan" for failed ones. Mirrors the report-generation polling
   // UX: synchronous POST, spinner while we wait, refresh on success.
@@ -234,22 +245,6 @@ export default function BrandDetailClient({
     if (res.ok) router.push("/app/brands");
   }
 
-  function addTag() {
-    const t = newTag.trim().toLowerCase().replace(/\s+/g, "_");
-    if (!t) return;
-    if (tags.includes(t)) { setNewTag(""); return; }
-    const next = [...tags, t];
-    setTags(next);
-    setNewTag("");
-    patch({ disqualifier_tags: next });
-  }
-
-  function removeTag(tag: string) {
-    const next = tags.filter((t) => t !== tag);
-    setTags(next);
-    patch({ disqualifier_tags: next });
-  }
-
   return (
     <div>
       <div className="flex items-start justify-between mb-6 gap-4 flex-wrap">
@@ -325,36 +320,10 @@ export default function BrandDetailClient({
           )}
         </Card>
 
-        <Card title="Disqualifier tags">
-          <div className="flex flex-wrap gap-1 mb-3">
-            {tags.length === 0 && <span className="text-sm text-[var(--text-muted)]">No tags</span>}
-            {tags.map((t) => (
-              <span
-                key={t}
-                className="px-2 py-1 rounded text-xs bg-[#2a1415] text-[#f87171] border border-[#4a1e21] flex items-center gap-1"
-              >
-                {t}
-                <button className="text-[#f87171] hover:text-white" onClick={() => removeTag(t)}>×</button>
-              </span>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <input
-              className="input"
-              placeholder="add_tag"
-              value={newTag}
-              onChange={(e) => setNewTag(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTag(); } }}
-            />
-            <button className="btn" onClick={addTag} disabled={!newTag.trim()}>Add</button>
-          </div>
-        </Card>
-
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-4">
-        <BrandContactsCard brandId={brand.id} onPrimaryContact={setPrimaryContact} />
-        <BrandOutreachCard brandId={brand.id} primaryContact={primaryContact} />
+        <OutreachPicker brandId={brand.id} />
       </div>
 
       <div className="mt-6">
