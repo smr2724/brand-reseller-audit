@@ -1,23 +1,24 @@
 /**
- * Phase 62 — Regression tests for the Apollo contact-discovery wrappers.
+ * Phase 62 → Phase 63 — Regression tests for the Apollo contact-discovery
+ * wrappers.
  *
  * Run directly with tsx:
  *
  *   npx tsx src/lib/contacts/__tests__/apollo.test.ts
  *
- * These pin down two specific guarantees the Phase 61 Shearwater audit
- * trail proved we'd regressed on:
+ * This pins down the Phase 61 Shearwater audit guarantee that survived
+ * the Phase 63 cleanup (the now-removed apolloMatchPerson):
  *
  *   Bug B — `apolloSearchPeople` must surface `first_name`, `last_name`,
  *           AND `name` on every slim person record so the orchestrator
  *           can persist a real `full_name` (not just `"Jason"`) and feed
  *           Hunter email-finder with first+last.
  *
- *   Bug C — `apolloMatchPerson` must include `reveal_personal_emails=true`
- *           in its application/x-www-form-urlencoded body so Apollo
- *           unlocks the business email on paid plans.
+ * The Phase 62 Bug C — reveal_personal_emails=true on /people/match — is
+ * now covered by apollo-unlock.test.ts (apolloUnlockPerson is the only
+ * caller of /people/match in production after Phase 63).
  */
-import { apolloMatchPerson, apolloSearchPeople } from "../apollo";
+import { apolloSearchPeople } from "../apollo";
 
 let failures = 0;
 let passes = 0;
@@ -141,73 +142,6 @@ async function runBugBTest(): Promise<void> {
   );
 }
 
-async function runBugCTest(): Promise<void> {
-  // Apollo /people/match fixture returning a person with email unlocked.
-  const fixture = {
-    person: {
-      id: "match-1",
-      first_name: "Jason",
-      last_name: "Black",
-      email: "jason@shearwater.com",
-      email_status: "verified",
-    },
-  };
-  const captured: CapturedRequest[] = [];
-  mockFetch(captured, fixture);
-  const res = await apolloMatchPerson({
-    domain: "shearwater.com",
-    first_name: "Jason",
-    last_name: "Black",
-  });
-  check("apolloMatchPerson ok", res.ok === true);
-  check(
-    "apolloMatchPerson: at least one fetch call",
-    captured.length === 1,
-    `got ${captured.length}`,
-  );
-  if (captured.length === 0) return;
-  const req = captured[0];
-  check(
-    "apolloMatchPerson: hits /people/match",
-    req.url.endsWith("/people/match"),
-    req.url,
-  );
-  check(
-    "apolloMatchPerson: form-urlencoded Content-Type",
-    req.headers["Content-Type"] === "application/x-www-form-urlencoded",
-    req.headers["Content-Type"],
-  );
-  // Body is x-www-form-urlencoded. Apollo paid-plan email reveal hinges
-  // on this exact flag being present and truthy.
-  check(
-    "apolloMatchPerson: body includes reveal_personal_emails=true",
-    req.body.includes("reveal_personal_emails=true"),
-    req.body,
-  );
-  check(
-    "apolloMatchPerson: body includes domain=",
-    req.body.includes("domain=shearwater.com"),
-    req.body,
-  );
-  check(
-    "apolloMatchPerson: body includes first_name=Jason",
-    req.body.includes("first_name=Jason"),
-    req.body,
-  );
-  check(
-    "apolloMatchPerson: body includes last_name=Black",
-    req.body.includes("last_name=Black"),
-    req.body,
-  );
-  if (res.ok) {
-    check(
-      "apolloMatchPerson: surfaces email from match payload",
-      res.person?.email === "jason@shearwater.com",
-      String(res.person?.email),
-    );
-  }
-}
-
 // Smoke-test the orchestrator's name-derivation logic by re-implementing
 // the same precedence here. If the orchestrator changes, this test
 // should change deliberately.
@@ -274,7 +208,6 @@ function runOrchestratorNameDerivationTests(): void {
 
 async function main(): Promise<void> {
   await runBugBTest();
-  await runBugCTest();
   runOrchestratorNameDerivationTests();
   console.log(`\n${passes} passed, ${failures} failed`);
   if (failures > 0) process.exit(1);

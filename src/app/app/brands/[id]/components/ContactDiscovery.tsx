@@ -40,6 +40,7 @@ interface Contact {
   phone_status: string | null;
   is_primary: boolean;
   ready_to_send: boolean;
+  enrichment_state: "discovered" | "enriched" | "error" | null;
 }
 
 interface DiscoveryEvent {
@@ -76,6 +77,7 @@ const PROVIDER_ORDER: Record<string, number> = {
   millionverifier: 6,
   zerobounce: 7,
   orchestrator: 8,
+  enrichment_deferred: 9,
 };
 
 const PROVIDER_LABEL: Record<string, string> = {
@@ -87,6 +89,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   millionverifier: "MillionVerifier",
   zerobounce: "ZeroBounce",
   orchestrator: "Orchestrator",
+  enrichment_deferred: "Enrichment Deferred",
 };
 
 export default function ContactDiscovery({
@@ -110,6 +113,7 @@ export default function ContactDiscovery({
   const [showOlderForId, setShowOlderForId] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const [confirmReDiscover, setConfirmReDiscover] = useState(false);
+  const [enrichingIds, setEnrichingIds] = useState<Set<string>>(new Set());
 
   async function load() {
     try {
@@ -351,6 +355,57 @@ export default function ContactDiscovery({
     }
   }
 
+  async function onEnrich(contactId: string) {
+    setEnrichingIds((prev) => {
+      const next = new Set(prev);
+      next.add(contactId);
+      return next;
+    });
+    try {
+      const res = await fetch(
+        `/api/brands/${brandId}/contacts/${contactId}/enrich`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        contact?: Contact;
+        events?: DiscoveryEvent[];
+        error?: string;
+      };
+      if (!res.ok) {
+        flashToast(`Enrich failed: ${data.error ?? `HTTP ${res.status}`}`);
+        return;
+      }
+      if (data.contact) {
+        const updated = data.contact;
+        setContacts((prev) =>
+          prev.map((c) => (c.id === updated.id ? updated : c)),
+        );
+      }
+      if (data.events && data.events.length > 0) {
+        setEvents((prev) => [...prev, ...(data.events ?? [])]);
+      }
+      flashToast(
+        data.contact?.email
+          ? `Enriched ${data.contact.full_name} → ${data.contact.email}.`
+          : `Enrich ran for ${data.contact?.full_name ?? "contact"} but no email was resolved.`,
+      );
+    } catch (e) {
+      flashToast(
+        `Enrich failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setEnrichingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(contactId);
+        return next;
+      });
+    }
+  }
+
   function onClickReDiscover() {
     if (savedCount > 0) {
       setConfirmReDiscover(true);
@@ -524,6 +579,8 @@ export default function ContactDiscovery({
                     latestRunId={latestRunId}
                     showOlder={showOlderForId.has(c.id)}
                     onToggleShowOlder={() => toggleShowOlder(c.id)}
+                    isEnriching={enrichingIds.has(c.id)}
+                    onEnrich={() => void onEnrich(c.id)}
                   />
                 );
               })}
@@ -563,6 +620,8 @@ function ContactRow({
   latestRunId,
   showOlder,
   onToggleShowOlder,
+  isEnriching,
+  onEnrich,
 }: {
   c: Contact;
   isExpanded: boolean;
@@ -577,7 +636,10 @@ function ContactRow({
   latestRunId: string | null;
   showOlder: boolean;
   onToggleShowOlder: () => void;
+  isEnriching: boolean;
+  onEnrich: () => void;
 }) {
+  const isDiscovered = c.enrichment_state === "discovered";
   const colSpan = hasLinkedIn ? 7 : 6;
   // Group this contact's events by run.
   const eventsByRun = new Map<string, DiscoveryEvent[]>();
@@ -651,22 +713,40 @@ function ContactRow({
                 Copy
               </button>
             </span>
+          ) : isDiscovered ? (
+            <button
+              type="button"
+              className="btn btn-ghost text-[11px]"
+              disabled={isEnriching}
+              onClick={onEnrich}
+              title="Spend an Apollo email credit to unlock this contact's email."
+            >
+              {isEnriching ? "Enriching…" : "Enrich"}
+            </button>
           ) : (
             <code>—</code>
           )}
         </td>
         <td className="py-2 align-top">
-          <EmailPill
-            status={c.email_status}
-            hasEmail={!!c.email}
-            verifier={c.email_verifier}
-            score={c.email_verifier_score}
-            verifiedAt={c.email_verified_at}
-          />
-          {typeof c.email_verifier_score === "number" && (
-            <span className="text-xs text-[var(--text-muted)] ml-1">
-              {Math.round(c.email_verifier_score * 100)}%
+          {isDiscovered ? (
+            <span className="inline-block px-2 py-0.5 rounded text-xs bg-zinc-700/40 text-zinc-200">
+              Not enriched
             </span>
+          ) : (
+            <>
+              <EmailPill
+                status={c.email_status}
+                hasEmail={!!c.email}
+                verifier={c.email_verifier}
+                score={c.email_verifier_score}
+                verifiedAt={c.email_verified_at}
+              />
+              {typeof c.email_verifier_score === "number" && (
+                <span className="text-xs text-[var(--text-muted)] ml-1">
+                  {Math.round(c.email_verifier_score * 100)}%
+                </span>
+              )}
+            </>
           )}
         </td>
         <td className="py-2 align-top text-xs text-[var(--text-muted)]">

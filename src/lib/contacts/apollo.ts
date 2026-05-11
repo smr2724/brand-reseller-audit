@@ -31,10 +31,6 @@ export interface ApolloPersonSlim {
   organization_domain?: string;
 }
 
-export type ApolloMatchResult =
-  | { ok: true; person: ApolloPersonSlim | null; raw: unknown }
-  | { ok: false; error: string; status?: number };
-
 export type ApolloSearchResult =
   | { ok: true; people: ApolloPersonSlim[]; total: number; raw: unknown }
   | { ok: false; error: string; status?: number };
@@ -125,27 +121,57 @@ function slimPerson(p: any): ApolloPersonSlim {
 }
 
 /**
- * Match a single person at a domain. Apollo charges credits per match;
- * use only for the candidates we keep.
+ * Phase 63 — Apollo /people/match with explicit "unlock" semantics.
+ *
+ * This is the credit-burning variant. Apollo only reveals
+ * `person.email` + `person.email_status` + `person.last_name` on paid
+ * plans when `reveal_personal_emails=true` is passed and the account
+ * has email credits remaining. Each successful reveal burns ONE Apollo
+ * email credit.
+ *
+ * We deliberately set `reveal_phone_number=false` so we don't
+ * accidentally burn phone credits — this product never needs phones.
+ *
+ * Returns the same shape as `apolloMatchPerson` plus an
+ * `email_status_raw` field so the orchestrator can map Apollo's status
+ * vocabulary ("verified", "extrapolated", null) to our internal
+ * vocabulary ("found", "guessed", "not_found").
  */
-export async function apolloMatchPerson(input: {
+export interface ApolloUnlockInput {
   domain: string;
   first_name?: string;
   last_name?: string;
-}): Promise<ApolloMatchResult> {
+  organization_name?: string;
+  id?: string;
+}
+
+export type ApolloUnlockResult =
+  | {
+      ok: true;
+      person:
+        | (ApolloPersonSlim & {
+            email_status_raw: string | null;
+          })
+        | null;
+      raw: unknown;
+    }
+  | { ok: false; error: string; status?: number };
+
+export async function apolloUnlockPerson(
+  input: ApolloUnlockInput,
+): Promise<ApolloUnlockResult> {
   const key = process.env.APOLLO_API_KEY;
   if (!key) return { ok: false, error: "APOLLO_API_KEY missing" };
   if (!input.domain) return { ok: false, error: "domain required" };
-  // Phase 62 — `reveal_personal_emails: true` is REQUIRED for Apollo's
-  // /people/match to actually return the business email on paid plans.
-  // The Shearwater audit trail (run_id 6097131f) confirmed missing emails
-  // when this flag was dropped. Covered by apollo.test.ts.
   const body: Record<string, unknown> = {
     reveal_personal_emails: true,
+    reveal_phone_number: false,
     domain: input.domain,
   };
   if (input.first_name) body.first_name = input.first_name;
   if (input.last_name) body.last_name = input.last_name;
+  if (input.organization_name) body.organization_name = input.organization_name;
+  if (input.id) body.id = input.id;
   let resp: Response;
   try {
     resp = await postForm("/people/match", body, key);
@@ -160,7 +186,7 @@ export async function apolloMatchPerson(input: {
       "/people/match",
       resp.status,
       0,
-      `domain=${input.domain} non-ok`,
+      `unlock domain=${input.domain} non-ok`,
     );
     return { ok: false, error: `apollo_${resp.status}`, status: resp.status };
   }
@@ -168,11 +194,42 @@ export async function apolloMatchPerson(input: {
   await logApi(
     "/people/match",
     resp.status,
-    0.02,
-    `domain=${input.domain} first=${input.first_name ?? ""} last=${input.last_name ?? ""}`,
+    0.04,
+    `unlock domain=${input.domain} first=${input.first_name ?? ""} last=${input.last_name ?? ""}`,
   );
-  const raw = (data as any)?.person ?? (data as any)?.matches?.[0] ?? null;
-  return { ok: true, person: raw ? slimPerson(raw) : null, raw: data };
+  const raw = (data as { person?: unknown; matches?: unknown[] })?.person ??
+    (data as { matches?: unknown[] })?.matches?.[0] ??
+    null;
+  if (!raw) {
+    return { ok: true, person: null, raw: data };
+  }
+  const slim = slimPerson(raw);
+  const emailStatusRaw =
+    (raw as { email_status?: unknown })?.email_status != null
+      ? String((raw as { email_status?: unknown }).email_status)
+      : null;
+  return {
+    ok: true,
+    person: { ...slim, email_status_raw: emailStatusRaw },
+    raw: data,
+  };
+}
+
+/**
+ * Map Apollo's email_status vocabulary to our internal email_status:
+ *   "verified"    → "found"
+ *   "extrapolated"→ "guessed"
+ *   null/empty    → "not_found"
+ * Anything else falls back to "not_found".
+ */
+export function mapApolloEmailStatus(
+  raw: string | null | undefined,
+): "found" | "guessed" | "not_found" {
+  if (!raw) return "not_found";
+  const v = raw.trim().toLowerCase();
+  if (v === "verified") return "found";
+  if (v === "extrapolated") return "guessed";
+  return "not_found";
 }
 
 /**
