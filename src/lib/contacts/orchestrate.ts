@@ -375,59 +375,110 @@ export async function runContactDiscovery(
       .eq("brand_id", brandId);
   }
 
-  // 9. Determine the primary contact_id to enrich. We prefer the
-  //    surviving sticky primary if one exists (it stays at its prior
-  //    state, but we still re-run enrichment on it because the user
-  //    hit Re-discover). Otherwise it's the newly inserted/updated
-  //    #1-ranked candidate.
+  // 9. Determine the primary contact_id to enrich. Precedence:
+  //      sticky existing primary (if surviving in the new candidate set) →
+  //      new rank-1 candidate.
+  //    The earlier sticky-primary-only branch had a bug: if the sticky
+  //    primary was NOT in the new candidate set, `primaryCandidateIdx`
+  //    stayed -1, enrichment was skipped, AND all 5 new candidates got
+  //    `enrichment_deferred` including the new #1. Now we fall through to
+  //    the rank-1 candidate from the new search so we always have a
+  //    primary to auto-enrich when there are any candidates.
   let primaryId: string | null = null;
   let primaryCandidateIdx = -1;
   if (existingPrimary) {
-    primaryId = existingPrimary.id;
-    primaryCandidateIdx = candidates.findIndex(
+    const stickyIdx = candidates.findIndex(
       (_, i) => candidateContactIds[i] === existingPrimary.id,
     );
+    if (stickyIdx >= 0) {
+      primaryId = existingPrimary.id;
+      primaryCandidateIdx = stickyIdx;
+    } else if (newPrimaryIdx >= 0) {
+      // Sticky primary is no longer in the new candidate set — fall
+      // through to the new rank-1 candidate.
+      primaryId = candidateContactIds[newPrimaryIdx] ?? null;
+      primaryCandidateIdx = newPrimaryIdx;
+    }
   } else if (newPrimaryIdx >= 0) {
     primaryId = candidateContactIds[newPrimaryIdx] ?? null;
     primaryCandidateIdx = newPrimaryIdx;
   }
 
   // 10. Auto-enrich the primary (credit-burn). Other 4 get deferred event.
+  //     Server-side idempotency: claim the row by transitioning
+  //     discovered → enriching BEFORE calling apolloUnlockPerson. If
+  //     another runContactDiscovery is somehow racing this same brand
+  //     (parent code does not allow it, but cheap insurance), the second
+  //     caller's claim returns no rows and we skip enrichment. The
+  //     try/finally guarantees the row is flipped to 'enriched' or
+  //     'error' — never left at 'enriching'.
   if (primaryId && primaryCandidateIdx >= 0) {
     const c = candidates[primaryCandidateIdx];
-    const enriched = await enrichSingleContact({
-      brand_id: brandId,
-      run_id: runId,
-      contact_id: primaryId,
-      domain,
-      first_name: c.first_name,
-      last_name: c.last_name,
-      full_name: c.full_name,
-      organization_name: c.organization_name,
-      apollo_person_id: c.apollo_person_id,
-    });
-    await admin
+    const { data: claimed } = await admin
       .from("brand_contacts")
       .update({
-        email: enriched.email,
-        email_source: enriched.email ? enriched.email_source : null,
-        email_pattern_used: enriched.email_pattern_used,
-        email_status: enriched.email
-          ? enriched.email_status
-          : "not_found",
-        email_verifier: enriched.email_verifier,
-        email_verifier_score: enriched.email_verifier_score,
-        email_verified_at: enriched.email_verified_at,
-        last_name: enriched.last_name,
-        full_name: enriched.full_name,
-        raw_apollo_match: enriched.raw_apollo_match,
-        raw_hunter: enriched.raw_hunter,
-        ready_to_send: enriched.email_status === "verified",
-        enrichment_state: "enriched",
+        enrichment_state: "enriching",
         updated_at: new Date().toISOString(),
       })
       .eq("id", primaryId)
-      .eq("brand_id", brandId);
+      .eq("brand_id", brandId)
+      .eq("enrichment_state", "discovered")
+      .select("id")
+      .maybeSingle();
+    if (claimed) {
+      try {
+        const enriched = await enrichSingleContact({
+          brand_id: brandId,
+          run_id: runId,
+          contact_id: primaryId,
+          domain,
+          first_name: c.first_name,
+          last_name: c.last_name,
+          full_name: c.full_name,
+          organization_name: c.organization_name,
+          apollo_person_id: c.apollo_person_id,
+        });
+        await admin
+          .from("brand_contacts")
+          .update({
+            email: enriched.email,
+            email_source: enriched.email ? enriched.email_source : null,
+            email_pattern_used: enriched.email_pattern_used,
+            email_status: enriched.email
+              ? enriched.email_status
+              : "not_found",
+            email_verifier: enriched.email_verifier,
+            email_verifier_score: enriched.email_verifier_score,
+            email_verified_at: enriched.email_verified_at,
+            last_name: enriched.last_name,
+            full_name: enriched.full_name,
+            raw_apollo_match: enriched.raw_apollo_match,
+            raw_hunter: enriched.raw_hunter,
+            ready_to_send: enriched.email_status === "verified",
+            enrichment_state: "enriched",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", primaryId)
+          .eq("brand_id", brandId);
+      } catch (err) {
+        await admin
+          .from("brand_contacts")
+          .update({
+            enrichment_state: "error",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", primaryId)
+          .eq("brand_id", brandId);
+        await recordDiscoveryEvent({
+          brand_id: brandId,
+          run_id: runId,
+          contact_id: primaryId,
+          provider: "orchestrator",
+          outcome: "error",
+          reason: `Primary enrichment threw: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
   }
 
   // 11. Defer enrichment for the non-primary 4: write one transparent

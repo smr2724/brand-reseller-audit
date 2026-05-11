@@ -174,6 +174,69 @@ function runRejectsApolloSearchError(): void {
   );
 }
 
+function runSvpEvpRankAsThree(): void {
+  // Phase 63 follow-up — the rank-3 VP matcher must also catch SVP, EVP,
+  // "Senior VP …", and "Executive VP …". Without these, a "SVP Sales"
+  // would fall to rank 5 (no title) and lose to a Director in the top-5
+  // ordering, which is wrong (SVP > Director).
+  //
+  // We mix in a rank-1 CEO so rankCandidates returns 5 items (top 5) and
+  // we can inspect the 4 VP-tier rows + the CEO.
+  const search = {
+    people: [
+      p("ceo", "CEO"),
+      p("svp", "SVP Sales"),
+      p("evp", "EVP Operations"),
+      p("senior-vp", "Senior VP Strategy"),
+      p("vp", "VP Marketing"),
+    ],
+  };
+  const ranked = rankCandidates(search);
+  const rankOf = (id: string) =>
+    ranked.find((r) => r.person.id === id)?.rank;
+  check("SVP Sales → rank 3", rankOf("svp") === 3, `rank=${rankOf("svp")}`);
+  check(
+    "EVP Operations → rank 3",
+    rankOf("evp") === 3,
+    `rank=${rankOf("evp")}`,
+  );
+  check(
+    "'Senior VP Strategy' → rank 3",
+    rankOf("senior-vp") === 3,
+    `rank=${rankOf("senior-vp")}`,
+  );
+  check(
+    "VP Marketing still → rank 3 after extension",
+    rankOf("vp") === 3,
+    `rank=${rankOf("vp")}`,
+  );
+
+  // Separate run for the Executive-VP variant. (Note: "Vice President of X"
+  // is matched by the rank-1 `president` token in the existing matcher
+  // because rank-1 patterns are evaluated first; that pre-dates Phase 63
+  // and is intentional — a stand-alone "President" title outranks a VP.)
+  // We also assert Director (rank 4) is NOT promoted by the VP matcher.
+  const search2 = {
+    people: [
+      p("exec-vp", "Executive VP of Marketing"),
+      p("director", "Director of Operations"),
+    ],
+  };
+  const ranked2 = rankCandidates(search2);
+  const rankOf2 = (id: string) =>
+    ranked2.find((r) => r.person.id === id)?.rank;
+  check(
+    "'Executive VP …' → rank 3",
+    rankOf2("exec-vp") === 3,
+    `rank=${rankOf2("exec-vp")}`,
+  );
+  check(
+    "Director still rank 4 (VP matcher didn't slurp it)",
+    rankOf2("director") === 4,
+    `rank=${rankOf2("director")}`,
+  );
+}
+
 async function main(): Promise<void> {
   runFounderBeatsVpTest();
   runMissingTitleFallsToRank5();
@@ -181,6 +244,7 @@ async function main(): Promise<void> {
   runOnlyTop5();
   runAcceptsBareApolloSearchOk();
   runRejectsApolloSearchError();
+  runSvpEvpRankAsThree();
   console.log(`\n${passes} passed, ${failures} failed`);
   if (failures > 0) process.exit(1);
 }

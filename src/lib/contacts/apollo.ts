@@ -31,10 +31,6 @@ export interface ApolloPersonSlim {
   organization_domain?: string;
 }
 
-export type ApolloMatchResult =
-  | { ok: true; person: ApolloPersonSlim | null; raw: unknown }
-  | { ok: false; error: string; status?: number };
-
 export type ApolloSearchResult =
   | { ok: true; people: ApolloPersonSlim[]; total: number; raw: unknown }
   | { ok: false; error: string; status?: number };
@@ -122,57 +118,6 @@ function slimPerson(p: any): ApolloPersonSlim {
       p?.organization_domain ??
       undefined,
   };
-}
-
-/**
- * Match a single person at a domain. Apollo charges credits per match;
- * use only for the candidates we keep.
- */
-export async function apolloMatchPerson(input: {
-  domain: string;
-  first_name?: string;
-  last_name?: string;
-}): Promise<ApolloMatchResult> {
-  const key = process.env.APOLLO_API_KEY;
-  if (!key) return { ok: false, error: "APOLLO_API_KEY missing" };
-  if (!input.domain) return { ok: false, error: "domain required" };
-  // Phase 62 — `reveal_personal_emails: true` is REQUIRED for Apollo's
-  // /people/match to actually return the business email on paid plans.
-  // The Shearwater audit trail (run_id 6097131f) confirmed missing emails
-  // when this flag was dropped. Covered by apollo.test.ts.
-  const body: Record<string, unknown> = {
-    reveal_personal_emails: true,
-    domain: input.domain,
-  };
-  if (input.first_name) body.first_name = input.first_name;
-  if (input.last_name) body.last_name = input.last_name;
-  let resp: Response;
-  try {
-    resp = await postForm("/people/match", body, key);
-  } catch (e) {
-    const status = (e as { status?: number })?.status;
-    const msg = e instanceof Error ? e.message : String(e);
-    await logApi("/people/match", status ?? "error", 0.02, msg);
-    return { ok: false, error: msg, status };
-  }
-  if (!resp.ok) {
-    await logApi(
-      "/people/match",
-      resp.status,
-      0,
-      `domain=${input.domain} non-ok`,
-    );
-    return { ok: false, error: `apollo_${resp.status}`, status: resp.status };
-  }
-  const data = await resp.json().catch(() => ({}));
-  await logApi(
-    "/people/match",
-    resp.status,
-    0.02,
-    `domain=${input.domain} first=${input.first_name ?? ""} last=${input.last_name ?? ""}`,
-  );
-  const raw = (data as any)?.person ?? (data as any)?.matches?.[0] ?? null;
-  return { ok: true, person: raw ? slimPerson(raw) : null, raw: data };
 }
 
 /**

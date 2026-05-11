@@ -22,10 +22,18 @@ export interface RankedCandidate {
   apollo_order: number;
 }
 
+// Order matters: each candidate is scored against patterns in order;
+// the first match wins. "Chief Executive Officer" must match rank-1
+// "ceo" or "founder/president/owner" before rank-2's "\bchief\s+\w+\b"
+// catches it, so rank-1 patterns appear first.
 const RANK_PATTERNS: Array<{ rank: 1 | 2 | 3 | 4 | 5; matcher: RegExp }> = [
   { rank: 1, matcher: /\b(founder|co[- ]?founder|ceo|chief executive|president|owner)\b/i },
   { rank: 2, matcher: /\b(cco|coo|cmo|cro|cso|cto|cfo|chief\s+\w+)\b/i },
-  { rank: 3, matcher: /\b(vp|vice president|head of)\b/i },
+  {
+    rank: 3,
+    matcher:
+      /\b(svp|evp|vp|vice\s+president|senior\s+vp|executive\s+vp|head\s+of)\b/i,
+  },
   { rank: 4, matcher: /\bdirector\b/i },
 ];
 
