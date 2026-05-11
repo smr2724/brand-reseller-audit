@@ -812,32 +812,7 @@ function SectionMethodology({
         </ul>
       </div>
 
-      {/* Phase 58 — Variation handling methodology was moved from
-          mid-report (next to the top-products grid) to live alongside
-          the rest of the methodology content. */}
-      <div className="rv2-method-card">
-        <div className="rv2-method-card-title">Methodology · Variation handling</div>
-        <p className="rv2-method-card-body">
-          Some ASINs in this brand share a parent listing with sibling variations
-          (e.g. a 4-pack and a 12-pack of the same product). Amazon&apos;s sales rank
-          is often shared across variations, which causes raw third-party sales
-          estimators to over-count sales on inactive variations. We attribute
-          group-level sales to each variation using a combined signal:{" "}
-          <strong>recent review activity (last 90 days)</strong> plus{" "}
-          <strong>
-            Buy Box win frequency (how often each variation actually held the Buy
-            Box recently)
-          </strong>
-          . When some siblings have Buy Box history and others don&apos;t, the
-          absence of Buy Box activity is itself evidence the listing hasn&apos;t
-          been selling — those variations correctly receive minimal attributed
-          sales.{" "}
-          <strong>
-            These per-ASIN sales numbers are estimates derived from Keepa rank,
-            review, and Buy Box data, not direct sales reporting.
-          </strong>
-        </p>
-      </div>
+      {/* Phase 60 — Variation handling methodology card removed per spec. */}
 
       <div className="rv2-method-sources">
         <span>Keepa snapshot · {formatLongDate(keepaFresh)}</span>
@@ -1046,10 +1021,9 @@ function SectionResellerReality({
 function SectionResellerRealityConsolidation() {
   return (
     <section id="s-reseller-reality" className="rv2-section rv2-section-alt">
-      <SectionHead
-        eyebrow="Reseller Reality"
-        title="The question isn't whether your resellers are authorized — it's whether your channel is consolidated."
-      />
+      <div className="rv2-section-head">
+        <div className="rv2-eyebrow">Reseller Reality</div>
+      </div>
       <p className="rv2-prose">
         You may already have authorized resellers on Amazon — and you may believe your network is healthy. That belief is reasonable. Most brand owners in your revenue range hold it. None of what we&apos;re about to say is meant to take that away from you.
       </p>
@@ -1069,7 +1043,7 @@ function SectionResellerRealityConsolidation() {
         </summary>
         <div className="rv2-reseller-reality-body">
           <p className="rv2-prose">
-            This usually isn&apos;t visible until a brand starts pushing past $5M in revenue. Below that, the math works. Above that, the cracks start showing — and most brand owners assume they&apos;re hitting a ceiling that&apos;s about the product, the category, or the algorithm. It&apos;s almost never any of those things.
+            This usually isn&apos;t visible until a brand starts pushing past $2M in revenue. Below that, the math works. Above that, the cracks start showing — and most brand owners assume they&apos;re hitting a ceiling that&apos;s about the product, the category, or the algorithm. It&apos;s almost never any of those things.
           </p>
           <p className="rv2-prose">
             The clearest example we have is Diversified Hospitality. When we took over their Amazon channel, we assumed — like they did — that their existing reseller network was their growth engine. They had authorized partners. Sales were steady. Nothing looked broken.
@@ -1425,12 +1399,9 @@ function SectionPlan({
     return (
       <section id="s-plan" className="rv2-section rv2-section-alt">
         <SectionHead
-          eyebrow="6–12 Month Capture Plan"
+          eyebrow="Capture Plan"
           title="The Five-Step Framework"
         />
-        <p className="rv2-prose">
-          Based on your classifications, the channel is already brand-controlled — there are no third-party resellers to transition off your listings today. The framework below is offered as a reference for protecting that position long-term.
-        </p>
         <div className="rv2-fivestep">
           {steps.map((s, i) => (
             <PlanStepCard
@@ -1454,10 +1425,9 @@ function SectionPlan({
   return (
     <section id="s-plan" className="rv2-section rv2-section-alt">
       <SectionHead
-        eyebrow="6–12 Month Capture Plan"
+        eyebrow="Capture Plan"
         title="The Five-Step Framework"
       />
-      {p.intro && <p className="rv2-prose">{scrubBrandOwnedNaming(p.intro)}</p>}
 
       {trademarkHook && (
         <div className="rv2-banner rv2-banner-warn">
@@ -1617,15 +1587,6 @@ function SectionFooterCta({
       <h2 className="rv2-h2">
         Schedule a 15-minute Amazon Channel Ownership Review with Steve.
       </h2>
-      <p className="rv2-prose rv2-cta-prose">
-        If these sellers are intentionally authorized to operate {brand.name}&apos;s Amazon channel, this may simply be a useful benchmark. If they are not, this could be a meaningful profit recapture and brand-control opportunity.
-      </p>
-      <p className="rv2-prose rv2-cta-prose">
-        On the call, we&apos;ll walk through the numbers, confirm which sellers are authorized, pressure-test the assumptions, and determine whether this is worth pursuing.
-      </p>
-      <p className="rv2-prose rv2-cta-prose">
-        If Phase 1 lands, we&apos;ll talk about Phase 2 — running the controlled channel as a fractional CAO engagement — as a separate conversation.
-      </p>
       <p className="rv2-prose rv2-cta-prose rv2-muted">
         No pressure. The goal is to confirm whether the opportunity is real, whether the assumptions are fair, and whether taking control is worth exploring.
       </p>
@@ -1912,9 +1873,6 @@ function SectionExecutiveSummary({
             <li key={i}>{b}</li>
           ))}
         </ul>
-        <p className="rv2-summary-close">
-          This is worth a 15-minute review if these sellers are not intentionally authorized to operate your Amazon channel.
-        </p>
       </div>
     </section>
   );
@@ -1975,12 +1933,6 @@ function SectionPhaseTwo({ brand }: { brand: PublicReportV2Brand }) {
         eyebrow="Phase 2"
         title="What comes next, once capture is complete"
       />
-      <p className="rv2-prose">
-        Phase 1 is about taking control of what&apos;s already yours — recovering the margin sitting in someone else&apos;s pocket on demand you already generate. That&apos;s what this report has covered.
-      </p>
-      <p className="rv2-prose">
-        Phase 2 is a different question entirely.
-      </p>
       <p className="rv2-prose">
         Once your channel is brand-controlled and the leakage is closed, the question shifts from &ldquo;how do we stop the bleeding&rdquo; to &ldquo;how do we compound this into a meaningful business.&rdquo; That&apos;s where most brands stall — not because the team isn&apos;t capable, but because the Amazon growth playbook is a moving target. The right agency this year is the wrong one next year. The right team structure at $5M is the wrong one at $15M. The experiments that compound aren&apos;t the ones that look obvious from the outside.
       </p>
@@ -2047,9 +1999,6 @@ function SectionCaseStudyDiversifiedHospitality() {
         eyebrow="Case Study"
         title="How Diversified Hospitality doubled its Amazon profit at flat revenue by taking the channel back from resellers"
       />
-      <p className="rv2-prose">
-        When RCG took over Diversified Hospitality&apos;s Amazon channel, customer experience metrics improved immediately. Amazon sales stayed at roughly $2M before and after the transition — and Diversified Hospitality&apos;s profit on those sales doubled in that same period by being the one selling them. They didn&apos;t lose a single customer. They didn&apos;t add one either. The entire profit lift came from removing the reseller layer and letting the brand keep the margin that was already there.
-      </p>
       <details className="rv2-case-study-details">
         <summary className="rv2-case-study-summary">
           <span className="rv2-case-study-summary-label">
@@ -2133,8 +2082,8 @@ function SectionCaseStudyDiversifiedHospitality() {
               than reseller terms
             </li>
             <li>
-              Diversified paid down more than $5 million in accounts
-              payable across the capture period
+              Recovered margin was redeployed against working-capital
+              needs across the capture period
             </li>
             <li>The increased profitability materially improved the underlying business</li>
           </ul>
