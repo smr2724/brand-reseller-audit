@@ -113,7 +113,11 @@ const APOLLO_UNLOCK: ApolloUnlockResponse = {
     email_status: "verified",
   },
 };
-const MV_UNKNOWN = { email: "jleggatt@shearwater.com", result: "unknown", resultcode: 4 };
+// resultcode 5 is MV's "Unknown" code. (resultcode 4 is reserved for the
+// "Apikey not found" provider failure — see Phase 65 verifier-transparency
+// tests; mixing it in here would now classify the response as a provider
+// failure rather than an inconclusive verdict.)
+const MV_UNKNOWN = { email: "jleggatt@shearwater.com", result: "unknown", resultcode: 5 };
 const ZB_UNKNOWN = { email: "jleggatt@shearwater.com", status: "unknown" };
 const ZB_VALID = { email: "jleggatt@shearwater.com", status: "valid" };
 

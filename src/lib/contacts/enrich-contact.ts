@@ -150,6 +150,17 @@ export async function enrichSingleContact(
   // back of an inconclusive verifier. We still persist the verifier
   // score so the operator can see the verifier was inconclusive.
   let apolloVerified = false;
+  // Phase 65 — track each verifier's resolved verdict so we can stamp
+  // `email_verifier` correctly (millionverifier / zerobounce / none) and
+  // surface failed-vs-inconclusive in the UI.
+  let finalMvVerdict: "verified" | "inconclusive" | "failed" | "skipped" = "skipped";
+  let finalZbVerdict: "verified" | "inconclusive" | "failed" | "skipped" = "skipped";
+  // Phase 65 — remember MV's raw status (verified/invalid/risky/catch_all/
+  // unknown/null) so the email_verifier cascade can distinguish a
+  // truly-decisive MV verdict (verified/invalid/risky) from MV catch_all,
+  // which is a definite-but-inconclusive verdict that triggers ZB
+  // fallthrough.
+  let finalMvStatus: string | null = null;
 
   // 1. Apollo unlock.
   const unlock = await apolloUnlockPerson({
@@ -420,23 +431,53 @@ export async function enrichSingleContact(
       // (but its 'unknown' just means 'guessed', not 'not_found').
       emailStatus = verifierIsInconclusive ? "guessed" : verifierStatus;
     }
+    // Phase 65 — classify each provider's run as one of:
+    //   verified     — provider returned a definite verdict (verified /
+    //                  invalid / risky / catch_all)
+    //   inconclusive — provider ran fine but verdict was 'unknown' or
+    //                  the request fell through (status undefined)
+    //   failed       — provider-level error (HTTP / auth / Apikey not
+    //                  found / network). Stamped as outcome='error'
+    //                  with verbatim error message in `reason`.
+    //   skipped      — provider was not called (no key, or short-circuit)
     const isMv = verify.verifier === "millionverifier";
     const isZb = verify.verifier === "zerobounce";
-    // Phase 64 — when MV returned 'unknown' / 'catch_all' AND we then
-    // called ZB, `verify.verifier` is "zerobounce" (ZB's verdict won)
-    // but we still want to record what MV said. The new mv_raw /
-    // mv_status fields on VerifyResult carry the MV response forward.
-    const mvCalled =
-      isMv || verify.mv_raw != null || verify.mv_status !== undefined;
-    const mvStatus = isMv
-      ? verify.status
-      : (verify.mv_status ?? null);
-    const mvOutcome: "found" | "skipped" = mvCalled ? "found" : "skipped";
-    const mvReason = mvCalled
-      ? `MillionVerifier: ${mvStatus ?? "unknown"} for ${email}${isMv && typeof verify.score === "number" ? ` (score ${verify.score.toFixed(2)})` : ""}${isZb ? "; fell through to ZeroBounce" : ""}.`
-      : verify.verifier === "none"
+    // MV "ran" if it was the authoritative verifier OR if its raw / status
+    // were forwarded after ZB ended up authoritative.
+    const mvRan =
+      isMv ||
+      verify.mv_raw != null ||
+      verify.mv_status !== undefined ||
+      verify.mv_error !== undefined;
+    const mvErrorMsg = isMv ? verify.error : verify.mv_error;
+    const mvStatus = isMv ? verify.status : (verify.mv_status ?? null);
+    const mvRawPayload = isMv ? verify.raw : (verify.mv_raw ?? null);
+    let mvOutcome: "found" | "skipped" | "error" = "skipped";
+    let mvReason: string;
+    let mvVerdict: "verified" | "inconclusive" | "failed" | "skipped";
+    if (!mvRan) {
+      mvOutcome = "skipped";
+      mvVerdict = "skipped";
+      mvReason = verify.verifier === "none"
         ? `MillionVerifier: skipped — provider unavailable or unconfigured.`
         : `MillionVerifier: skipped.`;
+    } else if (mvErrorMsg) {
+      mvOutcome = "error";
+      mvVerdict = "failed";
+      mvReason = `${mvErrorMsg} — falling through to ZeroBounce.`;
+    } else if (mvStatus === "verified" || mvStatus === "invalid" || mvStatus === "risky" || mvStatus === "catch_all") {
+      mvOutcome = "found";
+      mvVerdict = "verified";
+      const definitiveSuffix = isZb ? "; fell through to ZeroBounce" : "";
+      const scoreSuffix = isMv && typeof verify.score === "number"
+        ? ` (score ${verify.score.toFixed(2)})`
+        : "";
+      mvReason = `MillionVerifier: ${mvStatus} for ${email}${scoreSuffix}${definitiveSuffix}.`;
+    } else {
+      mvOutcome = "found";
+      mvVerdict = "inconclusive";
+      mvReason = `MillionVerifier: ${mvStatus ?? "unknown"} (inconclusive) for ${email}; fell through to ZeroBounce.`;
+    }
     await recordDiscoveryEvent({
       brand_id,
       run_id,
@@ -445,22 +486,50 @@ export async function enrichSingleContact(
       outcome: mvOutcome,
       reason: mvReason,
       email_returned: email,
-      status_returned: mvStatus,
+      // Phase 65 — status_returned is null when the provider failed
+      // (it's not a verdict; the failure message is in `reason`).
+      status_returned: mvErrorMsg ? null : mvStatus,
       score_returned:
-        isMv && typeof verify.score === "number" ? clampScore(verify.score) : null,
+        isMv && !mvErrorMsg && typeof verify.score === "number"
+          ? clampScore(verify.score)
+          : null,
       // Phase 64 — persist the MV raw payload regardless of which
       // verifier ended up authoritative. We need this to debug the
       // "MV returns unknown for everything" symptom from prod.
-      raw_payload: isMv ? verify.raw : (verify.mv_raw ?? null),
+      raw_payload: mvRawPayload,
     });
-    const zbOutcome: "found" | "skipped" = isZb ? "found" : "skipped";
-    const zbReason = isZb
-      ? `ZeroBounce: ${verify.status}${typeof verify.score === "number" ? ` (score ${verify.score.toFixed(2)})` : ""} for ${email}.`
-      : isMv
-        ? `ZeroBounce: skipped — MillionVerifier returned a definite verdict (${verify.status}).`
-        : mvCalled
-          ? `ZeroBounce: skipped — provider unavailable or unconfigured.`
-          : `ZeroBounce: skipped — no verifier returned a definite result.`;
+    // ZB classification mirrors MV.
+    const zbRan = isZb;
+    const zbErrorMsg = isZb ? verify.error : undefined;
+    let zbOutcome: "found" | "skipped" | "error" = "skipped";
+    let zbReason: string;
+    let zbVerdict: "verified" | "inconclusive" | "failed" | "skipped";
+    if (!zbRan) {
+      zbOutcome = "skipped";
+      zbVerdict = "skipped";
+      if (mvVerdict === "verified") {
+        zbReason = `ZeroBounce: skipped — MillionVerifier returned a definite verdict (${mvStatus}).`;
+      } else if (mvVerdict === "skipped") {
+        zbReason = `ZeroBounce: skipped — provider unavailable or unconfigured.`;
+      } else {
+        zbReason = `ZeroBounce: skipped — provider unavailable or unconfigured.`;
+      }
+    } else if (zbErrorMsg) {
+      zbOutcome = "error";
+      zbVerdict = "failed";
+      zbReason = `${zbErrorMsg}.`;
+    } else if (verify.status === "verified" || verify.status === "invalid" || verify.status === "risky" || verify.status === "catch_all") {
+      zbOutcome = "found";
+      zbVerdict = "verified";
+      const scoreSuffix = typeof verify.score === "number"
+        ? ` (score ${verify.score.toFixed(2)})`
+        : "";
+      zbReason = `ZeroBounce: ${verify.status}${scoreSuffix} for ${email}.`;
+    } else {
+      zbOutcome = "found";
+      zbVerdict = "inconclusive";
+      zbReason = `ZeroBounce: ${verify.status} (inconclusive) for ${email}.`;
+    }
     await recordDiscoveryEvent({
       brand_id,
       run_id,
@@ -469,11 +538,17 @@ export async function enrichSingleContact(
       outcome: zbOutcome,
       reason: zbReason,
       email_returned: email,
-      status_returned: isZb ? verify.status : null,
+      status_returned: isZb && !zbErrorMsg ? verify.status : null,
       score_returned:
-        isZb && typeof verify.score === "number" ? clampScore(verify.score) : null,
+        isZb && !zbErrorMsg && typeof verify.score === "number"
+          ? clampScore(verify.score)
+          : null,
       raw_payload: isZb ? verify.raw : null,
     });
+    // Stash for the return value.
+    finalMvVerdict = mvVerdict;
+    finalZbVerdict = zbVerdict;
+    finalMvStatus = mvStatus ?? null;
   } else {
     await recordDiscoveryEvent({
       brand_id,
@@ -502,12 +577,42 @@ export async function enrichSingleContact(
     emailStatus = "not_found";
   }
 
+  // Phase 65 — `email_verifier` names the provider whose verdict
+  // MATERIALLY shaped the final `email_status` on this row:
+  //   - 'millionverifier' if MV returned a decisive verdict
+  //     (verified/likely/risky/invalid) AND ZB therefore short-circuited.
+  //     MV `catch_all` does NOT qualify — it's a definite-but-inconclusive
+  //     verdict that triggers ZB fallthrough; if ZB runs, ZB owns it.
+  //   - 'zerobounce' if ZB ran and produced any verdict (definite or
+  //     inconclusive). When MV was catch_all / inconclusive / failed and
+  //     ZB ran, ZB is authoritative.
+  //   - 'none' otherwise: no verifier produced a verdict that materially
+  //     decided email_status (Apollo's verdict, if any, is preserved).
+  //     Covers: MV failed + ZB skipped/failed; MV inconclusive + ZB
+  //     skipped/failed; MV catch_all + ZB skipped/failed.
+  //   - null if no email was resolved (nothing to verify).
+  const mvWasDecisive =
+    finalMvVerdict === "verified" &&
+    finalMvStatus !== "catch_all" &&
+    finalMvStatus !== "unknown" &&
+    finalMvStatus !== null;
+  let emailVerifierStamp: "millionverifier" | "zerobounce" | "none" | null = null;
+  if (email) {
+    if (mvWasDecisive && finalZbVerdict === "skipped") {
+      emailVerifierStamp = "millionverifier";
+    } else if (finalZbVerdict === "verified" || finalZbVerdict === "inconclusive") {
+      emailVerifierStamp = "zerobounce";
+    } else {
+      emailVerifierStamp = "none";
+    }
+  }
+
   return {
     email,
     email_source: email ? email_source : "unknown",
     email_pattern_used,
     email_status: emailStatus,
-    email_verifier: email ? (verify?.verifier ?? "none") : null,
+    email_verifier: emailVerifierStamp,
     email_verifier_score:
       email && verify && typeof verify.score === "number" ? verify.score : null,
     email_verified_at: email && verify ? new Date().toISOString() : null,

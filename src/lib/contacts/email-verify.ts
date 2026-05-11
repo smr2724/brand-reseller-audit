@@ -13,6 +13,13 @@
  *      fail-closed so the operator sees the auth issue.
  *   6. Every call writes to the existing `api_logs` table (this also
  *      backfills the Phase-44-era telemetry gap as a side effect).
+ *
+ * Phase 65 — MV error classification. A MillionVerifier response with
+ * `result === "error"`, `resultcode === 4`, or a non-empty `error`
+ * field is a PROVIDER FAILURE, not a row-level 'unknown' verdict.
+ * It must (a) fall through to ZeroBounce and (b) be surfaced to the
+ * audit trail as outcome='error' with the verbatim error message,
+ * NOT as a definite verdict. Same logic applies symmetrically to ZB.
  */
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 
@@ -29,14 +36,25 @@ export type VerifyResult = {
   verifier: "millionverifier" | "zerobounce" | "none";
   score?: number; // 0-1, when provider returns one
   raw?: unknown;
+  /**
+   * Phase 65 — when set, the authoritative verifier (in `verifier`) was
+   * a provider-level FAILURE (HTTP non-2xx, auth, API key rejection,
+   * malformed response, network), NOT an inconclusive verdict. Callers
+   * use this to distinguish "MV ran fine but said unknown" from
+   * "MV could not run". `status` is set to 'unknown' in both cases for
+   * back-compat, but only the latter has `error` populated.
+   */
+  error?: string;
   // Phase 64 — preserve BOTH providers' raw responses so the audit
   // trail can show what MV said even when we ended up using ZB's
   // verdict (and vice versa). `raw` continues to point at the
   // authoritative provider's payload to preserve the prior contract.
   mv_raw?: unknown;
   mv_status?: VerifyStatus;
+  mv_error?: string;
   zb_raw?: unknown;
   zb_status?: VerifyStatus;
+  zb_error?: string;
 };
 
 const SYNTAX_RE =
@@ -160,6 +178,17 @@ async function writeDomainCache(args: {
 /**
  * MillionVerifier `/api/v3/?api=KEY&email=…&timeout=10`.
  * Maps `result` → VerifyStatus.
+ *
+ * Phase 65 — distinguish provider failure from inconclusive verdict:
+ *  - HTTP non-2xx, network exception, auth_failure_* → provider failure.
+ *  - `result === "error"` OR `resultcode === 4` OR non-empty `error`
+ *    field in the JSON body → provider failure (e.g. "Apikey not found").
+ *  - Bare `unknown` (no error field, resultcode != 4) → inconclusive
+ *    verdict, still status='unknown' but error is undefined so the
+ *    caller can tell the difference.
+ *
+ * Always returns a VerifyResult (no longer returns null on failure) so
+ * downstream code has a stable shape to inspect via `error`.
  */
 async function callMillionVerifier(
   email: string,
@@ -171,14 +200,20 @@ async function callMillionVerifier(
   try {
     resp = await fetchWithRetry(url, { method: "GET" });
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     await logApi(
       "millionverifier",
       "/api/v3",
       "error",
       0.005,
-      `email=${email} err=${e instanceof Error ? e.message : String(e)}`,
+      `email=${email} err=${msg}`,
     );
-    return null;
+    return {
+      status: "unknown",
+      verifier: "millionverifier",
+      error: `MillionVerifier request failed: ${msg}`,
+      raw: { error: msg },
+    };
   }
   if (!resp.ok) {
     await logApi(
@@ -188,7 +223,12 @@ async function callMillionVerifier(
       0.005,
       `email=${email} non-ok`,
     );
-    return null;
+    return {
+      status: "unknown",
+      verifier: "millionverifier",
+      error: `MillionVerifier HTTP ${resp.status}`,
+      raw: { http_status: resp.status },
+    };
   }
   const json = await resp.json().catch(() => ({}));
   await logApi(
@@ -198,10 +238,28 @@ async function callMillionVerifier(
     0.005,
     `email=${email} result=${(json as { result?: string })?.result ?? "?"}`,
   );
-  const result = String(
-    (json as { result?: string })?.result ?? "",
-  ).toLowerCase();
-  const qualityRaw = (json as { quality_score?: number })?.quality_score;
+  const body = json as {
+    result?: string;
+    resultcode?: number;
+    error?: string;
+    quality_score?: number;
+  };
+  const result = String(body?.result ?? "").toLowerCase();
+  const resultcode = typeof body?.resultcode === "number" ? body.resultcode : null;
+  const errorField = typeof body?.error === "string" ? body.error.trim() : "";
+  // Phase 65 — provider-level failure detection. resultcode 4 ===
+  // "Apikey not found" per the MV docs; non-empty `error` field or
+  // `result === "error"` are equally clear signals.
+  if (result === "error" || resultcode === 4 || errorField.length > 0) {
+    const msg = errorField || `result=${result || "error"} resultcode=${resultcode ?? "?"}`;
+    return {
+      status: "unknown",
+      verifier: "millionverifier",
+      error: `MillionVerifier: ${msg}`,
+      raw: json,
+    };
+  }
+  const qualityRaw = body?.quality_score;
   const score =
     typeof qualityRaw === "number" && Number.isFinite(qualityRaw)
       ? Math.max(0, Math.min(1, qualityRaw / 100))
@@ -217,7 +275,6 @@ async function callMillionVerifier(
     case "catchall":
       return { status: "catch_all", verifier: "millionverifier", raw: json };
     case "unknown":
-    case "error":
       return { status: "unknown", verifier: "millionverifier", raw: json };
     default:
       return { status: "unknown", verifier: "millionverifier", raw: json };
@@ -227,6 +284,11 @@ async function callMillionVerifier(
 /**
  * ZeroBounce `/v2/validate?api_key=KEY&email=…`.
  * Maps `status` → VerifyStatus.
+ *
+ * Phase 65 — same provider-failure classification as MV. ZeroBounce
+ * may also return a JSON body with `error` populated on auth failure
+ * (e.g. "Invalid API Key"). Treat HTTP non-2xx, network, auth, and
+ * `error` field as provider failure.
  */
 async function callZeroBounce(
   email: string,
@@ -238,14 +300,20 @@ async function callZeroBounce(
   try {
     resp = await fetchWithRetry(url, { method: "GET" });
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     await logApi(
       "zerobounce",
       "/v2/validate",
       "error",
       0.008,
-      `email=${email} err=${e instanceof Error ? e.message : String(e)}`,
+      `email=${email} err=${msg}`,
     );
-    return null;
+    return {
+      status: "unknown",
+      verifier: "zerobounce",
+      error: `ZeroBounce request failed: ${msg}`,
+      raw: { error: msg },
+    };
   }
   if (!resp.ok) {
     await logApi(
@@ -255,7 +323,12 @@ async function callZeroBounce(
       0.008,
       `email=${email} non-ok`,
     );
-    return null;
+    return {
+      status: "unknown",
+      verifier: "zerobounce",
+      error: `ZeroBounce HTTP ${resp.status}`,
+      raw: { http_status: resp.status },
+    };
   }
   const json = (await resp.json().catch(() => ({}))) as {
     status?: string;
@@ -263,6 +336,7 @@ async function callZeroBounce(
     mx_found?: string | boolean;
     mx_record?: string;
     domain?: string;
+    error?: string;
   };
   await logApi(
     "zerobounce",
@@ -271,6 +345,15 @@ async function callZeroBounce(
     0.008,
     `email=${email} status=${json?.status ?? "?"}`,
   );
+  const errorField = typeof json?.error === "string" ? json.error.trim() : "";
+  if (errorField.length > 0) {
+    return {
+      status: "unknown",
+      verifier: "zerobounce",
+      error: `ZeroBounce: ${errorField}`,
+      raw: json,
+    };
+  }
   const status = String(json?.status ?? "").toLowerCase();
   const mxFound =
     json?.mx_found === true ||
@@ -311,12 +394,12 @@ async function callZeroBounce(
 /**
  * Verify a single email. See module docstring for behavior.
  *
- * Phase 64 — when MV returns 'unknown' (or 'catch_all', or fails) we
- * MUST fall through to ZeroBounce. The earlier behavior already did
- * this, but the surrounding code path was reading MV's raw_payload as
- * null on the MV event when ZB ended up authoritative. We now stash
- * BOTH providers' raw responses on the returned VerifyResult so the
- * caller can persist each one onto its own audit event row.
+ * Phase 64 — when MV returns 'unknown' / 'catch_all' / fails we MUST
+ * fall through to ZeroBounce. Phase 65 extends the fallthrough to MV
+ * provider failures (HTTP, auth, "Apikey not found"). We stash BOTH
+ * providers' raw responses + error messages on the returned
+ * VerifyResult so the caller can persist each one onto its own audit
+ * event row.
  */
 export async function verifyEmail(email: string): Promise<VerifyResult> {
   if (!syntaxOk(email)) {
@@ -324,31 +407,44 @@ export async function verifyEmail(email: string): Promise<VerifyResult> {
   }
 
   const mv = await callMillionVerifier(email);
-  // MV returned a definite result — short-circuit.
-  if (mv && (mv.status === "verified" || mv.status === "invalid" || mv.status === "risky")) {
+  // MV returned a definite result (and no provider error) — short-circuit.
+  if (
+    mv &&
+    !mv.error &&
+    (mv.status === "verified" ||
+      mv.status === "invalid" ||
+      mv.status === "risky")
+  ) {
     return {
       ...mv,
       mv_raw: mv.raw,
       mv_status: mv.status,
     };
   }
-  // MV returned catch_all / unknown / error, OR no key → fall through to ZB.
+  // MV returned catch_all / unknown / errored, OR no key → fall through to ZB.
   const zb = await callZeroBounce(email);
   if (zb) {
+    // If ZB also failed at the provider level, we still report ZB as
+    // the authoritative verifier here (its `error` field tells the
+    // caller what happened). The caller is responsible for deciding
+    // whether to stamp email_verifier='zerobounce' vs 'none'.
     return {
       ...zb,
       mv_raw: mv?.raw ?? null,
       mv_status: mv?.status,
+      mv_error: mv?.error,
       zb_raw: zb.raw,
       zb_status: zb.status,
+      zb_error: zb.error,
     };
   }
-  // Both providers down/unconfigured.
+  // ZB not configured.
   if (mv) {
     return {
       ...mv,
       mv_raw: mv.raw,
       mv_status: mv.status,
+      mv_error: mv.error,
     };
   }
   return { status: "unknown", verifier: "none" };
