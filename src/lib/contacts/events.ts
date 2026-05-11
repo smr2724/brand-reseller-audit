@@ -23,7 +23,9 @@ export type DiscoveryEventProvider =
   | "zerobounce"
   | "pattern_guess"
   | "orchestrator"
-  | "enrichment_deferred";
+  | "enrichment_deferred"
+  | "linkedin_verify"
+  | "hunter_pattern";
 
 export type DiscoveryEventOutcome =
   | "found"

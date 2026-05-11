@@ -215,11 +215,62 @@ export async function runContactDiscovery(
       : null;
 
   if (gateCPerson) {
-    const seed = await seedFromGateC({
-      person: gateCPerson,
-      brand_name: brand.name,
-      domain,
-    });
+    const seed = await seedFromGateC(
+      {
+        person: gateCPerson,
+        brand_name: brand.name,
+        domain,
+      },
+      {
+        // Phase 72 — surface linkedin_verify events into the discovery
+        // audit trail. HEAD-verifying the Gate C LinkedIn URL before
+        // Apollo lets us skip hallucinated slugs (Carna4's bogus
+        // /in/maria-ringo-4a6b1b16) and fall back to name+org match.
+        onLinkedInVerify: async ({ raw_url, normalized, ok, reason }) => {
+          await recordDiscoveryEvent({
+            brand_id: brandId,
+            run_id: runId,
+            provider: "linkedin_verify",
+            outcome: ok ? "found" : "not_found",
+            reason: ok
+              ? `LinkedIn URL ${raw_url} verified (${reason}).`
+              : `LinkedIn URL ${raw_url} did not verify: ${reason}.`,
+            raw_payload: { raw_url, normalized, ok, reason },
+          });
+        },
+        // Phase 72 — Hunter pattern-construction fallback events. Fires
+        // when Apollo + Hunter email-finder all miss and we attempt to
+        // synthesize an email from Hunter's domain pattern + Gate C name.
+        onHunterPattern: async ({
+          pattern,
+          pattern_confidence,
+          constructed_email,
+          mv_status,
+          outcome,
+          reason,
+        }) => {
+          await recordDiscoveryEvent({
+            brand_id: brandId,
+            run_id: runId,
+            provider: "hunter_pattern",
+            outcome,
+            reason,
+            email_returned: constructed_email,
+            status_returned: mv_status,
+            score_returned:
+              typeof pattern_confidence === "number"
+                ? pattern_confidence
+                : null,
+            raw_payload: {
+              pattern,
+              pattern_confidence,
+              constructed_email,
+              mv_status,
+            },
+          });
+        },
+      },
+    );
 
     if (seed.provider === "needs_review") {
       gateCMissed = true;
@@ -233,12 +284,35 @@ export async function runContactDiscovery(
       });
     } else if (seed.person) {
       // Verify via MillionVerifier when we have an email.
+      //
+      // Phase 72 — the hunter_pattern seed step already MV-verified the
+      // constructed email inline (per spec §3c) so we trust its mv_status
+      // and skip the second verify call. For every other provider
+      // (apollo_linkedin_match / apollo_mixed_search / hunter_finder),
+      // run MV here as before.
       let verifyStatus: string | null = null;
       let verifyScore: number | null = null;
       let verifierName: "millionverifier" | "zerobounce" | "none" | null =
         null;
       let emailVerifiedAt: string | null = null;
-      if (seed.person.email) {
+      if (seed.provider === "hunter_pattern" && seed.hunter_pattern_meta) {
+        verifyStatus = seed.hunter_pattern_meta.mv_status;
+        verifierName = "millionverifier";
+        emailVerifiedAt = new Date().toISOString();
+        await recordDiscoveryEvent({
+          brand_id: brandId,
+          run_id: runId,
+          provider: "millionverifier",
+          outcome:
+            verifyStatus === "verified"
+              ? "found"
+              : verifyStatus === "invalid"
+                ? "not_found"
+                : "skipped",
+          reason: `MillionVerifier verdict ${verifyStatus} for ${seed.person.email} (hunter_pattern).`,
+          status_returned: verifyStatus,
+        });
+      } else if (seed.person.email) {
         const v = await verifyEmail(seed.person.email).catch(() => null);
         if (v) {
           verifyStatus = v.status;
@@ -336,7 +410,22 @@ export async function runContactDiscovery(
       // OTHER person owns the slot already. If the sticky primary is
       // the same Gate C person, we still want is_primary=true (which
       // it already is on the sticky row).
-      const wantPrimary = !stickyPrimary || stickyPrimaryMatchesGateC;
+      //
+      // Phase 72 — Hunter pattern-constructed rows: only the verified
+      // (MV='ok') variant goes in as is_primary=true. Risky / catch_all
+      // rows go in as is_primary=false so the Phase 70 OUTREACH picker
+      // (which filters by email_status='verified') hides them.
+      let wantPrimary = !stickyPrimary || stickyPrimaryMatchesGateC;
+      if (seed.provider === "hunter_pattern" && seed.hunter_pattern_meta) {
+        wantPrimary = wantPrimary && seed.hunter_pattern_meta.is_primary;
+      }
+
+      // Phase 72 — pattern-source rows carry a transparent note so the
+      // reviewer can see the email was constructed, not retrieved.
+      const hunterPatternNotes =
+        seed.provider === "hunter_pattern" && seed.hunter_pattern_meta
+          ? seed.hunter_pattern_meta.notes
+          : null;
 
       const baseFields: Record<string, unknown> = {
         brand_id: brandId,
@@ -347,9 +436,11 @@ export async function runContactDiscovery(
         title: seed.person.title ?? gateCPerson.title,
         linkedin_url: seed.person.linkedin_url ?? gateCPerson.linkedin_url,
         company_domain: domain,
-        apollo_person_id: seed.person.id?.startsWith("hunter:")
-          ? null
-          : seed.person.id || null,
+        apollo_person_id:
+          seed.person.id?.startsWith("hunter:") ||
+          seed.person.id?.startsWith("hunter_pattern:")
+            ? null
+            : seed.person.id || null,
         email: seed.person.email,
         email_source: seed.person.email ? seed.email_source : null,
         email_status: finalStatus,
@@ -361,6 +452,7 @@ export async function runContactDiscovery(
         enrichment_state: "enriched",
         raw_apollo_match: seed.person,
         updated_at: new Date().toISOString(),
+        ...(hunterPatternNotes ? { notes: hunterPatternNotes } : {}),
       };
 
       if (existingForName?.id) {
@@ -406,13 +498,17 @@ export async function runContactDiscovery(
         seed.provider === "apollo_linkedin_match" ||
         seed.provider === "apollo_mixed_search"
           ? "apollo_match"
-          : "hunter_finder";
+          : seed.provider === "hunter_pattern"
+            ? "hunter_pattern"
+            : "hunter_finder";
       const eventReason =
         seed.provider === "apollo_linkedin_match"
           ? "gate_c_linkedin_match"
           : seed.provider === "apollo_mixed_search"
             ? "gate_c_mixed_search"
-            : "gate_c_hunter_finder";
+            : seed.provider === "hunter_pattern"
+              ? "gate_c_hunter_pattern"
+              : "gate_c_hunter_finder";
       await recordDiscoveryEvent({
         brand_id: brandId,
         run_id: runId,

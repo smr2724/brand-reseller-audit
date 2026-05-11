@@ -103,6 +103,89 @@ export function extractControllingEntity(qual: any): ControllingEntityShape | nu
   return null;
 }
 
+/**
+ * Phase 72 — extract a NamedCandidate from
+ * `brand_qualifications.gate_c_named_decision_maker.person`. Returns
+ * null when Gate C did not pass or the person record is missing the
+ * first+last+full identity fields. When set, the candidate is wired
+ * with `can_sign_50k=true` + `personal_stake='equity_owner'` so the
+ * downstream verdict path treats Gate C's person as the ready primary
+ * (Gate C is, by construction, the named decision-maker at the
+ * controlling entity).
+ */
+export function extractGateCSeed(raw: unknown): NamedCandidate | null {
+  if (!raw || typeof raw !== "object") return null;
+  const gateC = raw as {
+    passed?: unknown;
+    person?:
+      | {
+          full_name?: unknown;
+          first_name?: unknown;
+          last_name?: unknown;
+          title?: unknown;
+          linkedin_url?: unknown;
+          evidence_sources?: unknown;
+        }
+      | null
+      | undefined;
+  };
+  if (gateC.passed !== true) return null;
+  const person = gateC.person;
+  if (!person || typeof person !== "object") return null;
+  const first =
+    typeof person.first_name === "string" ? person.first_name.trim() : "";
+  const last =
+    typeof person.last_name === "string" ? person.last_name.trim() : "";
+  const fullFromField =
+    typeof person.full_name === "string" ? person.full_name.trim() : "";
+  const full = fullFromField || `${first} ${last}`.trim();
+  // Gate C is only useful as a seed when we have at least first+last
+  // (or a clearly-multi-word full_name) to feed downstream Apollo / MV.
+  if (!full || (!first && !last && !full.includes(" "))) {
+    // Structured warning so we can see when Gate C technically "passed"
+    // but didn't capture enough identity to seed strategy.
+    console.warn(
+      JSON.stringify({
+        event: "phase72_gate_c_seed_missing_fields",
+        full_name: fullFromField || null,
+        first_name: first || null,
+        last_name: last || null,
+      }),
+    );
+    return null;
+  }
+  const title =
+    typeof person.title === "string" && person.title.trim().length > 0
+      ? person.title.trim()
+      : null;
+  const linkedin =
+    typeof person.linkedin_url === "string" && person.linkedin_url.trim().length > 0
+      ? person.linkedin_url.trim()
+      : null;
+  const evidence = Array.isArray(person.evidence_sources)
+    ? (person.evidence_sources as unknown[])
+        .filter((s): s is string => typeof s === "string" && s.length > 0)
+    : [];
+  return {
+    name: full,
+    title,
+    linkedin_url: linkedin,
+    reason: `Identified at qualification Gate C as the controlling entity's named decision-maker${title ? ` (${title})` : ""}.`,
+    can_sign_50k: true,
+    personal_stake: "equity_owner",
+    full_name: full,
+    first_name: first || (full.split(/\s+/)[0] ?? null),
+    last_name:
+      last ||
+      (full.split(/\s+/).length > 1
+        ? full.split(/\s+/).slice(1).join(" ")
+        : null),
+    source: "gate_c",
+    confidence_seed: "high",
+    evidence_sources: evidence,
+  };
+}
+
 function findTopNamedMatch(
   ranked: ScoredCandidate[],
   strategy: ContactStrategy,
@@ -339,9 +422,20 @@ async function buildContactStrategyInner(
   }
 
   // 2. Strategy LLM.
+  //
+  // Phase 72 — read Gate C decision-maker BEFORE the LLM step. When
+  // Gate C named a real human, that person seeds named_candidates
+  // directly with verdict='ready' and we skip the LLM "name candidates
+  // from public signals" step entirely (it hallucinates names too
+  // often — see Carna4's `maria-ringo-4a6b1b16` bogus slug). We still
+  // run the full LLM call for the size-tier classification + Profile /
+  // Avoid / rationale, then overwrite named_candidates with the Gate C
+  // seed and force the verdict.
   const recoverable = computeRecoverableRevenueUsd(brand);
   const gateCName = ((qual as any).gate_c_person_name as string | undefined) ?? null;
   const gateCTitle = ((qual as any).gate_c_person_title as string | undefined) ?? null;
+  const gateCSeed = extractGateCSeed((qual as any).gate_c_named_decision_maker);
+
   const rawStrategy = await runLLM({
     brand: { id: brand.id, name: brand.name },
     controllingEntity: controlling,
@@ -355,7 +449,21 @@ async function buildContactStrategyInner(
   // Replace `{brand_name}` placeholders in every title list BEFORE we
   // hand them to Apollo. Without this, the literal `{brand_name}` string
   // leaks into person_titles[] on the LLM-parse happy path.
-  const strategy = applyBrandNameSubstitution(rawStrategy, brand.name);
+  let strategy = applyBrandNameSubstitution(rawStrategy, brand.name);
+
+  // Phase 72 — overwrite LLM named_candidates with the Gate C person
+  // when Gate C passed and produced a usable person. Verdict path
+  // below is also forced to 'ready' in computeStrategyVerdict by way
+  // of the seeded can_sign_50k=true + personal_stake!='none' shape.
+  let gateCForcedVerdict = false;
+  if (gateCSeed) {
+    strategy = {
+      ...strategy,
+      named_candidates: [gateCSeed],
+      outreach_order: [gateCSeed.name],
+    };
+    gateCForcedVerdict = true;
+  }
 
   // 3. Apollo primary titles.
   let apolloCost = 0;
@@ -416,7 +524,17 @@ async function buildContactStrategyInner(
   // 7. Verdict.
   const topNamed = findTopNamedMatch(ranked, strategy);
   const scores = ranked.map((r) => r.score);
-  const { verdict, reason } = computeStrategyVerdict(strategy, scores, topNamed);
+  let { verdict, reason } = computeStrategyVerdict(strategy, scores, topNamed);
+
+  // Phase 72 — Gate C produced a named decision-maker before this run.
+  // That person IS the contact target; we don't need Apollo/Hunter to
+  // confirm them. Force verdict='ready' so the UI doesn't display
+  // 'needs_human_review' for a brand where qualification already named
+  // the decision-maker.
+  if (gateCForcedVerdict) {
+    verdict = "ready";
+    reason = "";
+  }
 
   return await persist(admin, {
     brand_id: brand.id,

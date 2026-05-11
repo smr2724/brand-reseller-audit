@@ -898,6 +898,31 @@ async function runQualificationInner(
     })
     .eq("id", brandId);
 
+  // Phase 72 — invalidate stale contact_strategies rows whenever
+  // qualification re-runs. The bug being fixed: Steve re-qualified
+  // Carna4, Phase 71's Gate C correctly named Maria Ringo, but the
+  // stale `contact_strategies` row (verdict='needs_human_review',
+  // named_candidates=[]) lingered in the UI until the user clicked
+  // "Run contact strategy" manually. Option A from the spec: delete
+  // strategy rows that pre-date this qualification update OR have an
+  // empty named_candidates set. The user (or next page load) re-runs
+  // the strategy, which now reads Gate C (Part 1) and produces
+  // verdict='ready' with the Gate C person seeded.
+  try {
+    await admin
+      .from("contact_strategies")
+      .delete()
+      .eq("brand_id", brandId)
+      .or(
+        // Either the strategy was written before this qualification
+        // update, or it has no named candidates at all (stale even if
+        // newer for some reason).
+        `created_at.lt.${nowIso},named_candidates.eq.[]`,
+      );
+  } catch {
+    /* never block qualification on strategy cleanup */
+  }
+
   return {
     ok: true,
     qualification_id: upserted.id,

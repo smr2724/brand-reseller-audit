@@ -237,9 +237,14 @@ export async function apolloMixedPeopleSearch(
  * the result straight into the ranking / brand_contacts pipeline.
  */
 export interface ApolloPeopleMatchInput {
-  linkedin_url: string;
+  /** Phase 72 — optional. When null/empty/omitted, the form body omits
+   *  the `linkedin_url` key entirely (sending an empty string breaks
+   *  Apollo's matching). The wrapper requires either a non-empty
+   *  linkedin_url OR (first_name + last_name + organization_name). */
+  linkedin_url?: string | null;
   first_name?: string | null;
   last_name?: string | null;
+  organization_name?: string | null;
 }
 
 export interface ApolloPeopleMatchResult {
@@ -254,9 +259,19 @@ export function buildApolloPeopleMatchBody(
   input: ApolloPeopleMatchInput,
 ): URLSearchParams {
   const body = new URLSearchParams();
-  body.set("linkedin_url", input.linkedin_url);
+  // Phase 72 — omit `linkedin_url` from the form body when null/empty.
+  // Sending `linkedin_url=` (empty string) breaks Apollo's matching;
+  // when the LinkedIn URL is unverified or hallucinated, we fall back
+  // to first_name + last_name + organization_name as the matching
+  // triple, which Apollo accepts.
+  if (input.linkedin_url && input.linkedin_url.trim().length > 0) {
+    body.set("linkedin_url", input.linkedin_url.trim());
+  }
   if (input.first_name) body.set("first_name", input.first_name);
   if (input.last_name) body.set("last_name", input.last_name);
+  if (input.organization_name && input.organization_name.trim().length > 0) {
+    body.set("organization_name", input.organization_name.trim());
+  }
   // Phase 63 convention — explicit unlock semantics.
   body.set("reveal_personal_emails", "true");
   body.set("reveal_phone_number", "false");
@@ -273,8 +288,25 @@ export async function apolloPeopleMatchByLinkedIn(
   const apiKey = deps?.apiKey ?? process.env.APOLLO_API_KEY;
   if (!apiKey)
     return { ok: false, person: null, cost_credits: 0, error: "APOLLO_API_KEY missing" };
-  if (!input.linkedin_url)
-    return { ok: false, person: null, cost_credits: 0, error: "linkedin_url required" };
+  // Phase 72 — accept either a non-empty linkedin_url OR
+  // (first_name + last_name + organization_name) as the matching signals.
+  // Reject calls with neither — Apollo would return no hit anyway and
+  // we'd waste a credit.
+  const hasLinkedin =
+    typeof input.linkedin_url === "string" && input.linkedin_url.trim().length > 0;
+  const hasNameTriple =
+    !!input.first_name &&
+    !!input.last_name &&
+    typeof input.organization_name === "string" &&
+    input.organization_name.trim().length > 0;
+  if (!hasLinkedin && !hasNameTriple) {
+    return {
+      ok: false,
+      person: null,
+      cost_credits: 0,
+      error: "insufficient_signals",
+    };
+  }
 
   const body = buildApolloPeopleMatchBody(input);
   const doFetch = deps?.fetchImpl ?? fetch;
@@ -366,7 +398,7 @@ export async function apolloPeopleMatchByLinkedIn(
     await logPeopleMatchApi(
       resp.status,
       0.05,
-      `linkedin=${input.linkedin_url.slice(0, 80)} hit=${person ? "1" : "0"}`,
+      `linkedin=${(input.linkedin_url ?? "").slice(0, 80)} name=${input.first_name ?? ""}/${input.last_name ?? ""} org=${(input.organization_name ?? "").slice(0, 40)} hit=${person ? "1" : "0"}`,
     );
     return {
       ok: true,
