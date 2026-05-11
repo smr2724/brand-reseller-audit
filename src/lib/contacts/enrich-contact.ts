@@ -155,6 +155,12 @@ export async function enrichSingleContact(
   // surface failed-vs-inconclusive in the UI.
   let finalMvVerdict: "verified" | "inconclusive" | "failed" | "skipped" = "skipped";
   let finalZbVerdict: "verified" | "inconclusive" | "failed" | "skipped" = "skipped";
+  // Phase 65 — remember MV's raw status (verified/invalid/risky/catch_all/
+  // unknown/null) so the email_verifier cascade can distinguish a
+  // truly-decisive MV verdict (verified/invalid/risky) from MV catch_all,
+  // which is a definite-but-inconclusive verdict that triggers ZB
+  // fallthrough.
+  let finalMvStatus: string | null = null;
 
   // 1. Apollo unlock.
   const unlock = await apolloUnlockPerson({
@@ -542,6 +548,7 @@ export async function enrichSingleContact(
     // Stash for the return value.
     finalMvVerdict = mvVerdict;
     finalZbVerdict = zbVerdict;
+    finalMvStatus = mvStatus ?? null;
   } else {
     await recordDiscoveryEvent({
       brand_id,
@@ -570,25 +577,33 @@ export async function enrichSingleContact(
     emailStatus = "not_found";
   }
 
-  // Phase 65 — `email_verifier` reflects WHICH verifier produced the
-  // verdict we trust on this row:
-  //   - 'millionverifier' if MV returned a definite verdict
-  //   - 'zerobounce' if ZB ran (MV inconclusive OR MV failed) and
-  //     either succeeded or returned an inconclusive verdict
-  //   - 'none' if both providers failed at the provider level
-  //   - null if no email was resolved (nothing to verify)
+  // Phase 65 — `email_verifier` names the provider whose verdict
+  // MATERIALLY shaped the final `email_status` on this row:
+  //   - 'millionverifier' if MV returned a decisive verdict
+  //     (verified/likely/risky/invalid) AND ZB therefore short-circuited.
+  //     MV `catch_all` does NOT qualify — it's a definite-but-inconclusive
+  //     verdict that triggers ZB fallthrough; if ZB runs, ZB owns it.
+  //   - 'zerobounce' if ZB ran and produced any verdict (definite or
+  //     inconclusive). When MV was catch_all / inconclusive / failed and
+  //     ZB ran, ZB is authoritative.
+  //   - 'none' otherwise: no verifier produced a verdict that materially
+  //     decided email_status (Apollo's verdict, if any, is preserved).
+  //     Covers: MV failed + ZB skipped/failed; MV inconclusive + ZB
+  //     skipped/failed; MV catch_all + ZB skipped/failed.
+  //   - null if no email was resolved (nothing to verify).
+  const mvWasDecisive =
+    finalMvVerdict === "verified" &&
+    finalMvStatus !== "catch_all" &&
+    finalMvStatus !== "unknown" &&
+    finalMvStatus !== null;
   let emailVerifierStamp: "millionverifier" | "zerobounce" | "none" | null = null;
   if (email) {
-    if (finalMvVerdict === "verified") {
+    if (mvWasDecisive && finalZbVerdict === "skipped") {
       emailVerifierStamp = "millionverifier";
     } else if (finalZbVerdict === "verified" || finalZbVerdict === "inconclusive") {
       emailVerifierStamp = "zerobounce";
-    } else if (finalMvVerdict === "inconclusive") {
-      emailVerifierStamp = "millionverifier";
-    } else if (finalMvVerdict === "failed" && finalZbVerdict === "failed") {
-      emailVerifierStamp = "none";
     } else {
-      emailVerifierStamp = verify?.verifier ?? "none";
+      emailVerifierStamp = "none";
     }
   }
 

@@ -124,6 +124,11 @@ const MV_UNKNOWN_INCONCLUSIVE = {
   result: "unknown",
   resultcode: 5,
 };
+const MV_CATCH_ALL = {
+  email: "jleggatt@shearwater.com",
+  result: "catch_all",
+  quality_score: 50,
+};
 const ZB_VALID = { email: "jleggatt@shearwater.com", status: "valid" };
 const ZB_INVALID = { email: "jleggatt@shearwater.com", status: "invalid" };
 const ZB_UNKNOWN = { email: "jleggatt@shearwater.com", status: "unknown" };
@@ -133,7 +138,7 @@ const ZB_AUTH_ERROR = {
   error: "Invalid API Key",
 };
 
-type MvKind = "key-not-found" | "ok" | "unknown" | "http-500";
+type MvKind = "key-not-found" | "ok" | "unknown" | "catch-all" | "http-500";
 type ZbKind = "valid" | "invalid" | "unknown" | "auth-error" | "http-500";
 let mvKind: MvKind = "key-not-found";
 let zbKind: ZbKind = "valid";
@@ -156,6 +161,8 @@ global.fetch = async (input: RequestInfo | URL) => {
         return new Response(JSON.stringify(MV_OK), { status: 200 });
       case "unknown":
         return new Response(JSON.stringify(MV_UNKNOWN_INCONCLUSIVE), { status: 200 });
+      case "catch-all":
+        return new Response(JSON.stringify(MV_CATCH_ALL), { status: 200 });
       case "http-500":
         return new Response("server down", { status: 500 });
     }
@@ -435,6 +442,119 @@ async function testApolloVerifiedMvFailedZbInconclusive(): Promise<void> {
   );
 }
 
+// 8. ZB unconfigured + MV failed → email_verifier='none'.
+//    Regression for the cascade fallthrough that previously leaked
+//    'millionverifier' when MV had a provider-level failure and ZB
+//    couldn't run because no key was configured.
+async function testZbUnconfiguredMvFailed(): Promise<void> {
+  resetCallTracking();
+  mvKind = "key-not-found";
+  zbKind = "valid"; // unused — ZB key is removed below
+  const prevZbKey = process.env.ZEROBOUNCE_API_KEY;
+  delete process.env.ZEROBOUNCE_API_KEY;
+  try {
+    const result = await enrichSingleContact({
+      brand_id: "brand-1",
+      run_id: "run-4",
+      contact_id: "contact-4",
+      domain: "shearwater.com",
+      first_name: "Jason",
+      last_name: "Leggatt",
+      full_name: "Jason Leggatt",
+      organization_name: "Shearwater",
+      apollo_person_id: "apollo-1",
+    });
+    check(
+      "ZB unconfigured + MV failed → ZB was NOT called",
+      countCalls("api.zerobounce.net") === 0,
+      `zb calls=${countCalls("api.zerobounce.net")}`,
+    );
+    check(
+      "ZB unconfigured + MV failed → email_verifier='none' (neither provider decided)",
+      result.email_verifier === "none",
+      `verifier=${result.email_verifier}`,
+    );
+    check(
+      "Apollo-verified status is preserved when no verifier decided",
+      result.email_status === "verified",
+      `status=${result.email_status}`,
+    );
+  } finally {
+    if (prevZbKey !== undefined) process.env.ZEROBOUNCE_API_KEY = prevZbKey;
+  }
+}
+
+// 9. MV catch_all + ZB verified → email_verifier='zerobounce'.
+//    Regression for the cascade fallthrough that previously stamped
+//    'millionverifier' when MV's verdict was catch_all (technically a
+//    definite verdict, but functionally inconclusive — ZB is the one
+//    that materially decided email_status).
+async function testMvCatchAllZbVerified(): Promise<void> {
+  resetCallTracking();
+  mvKind = "catch-all";
+  zbKind = "valid";
+
+  const result = await enrichSingleContact({
+    brand_id: "brand-1",
+    run_id: "run-5",
+    contact_id: "contact-5",
+    domain: "shearwater.com",
+    first_name: "Jason",
+    last_name: "Leggatt",
+    full_name: "Jason Leggatt",
+    organization_name: "Shearwater",
+    apollo_person_id: "apollo-1",
+  });
+  check(
+    "MV catch_all → ZB was called (catch_all isn't decisive)",
+    countCalls("api.zerobounce.net") === 1,
+    `zb calls=${countCalls("api.zerobounce.net")}`,
+  );
+  check(
+    "MV catch_all + ZB verified → email_verifier='zerobounce' (ZB materially decided)",
+    result.email_verifier === "zerobounce",
+    `verifier=${result.email_verifier}`,
+  );
+  check(
+    "MV catch_all + ZB verified → email_status='verified'",
+    result.email_status === "verified",
+    `status=${result.email_status}`,
+  );
+}
+
+// 10. MV inconclusive (unknown) + ZB failed → email_verifier='none'.
+//     Regression for the cascade fallthrough that previously stamped
+//     'millionverifier' when MV returned a bare inconclusive verdict and
+//     ZB then failed at the provider level — neither provider produced
+//     a decisive verdict.
+async function testMvInconclusiveZbFailed(): Promise<void> {
+  resetCallTracking();
+  mvKind = "unknown";
+  zbKind = "auth-error";
+
+  const result = await enrichSingleContact({
+    brand_id: "brand-1",
+    run_id: "run-6",
+    contact_id: "contact-6",
+    domain: "shearwater.com",
+    first_name: "Jason",
+    last_name: "Leggatt",
+    full_name: "Jason Leggatt",
+    organization_name: "Shearwater",
+    apollo_person_id: "apollo-1",
+  });
+  check(
+    "MV inconclusive + ZB failed → email_verifier='none' (no decisive verdict)",
+    result.email_verifier === "none",
+    `verifier=${result.email_verifier}`,
+  );
+  check(
+    "Apollo-verified status preserved when MV inconclusive + ZB failed",
+    result.email_status === "verified",
+    `status=${result.email_status}`,
+  );
+}
+
 async function main(): Promise<void> {
   await testMvKeyNotFoundClassifiedAsError();
   await testMvOkShortCircuits();
@@ -443,6 +563,9 @@ async function main(): Promise<void> {
   await testApolloVerifiedMvFailedZbVerified();
   await testApolloVerifiedBothVerifiersFailed();
   await testApolloVerifiedMvFailedZbInconclusive();
+  await testZbUnconfiguredMvFailed();
+  await testMvCatchAllZbVerified();
+  await testMvInconclusiveZbFailed();
   try { fs.unlinkSync(stubPath); } catch { /* ignore */ }
   console.log(`\n${passes} passed, ${failures} failed`);
   if (failures > 0) process.exit(1);
