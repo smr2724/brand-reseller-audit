@@ -9,11 +9,13 @@
  * If rejection_strength > hook_strength → verdict 'do_not_pursue'
  * (translates to hard_disqualify with pattern `buyer_rejection_wins`).
  *
- * Budget: $0.10/brand on gpt-4.1.
+ * Budget: ~$0.02/brand on gpt-4o-mini (the role-play is structurally
+ * simple; the small model handles it fine and saves ~$0.08/brand vs the
+ * main model).
  */
 import {
   callQualificationLlm,
-  QUALIFICATION_MAIN_MODEL,
+  QUALIFICATION_SMALL_MODEL,
   type LlmCallResult,
 } from "./llm";
 import type { ControllingEntity } from "./hierarchy";
@@ -29,6 +31,8 @@ export interface RejectionSimResult {
   rationale: string;
   pattern: string | null;
   cost_usd: number;
+  tokens_in: number;
+  tokens_out: number;
 }
 
 export interface RejectionSimInput {
@@ -75,7 +79,7 @@ export async function simulateBuyerRejection(
   let llm: LlmCallResult;
   try {
     llm = await callQualificationLlm({
-      model: QUALIFICATION_MAIN_MODEL,
+      model: QUALIFICATION_SMALL_MODEL,
       system: REJECTION_SIM_SYSTEM_PROMPT,
       user,
       maxTokens: 900,
@@ -92,6 +96,8 @@ export async function simulateBuyerRejection(
       rationale: "LLM call failed; defaulted to do_not_pursue for safety.",
       pattern: "buyer_rejection_wins",
       cost_usd: 0,
+      tokens_in: 0,
+      tokens_out: 0,
     };
   }
 
@@ -126,6 +132,8 @@ export async function simulateBuyerRejection(
     rationale: String(parsed.rationale ?? "").slice(0, 800),
     pattern: finalVerdict === "do_not_pursue" ? "buyer_rejection_wins" : null,
     cost_usd: llm.cost_usd,
+    tokens_in: llm.tokens_in,
+    tokens_out: llm.tokens_out,
   };
 }
 

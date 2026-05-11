@@ -669,6 +669,8 @@ async function runQualificationInner(
       brand_revenue_usd: ttm ?? null,
     });
     totalCost += hardGate.total_cost_usd;
+    totalTokensIn += hardGate.total_tokens_in;
+    totalTokensOut += hardGate.total_tokens_out;
   } catch (e) {
     if (!llmError) llmError = e instanceof Error ? e.message : String(e);
     // Defensive: don't break the orchestration if the gate stack throws.

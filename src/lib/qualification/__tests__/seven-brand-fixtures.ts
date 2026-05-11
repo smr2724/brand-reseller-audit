@@ -84,6 +84,8 @@ const passing = (
     llm_called: true,
   },
   cost_usd: 0.001,
+  tokens_in: 100,
+  tokens_out: 50,
 });
 
 const publicParent = (
@@ -129,6 +131,8 @@ const publicParent = (
     llm_called: true,
   },
   cost_usd: 0.001,
+  tokens_in: 100,
+  tokens_out: 50,
 });
 
 export const SEVEN_BRAND_FIXTURES: SevenBrandFixture[] = [

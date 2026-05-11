@@ -87,6 +87,8 @@ export interface GateAResult {
   };
   /** Total LLM cost incurred for this gate. */
   cost_usd: number;
+  tokens_in: number;
+  tokens_out: number;
 }
 
 interface GateAInput {
@@ -112,7 +114,15 @@ export async function resolveCorporateHierarchy(
   input: GateAInput,
 ): Promise<GateAResult> {
   const brand = (input.brand_name ?? "").trim();
-  const cacheKey = brand.toLowerCase();
+  // Disambiguate same-name brands by appending the lower-cased, sorted
+  // top-3 sellers — e.g. "Apex" sporting goods vs. "Apex" plumbing parts
+  // would otherwise cross-contaminate the 30-day cache.
+  const topSellersForKey = (input.top_sellers ?? [])
+    .slice(0, 3)
+    .map((s) => s.toLowerCase())
+    .sort()
+    .join(",");
+  const cacheKey = `${brand.toLowerCase()}|${topSellersForKey}`;
   const cached = hierarchyCache.get(cacheKey);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
     return cached.value;
@@ -328,6 +338,8 @@ export async function resolveCorporateHierarchy(
     pattern,
     resolution_trace: trace,
     cost_usd: llm?.cost_usd ?? 0,
+    tokens_in: llm?.tokens_in ?? 0,
+    tokens_out: llm?.tokens_out ?? 0,
   };
 
   hierarchyCache.set(cacheKey, { at: Date.now(), value: result });
@@ -505,9 +517,9 @@ const GATE_A_SYSTEM_PROMPT = `You resolve a brand's corporate hierarchy for a B2
 The user will provide a brand name plus deterministic evidence already gathered (USPTO trademark assignee, Wikipedia summary, SEC EDGAR hits). Your job: determine the brand's CONTROLLING ENTITY — the top of its corporate tree — and characterize its ownership.
 
 Question (verbatim):
-  Is the brand "{brand}" the top of its corporate tree, or is it a subsidiary, private label, division, or brand within a larger entity?
+  Is the brand "{brand_name}" (Amazon top sellers: {top_sellers}; description: {brand_description}) the top of its corporate tree, or is it a subsidiary, private label, division, or brand within a larger entity?
 
-  If the brand has a parent, identify the parent's:
+  If the brand has a parent company, identify the parent's:
     - legal name
     - ticker symbol (if public; else null)
     - approximate annual revenue in USD
@@ -522,7 +534,9 @@ Question (verbatim):
     - Company About / Investor Relations page
     - Reputable trade publication (WSJ, Bloomberg, Forbes, Reuters, AP, industry trade journal)
 
-  If you cannot find a source for a claim, set the value to null and the source array to empty. Do NOT hallucinate revenue figures.
+  If you cannot find a source for a claim, set the value to null and the source array to empty. Do not hallucinate revenue figures.
+
+  Return strictly the JSON schema specified.
 
 Return STRICTLY this JSON schema (no markdown, no prose):
 

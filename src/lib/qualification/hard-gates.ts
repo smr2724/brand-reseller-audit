@@ -94,6 +94,12 @@ export interface HardGateResult {
   hierarchy_sources: GateAResult["sources"] | null;
   /** Cumulative cost across the five stages. */
   total_cost_usd: number;
+  /** Cumulative input tokens across all hard-gate LLM calls
+   *  (prescreen + Gate A + Gate C + rejection sim). Gate B is pure
+   *  math and contributes zero. */
+  total_tokens_in: number;
+  /** Cumulative output tokens across all hard-gate LLM calls. */
+  total_tokens_out: number;
 }
 
 export interface HardGateInput {
@@ -114,6 +120,8 @@ export async function runHardGates(
   deps: HardGateDeps = PRODUCTION_DEPS,
 ): Promise<HardGateResult> {
   let totalCost = 0;
+  let totalTokensIn = 0;
+  let totalTokensOut = 0;
 
   // Stage 1 — pattern prescreen
   const prescreen = await deps.runPatternPrescreen({
@@ -124,6 +132,8 @@ export async function runHardGates(
     known_parent: input.known_parent ?? null,
   });
   totalCost += prescreen.llm?.cost_usd ?? 0;
+  totalTokensIn += prescreen.llm?.tokens_in ?? 0;
+  totalTokensOut += prescreen.llm?.tokens_out ?? 0;
 
   if (prescreen.hit?.verdict === "hard_disqualify") {
     return {
@@ -140,12 +150,46 @@ export async function runHardGates(
       recoverable_to_controlling_ratio: null,
       hierarchy_sources: null,
       total_cost_usd: totalCost,
+      total_tokens_in: totalTokensIn,
+      total_tokens_out: totalTokensOut,
     };
   }
 
-  // holding_naming_signal_review (needs_review) does NOT abort — it
-  // proceeds to Gate A which is the actual arbiter. We retain the hit
-  // so the UI can surface "extra Gate A scrutiny applied".
+  // Prescreen needs_review handling.
+  //
+  // Only `holding_naming_signal_review` falls through to Gate A — the
+  // naming heuristic is a hint, and Gate A is the actual arbiter of
+  // hierarchy questions. Every other needs_review pattern TERMINATES
+  // here so the human override flow can take the call instead of
+  // burning Gate A/B/C/rejection budget on a brand that needs analyst
+  // judgement (some PE shops empower brand Presidents, others don't —
+  // we don't try to guess from public data).
+  //
+  // Future needs_review patterns default to TERMINATE (safer).
+  if (prescreen.hit?.verdict === "needs_review") {
+    if (prescreen.hit.pattern !== "holding_naming_signal_review") {
+      return {
+        verdict: "needs_review",
+        failure_gate: "pattern_prescreen",
+        failure_reason: prescreen.hit.reason,
+        pattern: prescreen.hit.pattern,
+        prescreen,
+        gate_a: null,
+        gate_b: null,
+        gate_c: null,
+        rejection: null,
+        controlling_entity: null,
+        recoverable_to_controlling_ratio: null,
+        hierarchy_sources: null,
+        total_cost_usd: totalCost,
+        total_tokens_in: totalTokensIn,
+        total_tokens_out: totalTokensOut,
+      };
+    }
+    // holding_naming_signal_review — fall through to Gate A so the
+    // hierarchy resolver can decide. The UI still surfaces the hit
+    // from prescreen.hit for "extra Gate A scrutiny applied".
+  }
 
   // Stage 2 — Gate A
   const gateA = await deps.resolveCorporateHierarchy({
@@ -155,6 +199,8 @@ export async function runHardGates(
     brand_revenue_usd: input.brand_revenue_usd ?? null,
   });
   totalCost += gateA.cost_usd;
+  totalTokensIn += gateA.tokens_in;
+  totalTokensOut += gateA.tokens_out;
 
   if (gateA.verdict === "hard_disqualify") {
     return {
@@ -171,6 +217,8 @@ export async function runHardGates(
       recoverable_to_controlling_ratio: null,
       hierarchy_sources: gateA.sources,
       total_cost_usd: totalCost,
+      total_tokens_in: totalTokensIn,
+      total_tokens_out: totalTokensOut,
     };
   }
   if (gateA.verdict === "needs_review") {
@@ -188,6 +236,8 @@ export async function runHardGates(
       recoverable_to_controlling_ratio: null,
       hierarchy_sources: gateA.sources,
       total_cost_usd: totalCost,
+      total_tokens_in: totalTokensIn,
+      total_tokens_out: totalTokensOut,
     };
   }
 
@@ -208,6 +258,8 @@ export async function runHardGates(
       recoverable_to_controlling_ratio: null,
       hierarchy_sources: gateA.sources,
       total_cost_usd: totalCost,
+      total_tokens_in: totalTokensIn,
+      total_tokens_out: totalTokensOut,
     };
   }
 
@@ -232,6 +284,8 @@ export async function runHardGates(
       recoverable_to_controlling_ratio: gateB.ratio,
       hierarchy_sources: gateA.sources,
       total_cost_usd: totalCost,
+      total_tokens_in: totalTokensIn,
+      total_tokens_out: totalTokensOut,
     };
   }
   if (gateB.verdict === "needs_review") {
@@ -249,6 +303,8 @@ export async function runHardGates(
       recoverable_to_controlling_ratio: gateB.ratio,
       hierarchy_sources: gateA.sources,
       total_cost_usd: totalCost,
+      total_tokens_in: totalTokensIn,
+      total_tokens_out: totalTokensOut,
     };
   }
 
@@ -260,6 +316,8 @@ export async function runHardGates(
     recoverable_revenue_usd: recoverable,
   });
   totalCost += gateC.cost_usd;
+  totalTokensIn += gateC.tokens_in;
+  totalTokensOut += gateC.tokens_out;
 
   if (!gateC.passed) {
     return {
@@ -276,6 +334,8 @@ export async function runHardGates(
       recoverable_to_controlling_ratio: gateB.ratio,
       hierarchy_sources: gateA.sources,
       total_cost_usd: totalCost,
+      total_tokens_in: totalTokensIn,
+      total_tokens_out: totalTokensOut,
     };
   }
 
@@ -287,6 +347,8 @@ export async function runHardGates(
     recoverable_revenue_usd: recoverable,
   });
   totalCost += rejection.cost_usd;
+  totalTokensIn += rejection.tokens_in;
+  totalTokensOut += rejection.tokens_out;
 
   if (rejection.verdict === "do_not_pursue") {
     return {
@@ -303,6 +365,8 @@ export async function runHardGates(
       recoverable_to_controlling_ratio: gateB.ratio,
       hierarchy_sources: gateA.sources,
       total_cost_usd: totalCost,
+      total_tokens_in: totalTokensIn,
+      total_tokens_out: totalTokensOut,
     };
   }
 
@@ -321,5 +385,7 @@ export async function runHardGates(
     recoverable_to_controlling_ratio: gateB.ratio,
     hierarchy_sources: gateA.sources,
     total_cost_usd: totalCost,
+    total_tokens_in: totalTokensIn,
+    total_tokens_out: totalTokensOut,
   };
 }

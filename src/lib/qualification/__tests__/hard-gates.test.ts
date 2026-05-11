@@ -126,6 +126,8 @@ function buildStubs(fx: typeof SEVEN_BRAND_FIXTURES[number]): HardGateDeps {
           pattern: null,
           reason: "Named owner with personal equity stake.",
           cost_usd: 0.001,
+          tokens_in: 100,
+          tokens_out: 50,
         };
       }
       return {
@@ -138,6 +140,8 @@ function buildStubs(fx: typeof SEVEN_BRAND_FIXTURES[number]): HardGateDeps {
         pattern: "no_named_decision_maker",
         reason: "No individual name identifiable for this controlling entity.",
         cost_usd: 0.001,
+        tokens_in: 100,
+        tokens_out: 50,
       };
     },
     async simulateBuyerRejection(): Promise<RejectionSimResult> {
@@ -154,6 +158,8 @@ function buildStubs(fx: typeof SEVEN_BRAND_FIXTURES[number]): HardGateDeps {
           rationale: "Existing alternatives + sub-threshold dollars.",
           pattern: "buyer_rejection_wins",
           cost_usd: 0.001,
+          tokens_in: 100,
+          tokens_out: 50,
         };
       }
       return {
@@ -168,6 +174,8 @@ function buildStubs(fx: typeof SEVEN_BRAND_FIXTURES[number]): HardGateDeps {
         rationale: "Owner-operator sees direct equity lift.",
         pattern: null,
         cost_usd: 0.001,
+        tokens_in: 100,
+        tokens_out: 50,
       };
     },
   };

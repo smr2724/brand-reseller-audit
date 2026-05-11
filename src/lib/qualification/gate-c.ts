@@ -53,6 +53,8 @@ export interface GateCResult {
   pattern: string | null;
   reason: string;
   cost_usd: number;
+  tokens_in: number;
+  tokens_out: number;
 }
 
 export interface GateCInput {
@@ -111,6 +113,8 @@ export async function resolveNamedDecisionMaker(
       pattern: "no_named_decision_maker",
       reason: "Gate C LLM failed; surfaced as no-named-decision-maker for safety.",
       cost_usd: 0,
+      tokens_in: 0,
+      tokens_out: 0,
     };
   }
 
@@ -177,6 +181,8 @@ export async function resolveNamedDecisionMaker(
     pattern: passed ? null : "no_named_decision_maker",
     reason,
     cost_usd: llm.cost_usd,
+    tokens_in: llm.tokens_in,
+    tokens_out: llm.tokens_out,
   };
 }
 
