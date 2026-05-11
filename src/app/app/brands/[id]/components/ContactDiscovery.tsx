@@ -967,7 +967,15 @@ function EmailPill({
 }) {
   let label: string;
   let bg: string;
-  if (!hasEmail || status === "not_found") {
+  // Phase 64 — if hasEmail is true (Apollo unlock or Hunter finder
+  // resolved a real address), we DO NOT render "Not found" even when
+  // email_status is missing or 'not_found'. A real address with an
+  // inconclusive verifier shows as 'Unknown' (or whatever status the
+  // pipeline persisted) so the user can still see the email and use it.
+  // Hiding an Apollo-verified email behind a "Not found" pill because
+  // MillionVerifier returned 'unknown' was the UX symptom of the live
+  // Phase 63 test.
+  if (!hasEmail) {
     label = "Not found";
     bg = "bg-zinc-700/40 text-zinc-200";
   } else {
@@ -980,14 +988,20 @@ function EmailPill({
       invalid: { bg: "bg-red-800/40 text-red-200", label: "Invalid" },
       guessed: { bg: "bg-zinc-700/40 text-zinc-200", label: "Guessed" },
       unknown: { bg: "bg-zinc-700/40 text-zinc-200", label: "Unknown" },
-      not_found: { bg: "bg-zinc-700/40 text-zinc-200", label: "Not found" },
+      not_found: { bg: "bg-zinc-700/40 text-zinc-200", label: "Unknown" },
+      found: { bg: "bg-green-700/40 text-green-200", label: "Verified ✓" },
     };
     const s = status ? map[status] : null;
     if (!s) {
-      return <span className="text-xs text-[var(--text-muted)]">—</span>;
+      // Phase 64 — unknown status but we DO have an email. Show
+      // "Unknown" pill rather than a dash; the email column still
+      // surfaces the address.
+      label = "Unknown";
+      bg = "bg-zinc-700/40 text-zinc-200";
+    } else {
+      label = s.label;
+      bg = s.bg;
     }
-    label = s.label;
-    bg = s.bg;
   }
   const tooltipBits: string[] = [];
   if (verifier && verifier !== "none") {
