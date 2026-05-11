@@ -21,6 +21,14 @@ import {
 } from "@/lib/keepa";
 import { makeSellerCache } from "./keepa-seller-cache";
 import {
+  reapStaleRuns,
+  shouldAbortForWallClock,
+  withDeadline,
+  logKeepaProgress,
+  KEEPA_ENRICHMENT_WALL_CLOCK_MS,
+  KEEPA_HARD_ASIN_CAP,
+} from "./keepa-run-defense";
+import {
   computeValidationScore,
   computeCombinedValidationScore,
   type DataForSeoSignals,
@@ -71,6 +79,16 @@ export async function enrichBrandWithKeepa(
 ): Promise<EnrichmentSummary> {
   const { brand_id, brand_name, user_id } = input;
   const existingTags = new Set<string>(input.existing_disqualifier_tags ?? []);
+  const runStartedAtMs = Date.now();
+
+  // Phase 66 — Before starting a new run, mark any prior `running` row
+  // for the same brand as `error` if it has been wedged past the stale
+  // threshold. Sport-Tek accumulated 4 such rows (3, 13, 23, and 37
+  // minute hangs) because the orchestrator was killed by Vercel before
+  // it could write a terminal state. Without this reaper, the
+  // enrichment_runs table grows orphan rows indefinitely and the next
+  // user retry just adds another wedged row.
+  await reapStaleRuns(supabase, brand_id, "keepa");
 
   const runIns = await supabase
     .from("enrichment_runs")
@@ -79,12 +97,24 @@ export async function enrichBrandWithKeepa(
       brand_id,
       source: "keepa",
       status: "running",
-      started_at: new Date().toISOString(),
+      started_at: new Date(runStartedAtMs).toISOString(),
     })
     .select("id")
     .single();
 
   const run_id: string = runIns.data?.id ?? "";
+
+  logKeepaProgress({
+    brand_id,
+    brand_name,
+    stage: "run_started",
+    elapsed_ms: 0,
+    extra: {
+      run_id,
+      wall_clock_budget_ms: KEEPA_ENRICHMENT_WALL_CLOCK_MS,
+      hard_asin_cap: KEEPA_HARD_ASIN_CAP,
+    },
+  });
 
   let tokensUsed = 0;
   try {
@@ -97,6 +127,32 @@ export async function enrichBrandWithKeepa(
     // Variation expansion below still bounds children at 200 combined.
     const search = await searchProductsByBrand(brand_name, 500);
     tokensUsed += search.tokens_used;
+    logKeepaProgress({
+      brand_id,
+      brand_name,
+      stage: "brand_search_complete",
+      accumulated: search.asins.length,
+      elapsed_ms: Date.now() - runStartedAtMs,
+      extra: { tokens_used: tokensUsed, tokens_left: search.tokens_left },
+    });
+    if (shouldAbortForWallClock(runStartedAtMs)) {
+      throw new Error(
+        `[phase66] wall-clock budget (${KEEPA_ENRICHMENT_WALL_CLOCK_MS}ms) exceeded after brand_search; aborting before product fetch`,
+      );
+    }
+    // Phase 66 — hard ASIN cap. Even though searchProductsByBrand
+    // already caps at 500 parents and expandVariationAsins caps at 200
+    // children, this is an outer belt-and-suspenders for any future
+    // call site that passes a larger maxResults. If we ever exceed
+    // KEEPA_HARD_ASIN_CAP we truncate and log instead of fanning out
+    // into a multi-thousand-ASIN /product fetch that can't complete in
+    // the function budget.
+    if (search.asins.length > KEEPA_HARD_ASIN_CAP) {
+      console.warn(
+        `[phase66] brand_search returned ${search.asins.length} ASINs for "${brand_name}"; truncating to KEEPA_HARD_ASIN_CAP=${KEEPA_HARD_ASIN_CAP}`,
+      );
+      search.asins = search.asins.slice(0, KEEPA_HARD_ASIN_CAP);
+    }
     // Keepa's brand search returns parents only. Expand child variations
     // so Beauty/Health/Grocery brands (where 1 parent listing maps to
     // 5–20 child SKUs each with its own BSR + price) get fully measured.
@@ -170,8 +226,42 @@ export async function enrichBrandWithKeepa(
       return summary;
     }
 
-    const products = await getProductDetails(asins, 5);
+    if (shouldAbortForWallClock(runStartedAtMs)) {
+      throw new Error(
+        `[phase66] wall-clock budget (${KEEPA_ENRICHMENT_WALL_CLOCK_MS}ms) exceeded after variation_expansion; aborting before product fetch`,
+      );
+    }
+    logKeepaProgress({
+      brand_id,
+      brand_name,
+      stage: "product_fetch_start",
+      accumulated: asins.length,
+      elapsed_ms: Date.now() - runStartedAtMs,
+    });
+
+    // Phase 66 — wrap the long-tail /product fetch in a wall-clock
+    // deadline so a stuck batch can't silently consume the entire
+    // function budget. The remaining budget after pagination still
+    // gives the orchestrator enough headroom to write a terminal state
+    // when the deadline trips.
+    const remainingBudget = Math.max(
+      10_000,
+      KEEPA_ENRICHMENT_WALL_CLOCK_MS - (Date.now() - runStartedAtMs) - 20_000,
+    );
+    const products = await withDeadline(
+      getProductDetails(asins, 5),
+      remainingBudget,
+      `getProductDetails(brand="${brand_name}", n=${asins.length})`,
+    );
     tokensUsed += products.length * 5; // rough estimate (cache hits don't count perfectly)
+    logKeepaProgress({
+      brand_id,
+      brand_name,
+      stage: "product_fetch_complete",
+      accumulated: products.length,
+      elapsed_ms: Date.now() - runStartedAtMs,
+      extra: { tokens_used: tokensUsed },
+    });
 
     // Aggregate brand_sellers: count asins won (buy-box winner) per seller
     const sellerMap = new Map<string, {
@@ -619,11 +709,30 @@ export async function enrichBrandWithKeepa(
     };
   } catch (err: any) {
     const msg = String(err?.message ?? err).slice(0, 500);
+    // Phase 66 — Use status='error' for Phase 66 wall-clock / hard-cap /
+    // deadline aborts so ops can distinguish "we proactively bailed out
+    // before Vercel killed us" from other thrown errors that already
+    // surface as 'failed'. Both end states satisfy the same invariant:
+    // never leave a row at 'running'.
+    const isPhase66Abort = typeof msg === "string" && msg.includes("[phase66]");
+    const terminalStatus = isPhase66Abort ? "error" : "failed";
+    logKeepaProgress({
+      brand_id,
+      brand_name,
+      stage: "run_terminal_error",
+      elapsed_ms: Date.now() - runStartedAtMs,
+      extra: {
+        run_id,
+        status: terminalStatus,
+        tokens_used: tokensUsed,
+        error_message: msg,
+      },
+    });
     if (run_id) {
       await supabase
         .from("enrichment_runs")
         .update({
-          status: "failed",
+          status: terminalStatus,
           tokens_used: tokensUsed,
           completed_at: new Date().toISOString(),
           error_message: msg,

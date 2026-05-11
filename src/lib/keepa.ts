@@ -398,6 +398,22 @@ export async function searchProductsByBrand(brandName: string, maxResults = 20):
   // import would be circular.
   const { TOKEN_BUDGET_FLOOR } = await import("@/lib/brand/recover-stuck-brands");
 
+  // Phase 66 — outer-page hard cap independent of perPage configuration.
+  // Even if a future env override pushed KEEPA_MAX_PAGES_PER_BRAND
+  // arbitrarily high, this 50-page ceiling guarantees the loop terminates
+  // in finite time. With perPage=100 that's 5,000 ASINs — well past the
+  // economically-meaningful tail for any reseller-audit brand.
+  const PHASE66_MAX_PAGES_SAFETY = 50;
+  const pageCeiling = Math.min(KEEPA_MAX_PAGES_PER_BRAND, PHASE66_MAX_PAGES_SAFETY);
+
+  // Phase 66 — wall-clock cap on the full pagination loop. Without this
+  // a single brand with slow Keepa responses could chain three 30-second
+  // attempts × five pages × retries and consume the entire function
+  // budget before product fetch even starts. 90s leaves room for a slow
+  // first call while keeping the orchestrator's overall budget intact.
+  const PHASE66_PAGINATION_WALL_CLOCK_MS = 90_000;
+  const paginationStartedAt = Date.now();
+
   const perPage = 100;
   const accumulated: string[] = [];
   let tokensConsumed = 0;
@@ -405,7 +421,14 @@ export async function searchProductsByBrand(brandName: string, maxResults = 20):
   let totalProducts: number | null = null;
   let pagesFetched = 0;
 
-  for (let page = 0; page < KEEPA_MAX_PAGES_PER_BRAND; page++) {
+  for (let page = 0; page < pageCeiling; page++) {
+    if (Date.now() - paginationStartedAt > PHASE66_PAGINATION_WALL_CLOCK_MS) {
+      console.warn(
+        `[phase66] pagination wall-clock (${PHASE66_PAGINATION_WALL_CLOCK_MS}ms) hit for "${cleaned}" at page=${page}, accumulated=${accumulated.length}; breaking loop`,
+      );
+      break;
+    }
+
     if (page > 0) {
       // Preserve the Phase 30 invariant during long fetches: bail before
       // burning more tokens if the bucket has slipped under the floor.
@@ -446,9 +469,36 @@ export async function searchProductsByBrand(brandName: string, maxResults = 20):
     }
     accumulated.push(...pageAsins);
 
+    // Phase 66 — per-page structured progress log. Greppable in Vercel
+    // logs via `event:"keepa_brand_search_page"` so any future hang can
+    // be pinpointed down to which page stalled. Includes elapsed time
+    // so a slow Keepa response is visible even when the function has
+    // not yet timed out.
+    console.log(
+      JSON.stringify({
+        event: "keepa_brand_search_page",
+        brand: cleaned,
+        page,
+        page_size: pageAsins.length,
+        accumulated: accumulated.length,
+        total_products: totalProducts,
+        tokens_used: tokensConsumed,
+        tokens_left: tokensLeft,
+        elapsed_ms: Date.now() - paginationStartedAt,
+      }),
+    );
+
     if (pageAsins.length < perPage) break; // Keepa exhausted
     if (totalProducts !== null && accumulated.length >= totalProducts) break;
     if (accumulated.length >= maxResults) break;
+    // Phase 66 — hard ASIN cap on the accumulator. Belt-and-suspenders
+    // against a maxResults arg that accidentally allows runaway growth.
+    if (accumulated.length >= 5000) {
+      console.warn(
+        `[phase66] brand_search hard ASIN cap (5000) reached for "${cleaned}" at page=${page}`,
+      );
+      break;
+    }
   }
 
   console.log(
@@ -590,8 +640,10 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
     else need.push(a);
   }
 
+  const productFetchStartedAt = Date.now();
   for (let i = 0; i < need.length; i += batchSize) {
     const chunk = need.slice(i, i + batchSize);
+    const chunkStartedAt = Date.now();
     await ensureTokens(chunk.length * 5 + 2);
     const { json } = await keepaFetch("/product", {
       asin: chunk.join(","),
@@ -607,6 +659,21 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
       aplus: 1,
       videos: 1,
     });
+    // Phase 66 — per-chunk progress log so a stuck /product batch is
+    // visible in real time instead of being a silent gap in the run
+    // timeline. Greppable via `event:"keepa_product_chunk"`.
+    console.log(
+      JSON.stringify({
+        event: "keepa_product_chunk",
+        chunk_index: Math.floor(i / batchSize),
+        chunk_size: chunk.length,
+        cumulative_fetched: i + chunk.length,
+        total_to_fetch: need.length,
+        chunk_elapsed_ms: Date.now() - chunkStartedAt,
+        total_elapsed_ms: Date.now() - productFetchStartedAt,
+        tokens_left: Number(json?.tokensLeft ?? 0),
+      }),
+    );
     const products = Array.isArray(json?.products) ? json.products : [];
     const tokensLeft = Number(json?.tokensLeft ?? 0);
     TOKEN_CACHE = { t: Date.now(), v: { tokens_left: tokensLeft, refill_in_ms: Number(json?.refillIn ?? 0), refill_rate: Number(json?.refillRate ?? 0) } };
