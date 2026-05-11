@@ -36,6 +36,12 @@ interface BrandLite {
  * (gate_a_corporate_hierarchy.controlling_entity) so we use the audited
  * parent entity, not the brand row. Calls are best-effort; if a source
  * is unavailable we skip and try the next.
+ *
+ * Resolution order:
+ *   1. controllingEntity.employees (Phase 68 already resolved; authoritative)
+ *   2. opts.fetchLinkedinCount(domain)
+ *   3. opts.fetchWikipediaEmployees(name)
+ *   4. opts.fetchApolloEmployees(domain)
  */
 export async function gatherSizeSignals(
   brand: BrandLite,
@@ -57,6 +63,14 @@ export async function gatherSizeSignals(
     apollo_employees: null,
     source: "unknown",
   };
+
+  // Phase 68 resolution chain wins when present.
+  const ceEmp = controllingEntity?.employees ?? null;
+  if (typeof ceEmp === "number" && Number.isFinite(ceEmp) && ceEmp > 0) {
+    out.employees = ceEmp;
+    out.source = "linkedin"; // Phase 68 records the originating source; treat as authoritative
+    return out;
+  }
 
   if (domain && opts?.fetchLinkedinCount) {
     try {

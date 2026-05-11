@@ -105,6 +105,11 @@ export interface ControllingEntityShape {
   domain: string | null;
   type?: string | null;
   country?: string | null;
+  // Phase 69 follow-up: Phase 68's resolution chain may already have an
+  // authoritative employee count from controlling_entity. When present,
+  // it short-circuits gatherSizeSignals so we never classify a $80M
+  // brand as `micro` just because the lookups are stubbed.
+  employees?: number | null;
 }
 
 export interface ContactStrategyPersistInput {

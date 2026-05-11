@@ -22,7 +22,8 @@ import { classifyTier, gatherSizeSignals } from "./size-tier";
 import { runContactStrategyLLM, computeStrategyVerdict } from "./strategy";
 import { apolloMixedPeopleSearch } from "./apollo-mixed-search";
 import { rankCandidates } from "./ranking";
-import { runHunterFallback } from "./hunter-fallback";
+import { runHunterFallback, runHunterDomainSearchMerge } from "./hunter-fallback";
+import { substituteBrandName } from "./strategy-templates";
 import {
   normalizeCompanySizeTier,
   normalizeStrategyVerdict,
@@ -47,6 +48,19 @@ export interface BrandForOrchestrate {
 }
 
 /**
+ * Test/dependency-injection hook. Production callers should not pass
+ * `deps` — the defaults wire up the real Supabase admin client + real
+ * Apollo/Hunter/LLM helpers.
+ */
+export interface BuildContactStrategyDeps {
+  supabase?: ReturnType<typeof createSupabaseAdminClient> | null;
+  runStrategyLLM?: typeof runContactStrategyLLM;
+  apolloSearch?: typeof apolloMixedPeopleSearch;
+  runHunterFallbackImpl?: typeof runHunterFallback;
+  runHunterDomainSearchMergeImpl?: typeof runHunterDomainSearchMerge;
+}
+
+/**
  * Read the Phase 68 controlling entity from gate_a_corporate_hierarchy.
  * Falls back to the legacy `selected_entity` shape if Phase 68 hasn't
  * landed for this brand yet — defense-in-depth.
@@ -56,21 +70,33 @@ export function extractControllingEntity(qual: any): ControllingEntityShape | nu
   if (gateA && typeof gateA === "object") {
     const ce = (gateA as any).controlling_entity;
     if (ce && typeof ce === "object") {
+      const rawEmp = (ce as any).employees ?? (ce as any).employee_count ?? null;
+      const employees =
+        typeof rawEmp === "number" && Number.isFinite(rawEmp) && rawEmp > 0
+          ? Math.round(rawEmp)
+          : null;
       return {
         name: typeof ce.name === "string" ? ce.name : null,
         domain: typeof ce.domain === "string" ? ce.domain : null,
         type: typeof ce.type === "string" ? ce.type : null,
         country: typeof ce.country === "string" ? ce.country : null,
+        employees,
       };
     }
   }
   const sel = qual?.selected_entity;
   if (sel && typeof sel === "object") {
+    const rawEmp = (sel as any).employees ?? (sel as any).employee_count ?? null;
+    const employees =
+      typeof rawEmp === "number" && Number.isFinite(rawEmp) && rawEmp > 0
+        ? Math.round(rawEmp)
+        : null;
     return {
       name: typeof sel.name === "string" ? sel.name : null,
       domain: null,
       type: typeof sel.type === "string" ? sel.type : null,
       country: typeof sel.country === "string" ? sel.country : null,
+      employees,
     };
   }
   return null;
@@ -92,6 +118,59 @@ function findTopNamedMatch(
   );
 }
 
+/**
+ * Build opts for gatherSizeSignals. Today we rely on Phase 68's
+ * resolution chain (controllingEntity.employees) — no live LinkedIn /
+ * Wikipedia / Apollo helpers are wired here yet. Returning `undefined`
+ * preserves the call signature; gatherSizeSignals already short-circuits
+ * on controllingEntity.employees before reaching these helpers.
+ */
+function buildSizeSignalOpts():
+  | {
+      fetchLinkedinCount?: (domain: string) => Promise<number | null>;
+      fetchWikipediaEmployees?: (name: string) => Promise<number | null>;
+      fetchApolloEmployees?: (domain: string) => Promise<number | null>;
+    }
+  | undefined {
+  return undefined;
+}
+
+/**
+ * Apollo cost per call: prefer the parsed `cost_credits` (1 credit ≈
+ * $0.05 in the credit-pool plan we run on) and fall back to the legacy
+ * hardcoded $0.15 estimate only when Apollo omits the field entirely.
+ */
+function apolloCostFromResult(credits: number | undefined): number {
+  if (typeof credits === "number" && Number.isFinite(credits) && credits > 0) {
+    return credits;
+  }
+  return 0.15;
+}
+
+/**
+ * Substitute `{brand_name}` in primary_titles, secondary_titles, and
+ * each named_candidates entry's title. The template path already
+ * handles this in `applyTemplate`, but the LLM-parse happy path returns
+ * raw strings and {brand_name} would otherwise leak into Apollo.
+ */
+export function applyBrandNameSubstitution(
+  strategy: ContactStrategy,
+  brandName: string,
+): ContactStrategy {
+  return {
+    ...strategy,
+    primary_titles: substituteBrandName(strategy.primary_titles, brandName),
+    secondary_titles: substituteBrandName(strategy.secondary_titles, brandName),
+    named_candidates: strategy.named_candidates.map((c) => ({
+      ...c,
+      title:
+        c.title && c.title.includes("{brand_name}")
+          ? substituteBrandName([c.title], brandName)[0] ?? c.title
+          : c.title,
+    })),
+  };
+}
+
 function computeRecoverableRevenueUsd(brand: BrandForOrchestrate): number {
   const ttm =
     brand.confirmed_ttm_revenue_dollars ??
@@ -102,30 +181,35 @@ function computeRecoverableRevenueUsd(brand: BrandForOrchestrate): number {
 
 export async function buildContactStrategy(
   brand: BrandForOrchestrate,
+  deps?: BuildContactStrategyDeps,
 ): Promise<ContactStrategyResult> {
   try {
-    return await buildContactStrategyInner(brand);
+    return await buildContactStrategyInner(brand, deps);
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
-    const admin = createSupabaseAdminClient();
+    const admin = deps?.supabase ?? createSupabaseAdminClient();
     if (admin) {
       try {
-        const insertResp = await admin
+        const upsertResp = await admin
           .from("contact_strategies")
-          .insert({
-            brand_id: brand.id,
-            company_size_tier: normalizeCompanySizeTier("small").value,
-            primary_titles: [],
-            verdict: normalizeStrategyVerdict("error").value,
-            verdict_reason: reason.slice(0, 500),
-            total_cost_usd: 0,
-          })
+          .upsert(
+            {
+              brand_id: brand.id,
+              company_size_tier: normalizeCompanySizeTier("small").value,
+              primary_titles: [],
+              verdict: normalizeStrategyVerdict("error").value,
+              verdict_reason: reason.slice(0, 500),
+              total_cost_usd: 0,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "brand_id" },
+          )
           .select("id")
           .single();
-        if (insertResp.data?.id) {
+        if (upsertResp.data?.id) {
           await admin
             .from("brands")
-            .update({ contact_strategy_id: insertResp.data.id })
+            .update({ contact_strategy_id: upsertResp.data.id })
             .eq("id", brand.id);
         }
       } catch {
@@ -138,11 +222,17 @@ export async function buildContactStrategy(
 
 async function buildContactStrategyInner(
   brand: BrandForOrchestrate,
+  deps?: BuildContactStrategyDeps,
 ): Promise<ContactStrategyResult> {
-  const admin = createSupabaseAdminClient();
+  const admin = deps?.supabase ?? createSupabaseAdminClient();
   if (!admin) {
     return { ok: false, verdict: "error", strategy_id: null, reason: "supabase admin missing" };
   }
+  const runLLM = deps?.runStrategyLLM ?? runContactStrategyLLM;
+  const runApollo = deps?.apolloSearch ?? apolloMixedPeopleSearch;
+  const runHunter = deps?.runHunterFallbackImpl ?? runHunterFallback;
+  const runHunterDomain =
+    deps?.runHunterDomainSearchMergeImpl ?? runHunterDomainSearchMerge;
 
   const { data: qual } = await admin
     .from("brand_qualifications")
@@ -161,18 +251,21 @@ async function buildContactStrategyInner(
     };
   }
 
-  // Phase 68 gate: hard_gate_verdict must be 'pass'. If the column
-  // hasn't shipped (older fixtures) we accept icp_verdict='qualified'
-  // as the equivalent — strict on prod, lenient in mixed envs.
+  // Phase 68 strict gate: hard_gate_verdict must be 'pass'. The earlier
+  // icp_verdict='qualified' fallback was removed because that's exactly
+  // the population that hasn't been re-qualified under Phase 68 — we
+  // don't want those to leak through.
   const hardGate = (qual as any).hard_gate_verdict ?? null;
-  const icp = (qual as any).icp_verdict ?? null;
-  const gatePassed = hardGate === "pass" || (!hardGate && icp === "qualified");
-  if (!gatePassed) {
+  if (hardGate !== "pass") {
+    const reason =
+      hardGate == null
+        ? "Brand must be re-qualified under Phase 68 hard gates before contact strategy can run. Re-trigger qualification first."
+        : 'Brand not qualified — hard_gate_verdict is not "pass".';
     return {
       ok: false,
       verdict: "error",
       strategy_id: null,
-      reason: 'Brand not qualified — hard_gate_verdict is not "pass".',
+      reason,
     };
   }
 
@@ -186,14 +279,39 @@ async function buildContactStrategyInner(
     };
   }
 
-  // 1. Size classification.
+  // 1. Size classification. Pass opts so gatherSizeSignals can resolve
+  // employee counts when Phase 68 didn't already capture one. The
+  // controllingEntity.employees path inside gatherSizeSignals is the
+  // authoritative shortcut when Phase 68 has it.
   const sizeSignals = await gatherSizeSignals(
     { id: brand.id, name: brand.name, resolved_owner_domain: brand.resolved_owner_domain },
     controlling,
+    buildSizeSignalOpts(),
   );
+
+  if (sizeSignals.employees == null) {
+    console.warn(
+      JSON.stringify({
+        event: "phase69_size_signals_empty",
+        brand_id: brand.id,
+        brand_name: brand.name,
+        controlling_entity: controlling?.name ?? null,
+        message: "size signals empty — defaulting to micro",
+      }),
+    );
+  }
   const tier = classifyTier(sizeSignals.employees, sizeSignals.revenue_usd);
 
   if (tier === "enterprise") {
+    console.warn(
+      JSON.stringify({
+        event: "phase69_enterprise_post_qualification",
+        brand_id: brand.id,
+        brand_name: brand.name,
+        controlling_entity: controlling,
+        employees: sizeSignals.employees,
+      }),
+    );
     return await persist(admin, {
       brand_id: brand.id,
       qualification_id: qual.id ?? null,
@@ -216,7 +334,7 @@ async function buildContactStrategyInner(
   const recoverable = computeRecoverableRevenueUsd(brand);
   const gateCName = ((qual as any).gate_c_person_name as string | undefined) ?? null;
   const gateCTitle = ((qual as any).gate_c_person_title as string | undefined) ?? null;
-  const strategy = await runContactStrategyLLM({
+  const rawStrategy = await runLLM({
     brand: { id: brand.id, name: brand.name },
     controllingEntity: controlling,
     tier,
@@ -226,28 +344,33 @@ async function buildContactStrategyInner(
     gateCPersonTitle: gateCTitle,
   });
 
+  // Replace `{brand_name}` placeholders in every title list BEFORE we
+  // hand them to Apollo. Without this, the literal `{brand_name}` string
+  // leaks into person_titles[] on the LLM-parse happy path.
+  const strategy = applyBrandNameSubstitution(rawStrategy, brand.name);
+
   // 3. Apollo primary titles.
   let apolloCost = 0;
-  const primaryResp = await apolloMixedPeopleSearch({
+  const primaryResp = await runApollo({
     q_organization_domains: controlling.domain ? [controlling.domain] : [],
     person_titles: strategy.primary_titles,
     person_seniorities: strategy.seniorities,
     person_departments: strategy.departments,
     per_page: 25,
   });
-  apolloCost += 0.15;
+  apolloCost += apolloCostFromResult(primaryResp.cost_credits);
   let allCandidates: ApolloPerson[] = primaryResp.candidates;
 
   // 4. If thin, retry with secondary titles.
   if (allCandidates.length < 3 && strategy.secondary_titles.length > 0) {
-    const secResp = await apolloMixedPeopleSearch({
+    const secResp = await runApollo({
       q_organization_domains: controlling.domain ? [controlling.domain] : [],
       person_titles: strategy.secondary_titles,
       person_seniorities: strategy.seniorities,
       person_departments: strategy.departments,
       per_page: 25,
     });
-    apolloCost += 0.15;
+    apolloCost += apolloCostFromResult(secResp.cost_credits);
     allCandidates = [...allCandidates, ...secResp.candidates];
   }
 
@@ -257,10 +380,27 @@ async function buildContactStrategyInner(
   // 6. Hunter fallback if empty or top low-confidence.
   let hunterCost = 0;
   if (ranked.length === 0 || (ranked[0]?.score ?? 0) < 30) {
-    const hunter = await runHunterFallback(controlling.domain, strategy);
+    const hunter = await runHunter(controlling.domain, strategy);
     hunterCost = hunter.cost_usd;
     if (hunter.candidates.length > 0) {
       const merged = [...allCandidates, ...hunter.candidates];
+      ranked = rankCandidates(merged, strategy, { name: brand.name });
+    }
+  }
+
+  // 6b. Phase 69 follow-up — Hunter domain-search merge for the
+  // zero-LLM-named + zero-Apollo blind spot. Pulls the org's public
+  // people list and filters by primary titles before merging into the
+  // ranking pool.
+  if (
+    strategy.named_candidates.length === 0 &&
+    allCandidates.length === 0 &&
+    controlling.domain
+  ) {
+    const merge = await runHunterDomain(controlling.domain, strategy);
+    hunterCost += merge.cost_usd;
+    if (merge.candidates.length > 0) {
+      const merged = [...allCandidates, ...merge.candidates];
       ranked = rankCandidates(merged, strategy, { name: brand.name });
     }
   }
@@ -364,7 +504,7 @@ async function persist(
 
   const ins = await admin
     .from("contact_strategies")
-    .insert(row)
+    .upsert(row, { onConflict: "brand_id" })
     .select("id")
     .single();
 
@@ -373,7 +513,7 @@ async function persist(
       ok: false,
       verdict: "error",
       strategy_id: null,
-      reason: ins.error?.message ?? "insert returned no id",
+      reason: ins.error?.message ?? "upsert returned no id",
     };
   }
 
