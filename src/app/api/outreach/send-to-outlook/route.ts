@@ -1,30 +1,96 @@
 /**
- * Phase 6.6 — One-click "Send to Outlook" for the initial brand outreach.
+ * Phase 70 — Outreach picker draft route.
  *
- * Collapses the previous Generate → Save → Send chain into a single POST.
- * Renders the verbatim Steve template via `lib/outreach/initial-template.ts`
- * (no LLM, no tone picker), creates a draft in the user's Outlook via
- * Microsoft Graph, and upserts the brand's initial-outreach thread row
- * with status='drafted_in_outlook'.
+ * Accepts `{ contactId, brandId }` and creates ONE Outlook draft for that
+ * single contact via Microsoft Graph `POST /me/messages`. The route is
+ * the source of truth for the email payload: it looks up the contact in
+ * `brand_contacts` and the brand in `brands` and builds the verbatim
+ * Steve template server-side. The client never supplies subject/body.
  *
- * Drafts only — never calls `/me/sendMail`.
+ * Locked rules (Phase 70):
+ *   - Microsoft Graph drafts ONLY (no SMTP, no /me/sendMail).
+ *   - The template is fixed (Steve's exact copy). {First Name} falls back
+ *     to "there" when null/empty; {Brand} pulls from `brands.name`.
+ *   - On 401 from Graph → 401 with `outlook_reauth_required` so the UI
+ *     prompts re-auth via the existing flow.
+ *   - On 429 from Graph → retry once after 2s.
+ *   - STEVE_CC behavior is unchanged — the legacy /api/outreach
+ *     send-to-outlook never added a CC, so neither does this route.
+ *
+ * Backward-compat: the old shape `{ brand_id }` is still accepted and
+ * routes to the brand's primary `brand_contacts` row when no `contactId`
+ * is supplied. New callers should always pass `contactId`.
  */
 import { NextResponse } from "next/server";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { createDraft } from "@/lib/microsoft/graph";
 import {
-  renderInitialEmail,
-  type InitialTemplateBrand,
-  type InitialTemplateContact,
-  type RevenueLookup,
-} from "@/lib/outreach/initial-template";
-import { getBrandEnrichmentBundle } from "@/lib/enrichment";
+  createSupabaseAdminClient,
+  createSupabaseServerClient,
+} from "@/lib/supabase/server";
+import { createDraft } from "@/lib/microsoft/graph";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 interface Body {
+  contactId?: string;
+  contact_id?: string;
+  brandId?: string;
   brand_id?: string;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+interface BuildArgs {
+  brandName: string;
+  firstName: string | null;
+}
+
+/**
+ * Phase 70 — Steve's verbatim outreach copy. Do NOT alter punctuation,
+ * capitalization, or wording — including the typo "profiting" and the
+ * trailing "?" on the second sentence. Steve wrote it this way.
+ */
+function buildEmail({ brandName, firstName }: BuildArgs): { subject: string; html: string; text: string } {
+  const safeFirst =
+    typeof firstName === "string" && firstName.trim().length > 0
+      ? firstName.trim()
+      : "there";
+  const brand = brandName;
+
+  const subject = `Quick question about ${brand}`;
+
+  const html =
+    `<p>${escapeHtml(safeFirst)}</p>` +
+    `<p>${escapeHtml(brand)} is killing it on Amazon but you're not the one selling on most of the listings.</p>` +
+    `<p>I made a quick report to show you exactly how much more you could profiting without any extra effort?</p>` +
+    `<p>Are you the right person to send it to?</p>` +
+    `<p>Steve Rolle</p>`;
+
+  const text =
+    `${safeFirst}\n\n` +
+    `${brand} is killing it on Amazon but you're not the one selling on most of the listings.\n\n` +
+    `I made a quick report to show you exactly how much more you could profiting without any extra effort?\n\n` +
+    `Are you the right person to send it to?\n\n` +
+    `Steve Rolle`;
+
+  return { subject, html, text };
+}
+
+async function createDraftWith429Retry(input: Parameters<typeof createDraft>[0]) {
+  const first = await createDraft(input);
+  if (first.ok) return first;
+  if (first.status === 429) {
+    await new Promise((r) => setTimeout(r, 2000));
+    return createDraft(input);
+  }
+  return first;
 }
 
 export async function POST(req: Request) {
@@ -33,68 +99,96 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const payload = (await req.json().catch(() => ({}))) as Body;
-  const brandId = payload.brand_id;
+  const brandId = payload.brandId ?? payload.brand_id;
+  const contactId = payload.contactId ?? payload.contact_id ?? null;
   if (!brandId) {
-    return NextResponse.json({ error: "brand_id required" }, { status: 400 });
+    return NextResponse.json({ error: "brandId required" }, { status: 400 });
   }
 
-  // 1. Load brand row + ensure ownership.
+  // 1. Load brand + verify ownership.
   const { data: brandRow, error: brandErr } = await supabase
     .from("brands")
-    .select("id, name, est_monthly_revenue, trailing_12_months, keepa_unique_seller_count, keepa_brand_controlled_pct")
+    .select("id, name")
     .eq("id", brandId)
     .eq("user_id", user.id)
     .maybeSingle();
   if (brandErr) return NextResponse.json({ error: brandErr.message }, { status: 500 });
   if (!brandRow) return NextResponse.json({ error: "brand not found" }, { status: 404 });
 
-  // 2. Find the primary contact for the brand.
-  const { data: contactRow, error: contactErr } = await supabase
-    .from("contacts")
-    .select("id, full_name, first_name, email, supplier_id, title")
-    .eq("user_id", user.id)
-    .eq("brand_id", brandRow.id)
-    .eq("is_primary", true)
-    .maybeSingle();
-  if (contactErr) return NextResponse.json({ error: contactErr.message }, { status: 500 });
-  if (!contactRow) {
+  // 2. Resolve the brand_contacts row. Phase 70 callers send contactId
+  // explicitly; the legacy shape (no contactId) falls back to the brand's
+  // primary contact for backward compat.
+  const admin = createSupabaseAdminClient();
+  if (!admin) {
     return NextResponse.json(
-      { error: "no_primary_contact", message: "Set a primary contact for this brand first." },
-      { status: 400 },
+      { error: "server missing SUPABASE_SERVICE_ROLE_KEY" },
+      { status: 500 },
     );
   }
+  const contactSelect =
+    "id, brand_id, first_name, last_name, full_name, email, is_primary";
+  let contactRow: {
+    id: string;
+    brand_id: string;
+    first_name: string | null;
+    last_name: string | null;
+    full_name: string | null;
+    email: string | null;
+    is_primary: boolean | null;
+  } | null = null;
+
+  if (contactId) {
+    const { data, error } = await admin
+      .from("brand_contacts")
+      .select(contactSelect)
+      .eq("id", contactId)
+      .eq("brand_id", brandRow.id)
+      .maybeSingle();
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    contactRow = data ?? null;
+    if (!contactRow) {
+      return NextResponse.json({ error: "contact not found" }, { status: 404 });
+    }
+  } else {
+    const { data, error } = await admin
+      .from("brand_contacts")
+      .select(contactSelect)
+      .eq("brand_id", brandRow.id)
+      .eq("is_primary", true)
+      .maybeSingle();
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    contactRow = data ?? null;
+    if (!contactRow) {
+      return NextResponse.json(
+        { error: "no_primary_contact", message: "No primary contact for this brand." },
+        { status: 400 },
+      );
+    }
+  }
+
   if (!contactRow.email) {
     return NextResponse.json(
-      { error: "no_primary_contact", message: "Primary contact is missing an email address." },
+      { error: "contact_missing_email", message: "Contact has no email address." },
       { status: 400 },
     );
   }
 
-  // 3. Pull the enrichment bundle. Optional — render falls back gracefully.
-  const bundle = await getBrandEnrichmentBundle(supabase, brandRow.id).catch(() => null);
+  // 3. Build the email server-side. Never trust client-supplied subject/body.
+  const { subject, html, text } = buildEmail({
+    brandName: brandRow.name,
+    firstName: contactRow.first_name,
+  });
 
-  const brand: InitialTemplateBrand = {
-    name: brandRow.name,
-    keepa_unique_seller_count: brandRow.keepa_unique_seller_count ?? null,
-    keepa_brand_controlled_pct: brandRow.keepa_brand_controlled_pct ?? null,
-  };
-  const contact: InitialTemplateContact = {
-    full_name: contactRow.full_name ?? null,
-    first_name: contactRow.first_name ?? null,
-  };
-  const revenue: RevenueLookup = {
-    trailing_12_months: brandRow.trailing_12_months ?? null,
-    est_monthly_revenue: brandRow.est_monthly_revenue ?? null,
-  };
-  const rendered = renderInitialEmail({ brand, contact, bundle, revenue });
-
-  // 4. Create the Outlook draft.
-  const draft = await createDraft({
+  // 4. Create the Outlook draft. 429 retries once after 2s.
+  const draft = await createDraftWith429Retry({
     userId: user.id,
-    to: { address: contactRow.email, name: contactRow.full_name ?? undefined },
-    subject: rendered.subject,
-    html: rendered.html,
-    text: rendered.text,
+    to: {
+      address: contactRow.email,
+      name: contactRow.full_name ?? undefined,
+    },
+    subject,
+    html,
+    text,
   });
 
   if (!draft.ok) {
@@ -111,77 +205,47 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: draft.error }, { status: 502 });
   }
 
-  // 5. Upsert the initial-outreach thread row for this brand+contact.
-  // No `kind` column on outreach_threads; we identify the initial-outreach
-  // thread as the row for this brand+contact whose tone is NOT
-  // 'report_followup' (the only other tone tag set by the one-click flow).
+  // 5. Telemetry — log to brand_contact_discovery_events. Non-fatal.
   const nowIso = new Date().toISOString();
-
-  const { data: existing, error: existingErr } = await supabase
-    .from("outreach_threads")
-    .select("id, tone")
-    .eq("user_id", user.id)
-    .eq("brand_id", brandRow.id)
-    .eq("contact_id", contactRow.id)
-    .or("tone.is.null,tone.neq.report_followup")
-    .order("last_action_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (existingErr) {
-    return NextResponse.json(
-      { error: `draft created in Outlook but failed to look up thread: ${existingErr.message}`, message_id: draft.messageId, web_link: draft.webLink },
-      { status: 500 },
-    );
-  }
-
-  const draftedFields = {
-    user_id: user.id,
-    brand_id: brandRow.id,
-    contact_id: contactRow.id,
-    supplier_id: contactRow.supplier_id ?? null,
-    status: "drafted_in_outlook" as const,
-    subject: rendered.subject,
-    body: rendered.text,
-    body_text: rendered.text,
-    body_html: rendered.html,
-    outlook_message_id: draft.messageId,
-    outlook_web_link: draft.webLink,
-    drafted_in_outlook_at: nowIso,
-    last_action_at: nowIso,
-  };
-
-  if (existing?.id) {
-    const { error: updErr } = await supabase
-      .from("outreach_threads")
-      .update(draftedFields)
-      .eq("id", existing.id)
-      .eq("user_id", user.id);
-    if (updErr) {
-      return NextResponse.json(
-        { error: `draft created in Outlook but failed to update thread: ${updErr.message}`, message_id: draft.messageId, web_link: draft.webLink },
-        { status: 500 },
-      );
-    }
-  } else {
-    const { error: insErr } = await supabase
-      .from("outreach_threads")
-      .insert(draftedFields);
-    if (insErr) {
-      return NextResponse.json(
-        { error: `draft created in Outlook but failed to record thread: ${insErr.message}`, message_id: draft.messageId, web_link: draft.webLink },
-        { status: 500 },
-      );
-    }
+  try {
+    await admin.from("brand_contact_discovery_events").insert({
+      brand_id: brandRow.id,
+      run_id: `outlook_draft_${nowIso}`,
+      contact_id: contactRow.id,
+      provider: "orchestrator",
+      outcome: "found",
+      reason: "outlook_draft_created",
+      email_returned: contactRow.email,
+      raw_payload: {
+        event_type: "outlook_draft_created",
+        contact_id: contactRow.id,
+        brand_id: brandRow.id,
+        outlook_message_id: draft.messageId,
+        outlook_web_link: draft.webLink,
+      },
+    });
+  } catch (e) {
+    console.log(JSON.stringify({
+      event_type: "outlook_draft_created",
+      contact_id: contactRow.id,
+      brand_id: brandRow.id,
+      outlook_message_id: draft.messageId,
+      outlook_web_link: draft.webLink,
+      log_fallback_reason: e instanceof Error ? e.message : String(e),
+    }));
   }
 
   return NextResponse.json({
     ok: true,
     message_id: draft.messageId,
     web_link: draft.webLink,
-    subject: rendered.subject,
+    subject,
     contact: {
+      id: contactRow.id,
       name: contactRow.full_name ?? null,
       email: contactRow.email,
+      first_name: contactRow.first_name,
+      last_name: contactRow.last_name,
     },
   });
 }

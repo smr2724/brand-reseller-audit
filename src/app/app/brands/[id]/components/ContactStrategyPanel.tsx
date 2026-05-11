@@ -11,9 +11,11 @@
  * "Add contact manually" and "Retry with different titles" buttons are
  * always exposed.
  *
- * The legacy ContactDiscovery / BrandContactsCard flow is left intact;
- * enriching the top-3 from this panel re-uses that pipeline via the
- * existing `/api/brands/[id]/contacts/enrich` endpoint.
+ * The ContactDiscovery flow is left intact; enriching the top-3 from
+ * this panel re-uses that pipeline via the existing
+ * `/api/brands/[id]/contacts/enrich` endpoint. (BrandContactsCard was
+ * removed in Phase 70; the new OutreachPicker reads the verified
+ * subset of `brand_contacts` for draft creation.)
  */
 import React, { useEffect, useState } from "react";
 

@@ -1,9 +1,9 @@
 /**
  * Phase 6.5 — Outlook health check.
  *
- * Used by `BrandOutreachCard` and the report Email button to gate their
- * primary CTAs and surface a "Connect Outlook" prompt when the user
- * hasn't connected (or their refresh token has been revoked).
+ * Used by the OutreachPicker (Phase 70) and the report Email button to
+ * gate their primary CTAs and surface a "Connect Outlook" prompt when
+ * the user hasn't connected (or their refresh token has been revoked).
  */
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
