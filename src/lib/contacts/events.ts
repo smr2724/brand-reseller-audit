@@ -22,7 +22,8 @@ export type DiscoveryEventProvider =
   | "millionverifier"
   | "zerobounce"
   | "pattern_guess"
-  | "orchestrator";
+  | "orchestrator"
+  | "enrichment_deferred";
 
 export type DiscoveryEventOutcome =
   | "found"

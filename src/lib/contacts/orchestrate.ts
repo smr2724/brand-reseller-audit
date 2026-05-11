@@ -1,50 +1,44 @@
 /**
- * Phase 47 → Phase 61 — Module 2 orchestrator. Discovery flow:
+ * Phase 47 → Phase 63 — Module 2 orchestrator.
+ *
+ * Apollo-first contact discovery with primary-only auto-enrich:
  *
  *   1. Read brand_qualifications.selected_entity → derive domain.
- *   2. apolloSearchPeople(domain, titles=[founder,ceo,president,owner]).
- *   3. For each candidate:
- *        a. apolloMatchPerson → email if available.
- *        b. If empty: hunterEmailFinder via cached/looked-up pattern.
- *        c. If still empty: pattern_guess from contact_domain_cache
- *           (only if pattern_confidence >= 0.7).
- *   4. verifyEmail(email) for each candidate WITH an email.
- *   5. ready_to_send = email_status === 'verified'.
- *   6. Pick primary by deterministic title hierarchy
- *      (founder > owner > ceo > president > first verified > first found).
- *   7. Upsert all contacts; mark contacts_state='complete'.
+ *   2. apolloSearchPeople(domain, titles=[founder,ceo,president,owner])
+ *      — slim records only, no credit-burning unlock.
+ *   3. Rank the returned people via `rankCandidates` (founder/CEO > C-suite
+ *      > VP/Head > Director > other). Take the top 5. The #1 ranked
+ *      candidate becomes `is_primary=true`.
+ *   4. Persist all 5 rows with `enrichment_state='discovered'`. Mark
+ *      #1 with `is_primary=true`.
+ *   5. Run the FULL enrichment pipeline (`enrichSingleContact`) on the
+ *      primary only — Apollo unlock → if email, MillionVerifier; if no
+ *      email but Apollo returned last_name, Hunter finder; if no email
+ *      from Hunter but pattern+last_name available, pattern_guess →
+ *      MillionVerifier. After the primary chain runs, set
+ *      `enrichment_state='enriched'` regardless of email outcome.
+ *   6. For each of the other 4 contacts, write a single
+ *      `enrichment_deferred` audit event explaining the row is
+ *      intentionally not enriched yet (one Apollo email credit per
+ *      enrich, click Enrich on the row when ready). They stay at
+ *      `enrichment_state='discovered'` until the on-demand enrich
+ *      endpoint runs.
  *
- * Phase 61 additions:
- *   - A single `run_id` (uuid) is generated for the entire discovery run
- *     and emitted on every provider boundary as a row in
- *     `brand_contact_discovery_events` (see ./events.ts). The UI reads
- *     this to render the per-row provider-chain audit trail.
- *   - Persistence is now upsert-by-(brand_id, apollo_person_id) (or
- *     name fallback) instead of delete-then-insert. Rows where the user
- *     has committed (`email_source='manual'`, `is_primary=true`, or
- *     `ready_to_send=true`) survive re-discovery untouched on
- *     user-edited fields. Other rows that didn't appear in the new run
- *     and aren't sticky get removed.
- *   - The Apollo `/people/match` payload is now persisted on the contact
- *     row as `raw_apollo_match` (previously dropped after the email was
- *     extracted).
+ * Phase 61 sticky-merge behavior is preserved: rows the user has
+ * committed (`email_source='manual'`, `is_primary=true`, or
+ * `ready_to_send=true`) survive re-discovery untouched on user-edited
+ * fields. Non-sticky existing rows that don't appear in the new run
+ * are removed.
  */
 import { randomUUID } from "crypto";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
-import { apolloMatchPerson, apolloSearchPeople, type ApolloPersonSlim } from "./apollo";
-import {
-  hunterDomainPattern,
-  hunterEmailFinder,
-} from "./hunter";
-import { verifyEmail, type VerifyResult } from "./email-verify";
-import {
-  applyEmailPattern,
-  readPatternCache,
-  writePatternCache,
-} from "./pattern";
+import { apolloSearchPeople, type ApolloPersonSlim } from "./apollo";
+import { hunterDomainPattern } from "./hunter";
+import { readPatternCache, writePatternCache } from "./pattern";
 import { recordDiscoveryEvent } from "./events";
+import { rankCandidates } from "./rank";
+import { enrichSingleContact } from "./enrich-contact";
 
-const PATTERN_CONFIDENCE_FLOOR = 0.7;
 const SEARCH_TITLES = ["founder", "ceo", "president", "owner"];
 
 export interface RunContactDiscoveryResult {
@@ -64,34 +58,8 @@ interface CandidateRecord {
   last_name: string | null;
   title: string | null;
   linkedin_url: string | null;
-  email: string | null;
-  email_source:
-    | "apollo"
-    | "apollo_crm"
-    | "hunter"
-    | "hunter_pattern"
-    | "pattern_guess"
-    | "manual"
-    | "unknown";
-  email_pattern_used: string | null;
-  email_status:
-    | "verified"
-    | "likely"
-    | "risky"
-    | "catch_all"
-    | "guessed"
-    | "bounced"
-    | "invalid"
-    | "unknown"
-    | "not_found"
-    | null;
-  email_verifier: "millionverifier" | "zerobounce" | "none" | null;
-  email_verifier_score: number | null;
-  email_verified_at: string | null;
+  organization_name: string | null;
   raw_apollo: unknown;
-  raw_apollo_match: unknown;
-  raw_hunter: unknown;
-  verify_raw: unknown;
 }
 
 interface ExistingContactRow {
@@ -103,6 +71,47 @@ interface ExistingContactRow {
   is_primary: boolean;
   ready_to_send: boolean;
   notes: string | null;
+}
+
+function clampScore(n: number | null | undefined): number | null {
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(1, n));
+}
+
+function deriveNameParts(p: ApolloPersonSlim): {
+  first: string;
+  last: string;
+  full_name: string;
+} {
+  let first = (p.first_name ?? "").trim();
+  let last = (p.last_name ?? "").trim();
+  const combined = (p.name ?? "").trim();
+  if ((!first || !last) && combined) {
+    const parts = combined.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      if (!first) first = parts[0];
+      if (!last) last = parts[parts.length - 1];
+    } else if (parts.length === 1 && !first) {
+      first = parts[0];
+    }
+  }
+  const fullName = combined || `${first} ${last}`.trim() || "(unknown)";
+  return { first, last, full_name: fullName };
+}
+
+function candidateFromApolloPerson(p: ApolloPersonSlim): CandidateRecord {
+  const { first, last, full_name } = deriveNameParts(p);
+  return {
+    apollo_person_id: p.id || null,
+    apollo_organization_id: p.organization_id ?? null,
+    full_name,
+    first_name: first || null,
+    last_name: last || null,
+    title: p.title ?? null,
+    linkedin_url: p.linkedin_url ?? null,
+    organization_name: p.organization_name ?? null,
+    raw_apollo: p,
+  };
 }
 
 export async function runContactDiscovery(
@@ -184,10 +193,17 @@ export async function runContactDiscovery(
       raw_payload: search.raw,
     });
   }
-  const apolloCandidates: ApolloPersonSlim[] = search.ok ? search.people.slice(0, 10) : [];
 
-  // 3. Pattern cache lookup. If absent, try Hunter domain-search to
-  //    populate it once.
+  // 3. Rank + take top 5.
+  const ranked = search.ok ? rankCandidates(search) : [];
+  const candidates: CandidateRecord[] = ranked.map((r) =>
+    candidateFromApolloPerson(r.person),
+  );
+
+  // 4. Hunter domain-pattern (cache lookup OR fresh lookup) for the
+  //    primary enrichment pipeline to use later. We do this once at the
+  //    run level so the event surfaces in the audit trail above the
+  //    contact rows.
   let cache = await readPatternCache(domain);
   if (!cache) {
     const pat = await hunterDomainPattern(domain);
@@ -232,293 +248,6 @@ export async function runContactDiscovery(
     });
   }
 
-  // 4. Per-candidate enrichment. We emit events as we go; we don't yet
-  //    have `contact_id`s (rows are upserted at the end), so per-candidate
-  //    events carry a `candidate_index` in `reason` and we backfill
-  //    `contact_id` after upsert.
-  type CandidateEventDraft = Omit<Parameters<typeof recordDiscoveryEvent>[0], "brand_id" | "run_id"> & {
-    candidate_index: number;
-  };
-  const candidateEvents: CandidateEventDraft[] = [];
-
-  const candidates: CandidateRecord[] = [];
-  for (let idx = 0; idx < apolloCandidates.length; idx += 1) {
-    const p = apolloCandidates[idx];
-    // Split `name` if Apollo only returned the combined string.
-    let first = (p.first_name ?? "").trim();
-    let last = (p.last_name ?? "").trim();
-    const combined = (p.name ?? "").trim();
-    if ((!first || !last) && combined) {
-      const parts = combined.split(/\s+/).filter(Boolean);
-      if (parts.length >= 2) {
-        if (!first) first = parts[0];
-        if (!last) last = parts[parts.length - 1];
-      } else if (parts.length === 1 && !first) {
-        first = parts[0];
-      }
-    }
-    const fullName = combined || `${first} ${last}`.trim() || "(unknown)";
-
-    let email: string | null = sanitizeApolloEmail(p.email ?? null);
-    let email_source: CandidateRecord["email_source"] = "unknown";
-    let email_pattern_used: string | null = null;
-    let raw_hunter: unknown = null;
-    let raw_apollo_match: unknown = null;
-
-    if (email) {
-      email_source = "apollo";
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "apollo_match",
-        outcome: "skipped",
-        reason: `Apollo: search row already contained an email for ${fullName} — skipped /people/match.`,
-        email_returned: email,
-      });
-    } else {
-      // a) Try Apollo match-by-name.
-      const match = await apolloMatchPerson({
-        domain,
-        first_name: first || undefined,
-        last_name: last || undefined,
-      });
-      if (!match.ok) {
-        candidateEvents.push({
-          candidate_index: idx,
-          provider: "apollo_match",
-          outcome:
-            match.error === "apollo_retry_exhausted"
-              ? "retry_exhausted"
-              : "error",
-          reason: `Apollo: /people/match failed for ${fullName} at ${domain}: ${match.error}`,
-          http_status: match.status ?? null,
-          raw_payload: { error: match.error, status: match.status ?? null },
-        });
-      } else {
-        const matchedEmail = sanitizeApolloEmail(match.person?.email ?? null);
-        raw_apollo_match = match.raw;
-        if (matchedEmail) {
-          email = matchedEmail;
-          email_source = "apollo";
-          candidateEvents.push({
-            candidate_index: idx,
-            provider: "apollo_match",
-            outcome: "found",
-            reason: `Apollo: matched ${fullName} at ${domain} → ${matchedEmail}.`,
-            email_returned: matchedEmail,
-            raw_payload: match.raw,
-          });
-        } else {
-          candidateEvents.push({
-            candidate_index: idx,
-            provider: "apollo_match",
-            outcome: "not_found",
-            reason: match.person
-              ? `Apollo: matched ${fullName} but no unlocked email returned.`
-              : `Apollo: no person match for ${fullName} at ${domain}.`,
-            raw_payload: match.raw,
-          });
-        }
-      }
-    }
-
-    // b) Hunter email-finder.
-    if (!email && first && last) {
-      const hf = await hunterEmailFinder({
-        domain,
-        first_name: first,
-        last_name: last,
-      });
-      raw_hunter = hf.raw;
-      if (!hf.ok) {
-        candidateEvents.push({
-          candidate_index: idx,
-          provider: "hunter_finder",
-          outcome: "error",
-          reason: `Hunter email-finder failed for ${fullName} at ${domain}: ${hf.error ?? "unknown error"}`,
-          raw_payload: hf.raw ?? { error: hf.error ?? null },
-        });
-      } else if (hf.email) {
-        email = hf.email;
-        email_source = "hunter";
-        email_pattern_used = hf.pattern ?? null;
-        candidateEvents.push({
-          candidate_index: idx,
-          provider: "hunter_finder",
-          outcome: "found",
-          reason: `Hunter: ${fullName} → ${hf.email} (pattern ${hf.pattern ?? "n/a"}, score ${hf.score ?? "?"}).`,
-          email_returned: hf.email,
-          score_returned:
-            typeof hf.score === "number" ? clampScore(hf.score / 100) : null,
-          raw_payload: hf.raw,
-        });
-      } else {
-        candidateEvents.push({
-          candidate_index: idx,
-          provider: "hunter_finder",
-          outcome: "not_found",
-          reason: `Hunter: no email found for ${fullName} at ${domain}.`,
-          raw_payload: hf.raw,
-        });
-      }
-    } else if (!email) {
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "hunter_finder",
-        outcome: "skipped",
-        reason: `Hunter email-finder skipped for ${fullName} — missing first/last name.`,
-      });
-    } else {
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "hunter_finder",
-        outcome: "skipped",
-        reason: `Hunter email-finder skipped — Apollo already produced ${email} for ${fullName}.`,
-      });
-    }
-
-    // c) Pattern guess.
-    if (!email && first && last && cache?.email_pattern) {
-      const conf = cache.pattern_confidence ?? 0;
-      if (conf >= PATTERN_CONFIDENCE_FLOOR) {
-        const guessed = applyEmailPattern(cache.email_pattern, first, last, domain);
-        if (guessed) {
-          email = guessed;
-          email_source = "pattern_guess";
-          email_pattern_used = cache.email_pattern;
-          candidateEvents.push({
-            candidate_index: idx,
-            provider: "pattern_guess",
-            outcome: "found",
-            reason: `Pattern guess: applied ${cache.email_pattern} (confidence ${conf.toFixed(2)}) → ${guessed}.`,
-            email_returned: guessed,
-            score_returned: clampScore(conf),
-          });
-        } else {
-          candidateEvents.push({
-            candidate_index: idx,
-            provider: "pattern_guess",
-            outcome: "not_found",
-            reason: `Pattern guess: pattern ${cache.email_pattern} present but could not synthesize email for ${fullName}.`,
-          });
-        }
-      } else {
-        candidateEvents.push({
-          candidate_index: idx,
-          provider: "pattern_guess",
-          outcome: "skipped",
-          reason: `Pattern guess: pattern_confidence ${conf.toFixed(2)} below floor ${PATTERN_CONFIDENCE_FLOOR} — skipped.`,
-          score_returned: clampScore(conf),
-        });
-      }
-    } else if (!email) {
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "pattern_guess",
-        outcome: "skipped",
-        reason: cache?.email_pattern
-          ? `Pattern guess skipped — missing first/last name.`
-          : `Pattern guess skipped — no domain pattern available for ${domain}.`,
-      });
-    } else {
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "pattern_guess",
-        outcome: "skipped",
-        reason: `Pattern guess skipped — email already resolved via ${email_source}.`,
-      });
-    }
-
-    // d) Verify.
-    let verify: VerifyResult | null = null;
-    if (email) {
-      verify = await verifyEmail(email);
-      const isMv = verify.verifier === "millionverifier";
-      const isZb = verify.verifier === "zerobounce";
-      const mvOutcome: "found" | "skipped" = isMv ? "found" : "skipped";
-      const mvReason = isMv
-        ? `MillionVerifier: ${verify.status}${typeof verify.score === "number" ? ` (score ${verify.score.toFixed(2)})` : ""} for ${email}.`
-        : verify.verifier === "none"
-          ? `MillionVerifier: skipped — provider unavailable or unconfigured.`
-          : `MillionVerifier: ${verify.status === "catch_all" || verify.status === "unknown" ? `returned ${verify.status}, deferred to ZeroBounce` : "skipped"}.`;
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "millionverifier",
-        outcome: mvOutcome,
-        reason: mvReason,
-        email_returned: email,
-        status_returned: isMv ? verify.status : null,
-        score_returned: isMv && typeof verify.score === "number" ? clampScore(verify.score) : null,
-        raw_payload: isMv ? verify.raw : null,
-      });
-      const zbOutcome: "found" | "skipped" = isZb ? "found" : "skipped";
-      const zbReason = isZb
-        ? `ZeroBounce: ${verify.status}${typeof verify.score === "number" ? ` (score ${verify.score.toFixed(2)})` : ""} for ${email}.`
-        : isMv
-          ? `ZeroBounce: skipped — MillionVerifier returned ${verify.status}.`
-          : `ZeroBounce: skipped — no verifier returned a definite result.`;
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "zerobounce",
-        outcome: zbOutcome,
-        reason: zbReason,
-        email_returned: email,
-        status_returned: isZb ? verify.status : null,
-        score_returned: isZb && typeof verify.score === "number" ? clampScore(verify.score) : null,
-        raw_payload: isZb ? verify.raw : null,
-      });
-    } else {
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "millionverifier",
-        outcome: "skipped",
-        reason: `MillionVerifier: skipped — no email candidate to verify for ${fullName}.`,
-      });
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "zerobounce",
-        outcome: "skipped",
-        reason: `ZeroBounce: skipped — no email candidate to verify for ${fullName}.`,
-      });
-    }
-
-    if (!email) {
-      candidateEvents.push({
-        candidate_index: idx,
-        provider: "orchestrator",
-        outcome: "not_found",
-        reason: `No email resolved for ${fullName} after Apollo, Hunter, and pattern-guess fallbacks.`,
-      });
-    }
-
-    candidates.push({
-      apollo_person_id: p.id || null,
-      apollo_organization_id: p.organization_id ?? null,
-      full_name: fullName,
-      first_name: first || null,
-      last_name: last || null,
-      title: p.title ?? null,
-      linkedin_url: p.linkedin_url ?? null,
-      email,
-      email_source: email ? email_source : "unknown",
-      email_pattern_used,
-      email_status: email
-        ? verify
-          ? mapVerifyStatus(verify.status)
-          : "guessed"
-        : "not_found",
-      email_verifier: email ? (verify?.verifier ?? "none") : null,
-      email_verifier_score:
-        email && verify && typeof verify.score === "number"
-          ? verify.score
-          : null,
-      email_verified_at: email && verify ? new Date().toISOString() : null,
-      raw_apollo: p,
-      raw_apollo_match,
-      raw_hunter,
-      verify_raw: verify?.raw ?? null,
-    });
-  }
-
   // 5. Load existing rows for sticky-merge.
   const { data: existingRowsRaw } = await admin
     .from("brand_contacts")
@@ -550,33 +279,18 @@ export async function runContactDiscovery(
   const matchedExistingIds = new Set<string>();
   const candidateContactIds: Array<string | null> = new Array(candidates.length).fill(null);
 
-  // 6. Pick primary by title hierarchy among candidates (only used when
-  //    no existing primary row survives).
-  const newPrimaryIdx = pickPrimaryIndex(candidates);
+  // 6. The #1-ranked candidate is the new primary. We still preserve an
+  //    existing sticky primary if one survives sticky-merge.
   const existingPrimary = existingRows.find((r) => r.is_primary === true) ?? null;
+  const newPrimaryIdx = candidates.length > 0 ? 0 : -1;
 
-  // 7. Upsert candidates.
+  // 7. Upsert candidates as `enrichment_state='discovered'`. The primary
+  //    chain runs separately below.
   for (let i = 0; i < candidates.length; i += 1) {
     const c = candidates[i];
     const existing = findExisting(c);
     const sticky = existing ? isSticky(existing) : false;
-
-    // The new row should be primary only if there is no surviving
-    // existing primary AND this is the chosen index from the new run.
     const wantsPrimary = !existingPrimary && i === newPrimaryIdx;
-
-    // Compute fields to write. Sticky rows preserve email/source/verifier
-    // chain plus user fields. Non-sticky existing rows get a fresh refresh
-    // from the new run. New rows (no existing match) get inserted.
-    const refreshFromRun = {
-      email: c.email,
-      email_source: c.email ? c.email_source : null,
-      email_pattern_used: c.email_pattern_used,
-      email_status: c.email_status,
-      email_verifier: c.email_verifier,
-      email_verifier_score: c.email_verifier_score,
-      email_verified_at: c.email_verified_at,
-    };
 
     const baseFields: Record<string, unknown> = {
       brand_id: brandId,
@@ -586,28 +300,33 @@ export async function runContactDiscovery(
       last_name: c.last_name,
       title: c.title,
       linkedin_url: c.linkedin_url,
-      company_name: null,
+      company_name: c.organization_name,
       company_domain: domain,
       apollo_person_id: c.apollo_person_id,
       apollo_organization_id: c.apollo_organization_id,
       raw_apollo: c.raw_apollo,
-      raw_apollo_match: c.raw_apollo_match,
-      raw_hunter: c.raw_hunter,
       updated_at: new Date().toISOString(),
     };
 
     if (existing) {
       matchedExistingIds.add(existing.id);
       const update: Record<string, unknown> = { ...baseFields };
-      if (sticky) {
-        // Preserve user-committed email/source/verifier on sticky rows.
-        // Always refresh forensic fields (raw_*) regardless — those
-        // describe what providers said *this run*, not user intent.
-        // Don't touch is_primary, ready_to_send, notes either.
-      } else {
-        Object.assign(update, refreshFromRun);
+      if (!sticky) {
+        // Non-sticky rows go back to 'discovered' state. Their email
+        // fields will be refreshed by enrichSingleContact below if this
+        // row ends up being the primary.
+        update.email = null;
+        update.email_source = null;
+        update.email_pattern_used = null;
+        update.email_status = null;
+        update.email_verifier = null;
+        update.email_verifier_score = null;
+        update.email_verified_at = null;
+        update.enrichment_state = "discovered";
         update.is_primary = wantsPrimary;
-        update.ready_to_send = c.email_status === "verified";
+        update.ready_to_send = false;
+        update.raw_apollo_match = null;
+        update.raw_hunter = null;
       }
       const { data: updated, error: upErr } = await admin
         .from("brand_contacts")
@@ -622,9 +341,16 @@ export async function runContactDiscovery(
     } else {
       const insert: Record<string, unknown> = {
         ...baseFields,
-        ...refreshFromRun,
+        email: null,
+        email_source: null,
+        email_pattern_used: null,
+        email_status: null,
+        email_verifier: null,
+        email_verifier_score: null,
+        email_verified_at: null,
         is_primary: wantsPrimary,
-        ready_to_send: c.email_status === "verified",
+        ready_to_send: false,
+        enrichment_state: "discovered",
       };
       const { data: inserted, error: insErr } = await admin
         .from("brand_contacts")
@@ -649,22 +375,77 @@ export async function runContactDiscovery(
       .eq("brand_id", brandId);
   }
 
-  // 9. Backfill events with contact_id and persist.
-  for (const ev of candidateEvents) {
-    const contactId = candidateContactIds[ev.candidate_index] ?? null;
-    const { candidate_index, ...rest } = ev;
-    void candidate_index;
+  // 9. Determine the primary contact_id to enrich. We prefer the
+  //    surviving sticky primary if one exists (it stays at its prior
+  //    state, but we still re-run enrichment on it because the user
+  //    hit Re-discover). Otherwise it's the newly inserted/updated
+  //    #1-ranked candidate.
+  let primaryId: string | null = null;
+  let primaryCandidateIdx = -1;
+  if (existingPrimary) {
+    primaryId = existingPrimary.id;
+    primaryCandidateIdx = candidates.findIndex(
+      (_, i) => candidateContactIds[i] === existingPrimary.id,
+    );
+  } else if (newPrimaryIdx >= 0) {
+    primaryId = candidateContactIds[newPrimaryIdx] ?? null;
+    primaryCandidateIdx = newPrimaryIdx;
+  }
+
+  // 10. Auto-enrich the primary (credit-burn). Other 4 get deferred event.
+  if (primaryId && primaryCandidateIdx >= 0) {
+    const c = candidates[primaryCandidateIdx];
+    const enriched = await enrichSingleContact({
+      brand_id: brandId,
+      run_id: runId,
+      contact_id: primaryId,
+      domain,
+      first_name: c.first_name,
+      last_name: c.last_name,
+      full_name: c.full_name,
+      organization_name: c.organization_name,
+      apollo_person_id: c.apollo_person_id,
+    });
+    await admin
+      .from("brand_contacts")
+      .update({
+        email: enriched.email,
+        email_source: enriched.email ? enriched.email_source : null,
+        email_pattern_used: enriched.email_pattern_used,
+        email_status: enriched.email
+          ? enriched.email_status
+          : "not_found",
+        email_verifier: enriched.email_verifier,
+        email_verifier_score: enriched.email_verifier_score,
+        email_verified_at: enriched.email_verified_at,
+        last_name: enriched.last_name,
+        full_name: enriched.full_name,
+        raw_apollo_match: enriched.raw_apollo_match,
+        raw_hunter: enriched.raw_hunter,
+        ready_to_send: enriched.email_status === "verified",
+        enrichment_state: "enriched",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", primaryId)
+      .eq("brand_id", brandId);
+  }
+
+  // 11. Defer enrichment for the non-primary 4: write one transparent
+  //     audit event per row so the user understands why no email is
+  //     populated yet.
+  for (let i = 0; i < candidates.length; i += 1) {
+    if (i === primaryCandidateIdx) continue;
+    const cid = candidateContactIds[i];
+    if (!cid) continue;
+    const c = candidates[i];
     await recordDiscoveryEvent({
       brand_id: brandId,
       run_id: runId,
-      contact_id: contactId,
-      ...rest,
+      contact_id: cid,
+      provider: "enrichment_deferred",
+      outcome: "skipped",
+      reason: `Deferred enrichment for ${c.full_name} — click Enrich to spend an Apollo credit.`,
     });
-  }
-
-  let primaryId: string | null = existingPrimary?.id ?? null;
-  if (!primaryId && newPrimaryIdx >= 0) {
-    primaryId = candidateContactIds[newPrimaryIdx] ?? null;
   }
 
   await admin
@@ -694,66 +475,6 @@ async function markError(
       .eq("id", brandId);
   }
   return { ok: false, state: "error", error: message, run_id: runId };
-}
-
-function pickPrimaryIndex(candidates: CandidateRecord[]): number {
-  if (candidates.length === 0) return -1;
-  const matchers: Array<RegExp> = [
-    /founder/i,
-    /owner/i,
-    /\bceo\b/i,
-    /president/i,
-  ];
-  for (const m of matchers) {
-    const idx = candidates.findIndex((c) => c.title && m.test(c.title));
-    if (idx >= 0) return idx;
-  }
-  const verifiedIdx = candidates.findIndex((c) => c.email_status === "verified");
-  if (verifiedIdx >= 0) return verifiedIdx;
-  return 0;
-}
-
-function mapVerifyStatus(
-  s: VerifyResult["status"],
-): CandidateRecord["email_status"] {
-  switch (s) {
-    case "verified":
-    case "likely":
-    case "risky":
-    case "catch_all":
-    case "invalid":
-    case "unknown":
-      return s;
-    default:
-      return "unknown";
-  }
-}
-
-function clampScore(n: number | null | undefined): number | null {
-  if (typeof n !== "number" || !Number.isFinite(n)) return null;
-  return Math.max(0, Math.min(1, n));
-}
-
-/**
- * Apollo basic plan returns sentinel values like
- * "email_not_unlocked@domain.com" or "domain_catch_all@…" instead of a
- * real email when the credit-gated email field is locked. Treat anything
- * that matches those well-known patterns as no-email so the orchestrator
- * falls through to Hunter.
- */
-function sanitizeApolloEmail(input: string | null | undefined): string | null {
-  if (!input) return null;
-  const v = String(input).trim().toLowerCase();
-  if (!v) return null;
-  if (
-    v.startsWith("email_not_unlocked") ||
-    v.startsWith("domain_catch_all") ||
-    v.includes("not_unlocked@") ||
-    v.includes("@domain.com")
-  ) {
-    return null;
-  }
-  return v;
 }
 
 function extractDomain(input: string | null): string | null {
