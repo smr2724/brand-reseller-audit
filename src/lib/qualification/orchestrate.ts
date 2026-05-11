@@ -26,6 +26,7 @@ import {
   normalizeLegalEntityType,
   normalizeOwnershipSignal,
 } from "./normalize";
+import { runHardGates, type HardGateResult } from "./hard-gates";
 import type {
   BrandAssociatedSeller,
   CandidateEntity,
@@ -649,6 +650,56 @@ async function runQualificationInner(
     });
   }
 
+  // 7c. Phase 68 — Hard gates A/B/C + buyer rejection simulation.
+  //
+  // Runs AFTER pitch_math is computed so we can feed the canonical
+  // recoverable_revenue_usd into Gate B without recomputing. Any failure
+  // short-circuits the icp_verdict to 'disqualified' (hard_disqualify)
+  // or 'needs_review'. The original ICP path still runs above for
+  // record-keeping (segments, hooks, narrative).
+  let hardGate: HardGateResult | null = null;
+  try {
+    hardGate = await runHardGates({
+      brand_name: brand.name,
+      brand_description: selected_entity?.evidence_summary ?? null,
+      top_sellers: sellerNames,
+      known_parent: null,
+      industry_hint: null,
+      recoverable_revenue_usd: pitch_math?.recoverable_revenue_usd ?? null,
+      brand_revenue_usd: ttm ?? null,
+    });
+    totalCost += hardGate.total_cost_usd;
+    totalTokensIn += hardGate.total_tokens_in;
+    totalTokensOut += hardGate.total_tokens_out;
+  } catch (e) {
+    if (!llmError) llmError = e instanceof Error ? e.message : String(e);
+    // Defensive: don't break the orchestration if the gate stack throws.
+    // The row still saves with the legacy ICP verdict.
+    console.warn(
+      "[qualification] hard-gate evaluator threw",
+      brandId,
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+
+  // Apply hard-gate verdict as the FINAL arbiter when it fires.
+  if (hardGate) {
+    if (hardGate.verdict === "hard_disqualify") {
+      icp_verdict = "disqualified";
+      if (hardGate.pattern) {
+        disqualification_pattern = hardGate.pattern;
+      }
+      // Drop hooks/narrative recs — the brand is out.
+      candidate_hooks = [];
+    } else if (hardGate.verdict === "needs_review") {
+      icp_verdict = "needs_review";
+      if (hardGate.pattern) {
+        disqualification_pattern = hardGate.pattern;
+      }
+      candidate_hooks = [];
+    }
+  }
+
   // 7b. Phase 51 — verdict reconciliation belt-and-suspenders.
   //
   //  If the narrative recommendation explicitly says "skip", "not a fit",
@@ -779,6 +830,26 @@ async function runQualificationInner(
     channel_pattern: finalSegment.segment,
     segment: finalSegment.segment,
     pitch_math,
+    // Phase 68 — hard-gate columns (migration 0050). Persist whether or
+    // not the gate stack ran cleanly; null columns are valid (the UI
+    // hides the gate trail when nothing's there).
+    parent_entity: hardGate?.controlling_entity ?? null,
+    controlling_entity_revenue_usd:
+      hardGate?.controlling_entity?.revenue_usd ?? null,
+    controlling_entity_employees:
+      hardGate?.controlling_entity?.employees ?? null,
+    controlling_entity_ownership_type:
+      hardGate?.controlling_entity?.ownership_type ?? null,
+    recoverable_to_controlling_ratio:
+      hardGate?.recoverable_to_controlling_ratio ?? null,
+    gate_a_corporate_hierarchy: hardGate?.gate_a ?? null,
+    gate_b_revenue_ratio: hardGate?.gate_b ?? null,
+    gate_c_named_decision_maker: hardGate?.gate_c ?? null,
+    buyer_rejection_simulation: hardGate?.rejection ?? null,
+    hard_gate_verdict: hardGate?.verdict ?? null,
+    hard_gate_failure_reason: hardGate?.failure_reason ?? null,
+    hard_gate_failure_gate: hardGate?.failure_gate ?? null,
+    hierarchy_sources: hardGate?.hierarchy_sources ?? null,
     llm_model: model,
     llm_tokens_in: totalTokensIn,
     llm_tokens_out: totalTokensOut,
