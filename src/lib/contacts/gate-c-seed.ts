@@ -109,6 +109,20 @@ function deriveName(p: GateCPersonSeed): { first: string; last: string; full: st
   return { first, last, full: full || `${first} ${last}`.trim() };
 }
 
+/**
+ * Phase 71 — defensive LinkedIn URL normalization. Gate C can land a URL
+ * like `linkedin.com/in/foo` without a scheme; Apollo rejects schemeless
+ * URLs silently and we'd miss the high-precision match. Trims, strips
+ * trailing slashes, prepends https:// when no scheme is present.
+ */
+function normalizeLinkedInUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let s = raw.trim();
+  if (!s) return null;
+  if (!/^https?:\/\//i.test(s)) s = `https://${s.replace(/^\/+/, "")}`;
+  return s;
+}
+
 export async function seedFromGateC(
   input: GateCSeedInput,
   deps: GateCSeedDeps = {},
@@ -119,11 +133,20 @@ export async function seedFromGateC(
 
   const { first, last, full } = deriveName(input.person);
   const title = input.person.title?.trim() ?? null;
-  const linkedinUrl = input.person.linkedin_url?.trim() ?? null;
+  const linkedinUrl = normalizeLinkedInUrl(input.person.linkedin_url);
   let cost_credits = 0;
   let hunter_cost_usd = 0;
 
   // 1. Apollo /people/match keyed on the LinkedIn URL.
+  //
+  // Spec §3b: "If /people/match returns a hit *with an email*, write it."
+  // The "with an email" clause is load-bearing — Apollo commonly returns
+  // a person record with `email=null` on plans/regions without reveal
+  // permission. Treating that as a hit poisoned the pipeline: we'd
+  // write a brand_contacts row with email=null, mark contacts_state
+  // 'complete', skip the mixed_people/search + Hunter fallbacks, and
+  // never surface NEEDS_HUMAN_REVIEW. Gate the early return on an
+  // actual email being present; otherwise fall through.
   if (linkedinUrl) {
     const m = await apolloMatch({
       linkedin_url: linkedinUrl,
@@ -131,7 +154,11 @@ export async function seedFromGateC(
       last_name: last || undefined,
     });
     cost_credits += m.cost_credits;
-    if (m.ok && m.person) {
+    const emailMatched =
+      m.ok && m.person && typeof m.person.email === "string"
+        ? m.person.email.trim()
+        : "";
+    if (m.ok && m.person && emailMatched.length > 0) {
       return {
         provider: "apollo_linkedin_match",
         person: {
@@ -144,7 +171,7 @@ export async function seedFromGateC(
           linkedin_url: m.person.linkedin_url ?? linkedinUrl,
           seniority: m.person.seniority ?? null,
           department: m.person.department ?? null,
-          email: m.person.email ?? null,
+          email: emailMatched,
           email_status: m.person.email_status ?? null,
           organization_id: m.person.organization_id ?? null,
           organization_name: m.person.organization_name ?? null,
@@ -160,42 +187,44 @@ export async function seedFromGateC(
   // 2. Apollo mixed_people/search seeded with Gate C title + name.
   if (input.domain || first || last) {
     const titlesArr = title ? [title] : [];
-    const keywords = [first, last].filter(Boolean).join(" ");
+    const keywords = [first, last].filter(Boolean).join(" ").trim();
     const s = await apolloSearch({
       q_organization_domains: input.domain ? [input.domain] : [],
       person_titles: titlesArr,
-      // `q_keywords` is a documented mixed_people/search filter on
-      // Apollo; the existing wrapper doesn't have a dedicated field for
-      // it, so we tack it onto person_titles only when title is empty —
-      // otherwise the title alone steers Apollo well. For Phase 71 we
-      // keep this simple and rely on title + domain.
+      q_keywords: keywords || undefined,
       per_page: 25,
-      ...(keywords ? {} : {}),
     });
     cost_credits += s.cost_credits;
     if (s.ok && s.candidates.length > 0) {
-      // Pick the candidate whose name best matches Gate C person.
+      // Phase 71 — require a name-equality match to avoid the
+      // wrong-person bug (e.g. picking the VP of Sales as a fallback
+      // for "President Maria Rapp"). Drop the `?? s.candidates[0]`
+      // silent fallback; if no candidate matches by name, fall through
+      // to Hunter.
       const wantFull = full.toLowerCase();
       const wantFirst = first.toLowerCase();
       const wantLast = last.toLowerCase();
-      const match =
-        s.candidates.find((c) => {
-          const cf = `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim().toLowerCase();
-          const cn = (c.name ?? "").trim().toLowerCase();
-          return (
-            (cf && cf === wantFull) ||
-            (cn && cn === wantFull) ||
-            ((c.first_name ?? "").trim().toLowerCase() === wantFirst &&
-              (c.last_name ?? "").trim().toLowerCase() === wantLast)
-          );
-        }) ?? s.candidates[0];
-      return {
-        provider: "apollo_mixed_search",
-        person: match,
-        email_source: match.email ? "apollo_match" : "unknown",
-        cost_credits,
-        hunter_cost_usd,
-      };
+      const match = s.candidates.find((c) => {
+        const cf = `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim().toLowerCase();
+        const cn = (c.name ?? "").trim().toLowerCase();
+        return (
+          (cf && cf === wantFull) ||
+          (cn && cn === wantFull) ||
+          (wantFirst &&
+            wantLast &&
+            (c.first_name ?? "").trim().toLowerCase() === wantFirst &&
+            (c.last_name ?? "").trim().toLowerCase() === wantLast)
+        );
+      });
+      if (match) {
+        return {
+          provider: "apollo_mixed_search",
+          person: match,
+          email_source: match.email ? "apollo_match" : "unknown",
+          cost_credits,
+          hunter_cost_usd,
+        };
+      }
     }
   }
 

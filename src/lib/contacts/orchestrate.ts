@@ -281,28 +281,62 @@ export async function runContactDiscovery(
                     ? "unknown"
                     : "unknown";
 
-      // Persist as the primary contact row for this brand. Existing
-      // primary (if any) is demoted to non-primary; the Gate C person is
-      // always the new primary.
-      await admin
-        .from("brand_contacts")
-        .update({ is_primary: false, updated_at: new Date().toISOString() })
-        .eq("brand_id", brandId);
-
       const fullName =
         (seed.person.name ??
           `${seed.person.first_name ?? ""} ${seed.person.last_name ?? ""}`.trim()) ||
         gateCPerson.full_name ||
         "(unnamed)";
 
+      // Sticky-merge protection — Phase 47/61 invariant: rows with
+      // `email_source='manual'` OR `ready_to_send=true` are user-pinned
+      // and survive re-discovery. Look up any existing sticky primary
+      // before we touch is_primary on anything; if one exists for a
+      // DIFFERENT person, the new Gate C row goes in as is_primary=false
+      // so we don't clobber the user's pin.
+      const { data: existingRowsForBrand } = await admin
+        .from("brand_contacts")
+        .select("id, full_name, email_source, is_primary, ready_to_send")
+        .eq("brand_id", brandId);
+      const existingList = (existingRowsForBrand ?? []) as Array<{
+        id: string;
+        full_name: string | null;
+        email_source: string | null;
+        is_primary: boolean | null;
+        ready_to_send: boolean | null;
+      }>;
+      const stickyPrimary = existingList.find(
+        (r) =>
+          r.is_primary === true &&
+          (r.email_source === "manual" || r.ready_to_send === true),
+      );
+      const stickyPrimaryMatchesGateC =
+        !!stickyPrimary &&
+        (stickyPrimary.full_name ?? "").trim().toLowerCase() ===
+          fullName.trim().toLowerCase();
+
+      // Demote existing primaries — but NEVER touch user-pinned rows
+      // (manual or ready_to_send=true).
+      await admin
+        .from("brand_contacts")
+        .update({ is_primary: false, updated_at: new Date().toISOString() })
+        .eq("brand_id", brandId)
+        .neq("email_source", "manual")
+        .neq("ready_to_send", true);
+
       // Sticky-merge: prefer updating an existing row that matches by
       // full_name (case-insensitive) so we don't duplicate the row.
-      const { data: existingForName } = await admin
-        .from("brand_contacts")
-        .select("id")
-        .eq("brand_id", brandId)
-        .ilike("full_name", fullName)
-        .maybeSingle<{ id: string }>();
+      const existingForName =
+        existingList.find(
+          (r) =>
+            (r.full_name ?? "").trim().toLowerCase() ===
+            fullName.trim().toLowerCase(),
+        ) ?? null;
+
+      // Promote the Gate C row to primary only when no sticky-pinned
+      // OTHER person owns the slot already. If the sticky primary is
+      // the same Gate C person, we still want is_primary=true (which
+      // it already is on the sticky row).
+      const wantPrimary = !stickyPrimary || stickyPrimaryMatchesGateC;
 
       const baseFields: Record<string, unknown> = {
         brand_id: brandId,
@@ -322,7 +356,7 @@ export async function runContactDiscovery(
         email_verifier: verifierName,
         email_verifier_score: verifyScore,
         email_verified_at: emailVerifiedAt,
-        is_primary: true,
+        is_primary: wantPrimary,
         ready_to_send: isVerified,
         enrichment_state: "enriched",
         raw_apollo_match: seed.person,
@@ -330,9 +364,29 @@ export async function runContactDiscovery(
       };
 
       if (existingForName?.id) {
+        // Existing row matches Gate C person by name. If that row is
+        // user-pinned (manual or ready_to_send), do NOT overwrite the
+        // user-edited fields — only refresh metadata + enrichment state.
+        const existingIsSticky =
+          existingForName.email_source === "manual" ||
+          existingForName.ready_to_send === true;
+        const updateFields: Record<string, unknown> = existingIsSticky
+          ? {
+              full_name: fullName,
+              first_name: baseFields.first_name,
+              last_name: baseFields.last_name,
+              title: baseFields.title,
+              linkedin_url: baseFields.linkedin_url,
+              company_domain: baseFields.company_domain,
+              apollo_person_id: baseFields.apollo_person_id,
+              raw_apollo_match: baseFields.raw_apollo_match,
+              enrichment_state: "enriched",
+              updated_at: baseFields.updated_at,
+            }
+          : baseFields;
         const { data: upd } = await admin
           .from("brand_contacts")
-          .update(baseFields)
+          .update(updateFields)
           .eq("id", existingForName.id)
           .eq("brand_id", brandId)
           .select("id")

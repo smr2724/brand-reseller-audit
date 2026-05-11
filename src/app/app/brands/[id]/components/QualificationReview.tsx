@@ -14,6 +14,7 @@
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import OverrideModal from "./OverrideModal";
+import { effectiveVerdict } from "@/lib/qualification/verdict";
 
 type Verdict = "qualified" | "disqualified" | "needs_review";
 
@@ -305,11 +306,28 @@ export default function QualificationReview({
 
   if (!row) return null;
 
-  const verdict = row.icp_verdict;
+  // Phase 71 — the prominent verdict pill must reflect the EFFECTIVE
+  // verdict (post-override), not the raw column. Otherwise an active
+  // override leaves the pill in red "DISQUALIFIED" even though the
+  // override banner below claims the brand is pursued. The Override
+  // banner copy still cites the raw verdict for context.
+  const eff = effectiveVerdict({
+    icp_verdict: row.icp_verdict,
+    hard_gate_verdict: row.hard_gate_verdict,
+    manual_override: row.manual_override,
+  });
+  const verdict = eff.icp_verdict;
+  const rawVerdict = row.icp_verdict;
   const verdictLabel =
     verdict === "qualified"
       ? "QUALIFIED"
       : verdict === "needs_review"
+        ? "NEEDS REVIEW"
+        : "DISQUALIFIED";
+  const rawVerdictLabel =
+    rawVerdict === "qualified"
+      ? "QUALIFIED"
+      : rawVerdict === "needs_review"
         ? "NEEDS REVIEW"
         : "DISQUALIFIED";
   const pillBg =
@@ -321,7 +339,8 @@ export default function QualificationReview({
 
   const hooks = Array.isArray(row.candidate_hooks) ? row.candidate_hooks : [];
   const showOverrideBanner =
-    (verdict === "disqualified" && !row.manual_override) || row.manual_override;
+    (rawVerdict === "disqualified" && !row.manual_override) ||
+    row.manual_override;
 
   function copy(key: string, text: string) {
     if (navigator?.clipboard) {
@@ -407,7 +426,7 @@ export default function QualificationReview({
             <>
               <strong>Override active:</strong>{" "}
               {row.manual_override_reason || "(no reason recorded)"} — verdict was{" "}
-              {verdictLabel}.
+              {rawVerdictLabel}.
             </>
           ) : (
             <div className="flex items-center justify-between gap-3">
@@ -968,8 +987,19 @@ function HardGateTrail({
   onOverride: () => void;
   overrideApplied: boolean;
 }) {
-  const verdict = row.hard_gate_verdict;
-  if (!verdict) return null;
+  // Phase 71 — read the EFFECTIVE hard-gate verdict so the top-right
+  // pill flips from HARD_DISQUALIFY (red) to PASSED HARD GATES (green)
+  // when an override is active. The per-gate trail below continues to
+  // render the raw outcomes — the gates physically did what they did,
+  // we're just telling the analyst the override is honoring them.
+  const rawVerdict = row.hard_gate_verdict;
+  if (!rawVerdict) return null;
+  const eff = effectiveVerdict({
+    icp_verdict: row.icp_verdict,
+    hard_gate_verdict: rawVerdict,
+    manual_override: row.manual_override,
+  });
+  const verdict = eff.hard_gate_verdict;
 
   const failureGate = row.hard_gate_failure_gate;
   const gateA = row.gate_a_corporate_hierarchy;
@@ -1008,21 +1038,26 @@ function HardGateTrail({
   const rejectionPassed = rejection?.verdict === "pursue_ok";
   // Phase 71 — rejection-sim advisory amber: hard_gate passed overall but
   // the synthetic buyer said do_not_pursue. Severity 'high' or 'medium'
-  // gets the amber treatment; 'low' deemphasizes to muted gray.
+  // gets the amber treatment; 'low' deemphasizes to muted gray. Only
+  // fires when the brand actually passed Gate A/B/C (rawVerdict='pass')
+  // — when an override forced verdict='pass' on top of a real Gate A/B/C
+  // failure, the per-row trail below still renders the raw red failure.
   const rejectionAdvisoryAmber =
-    verdict === "pass" &&
+    rawVerdict === "pass" &&
     rejectionRan &&
     !rejectionPassed &&
     (rejection?.severity === "high" || rejection?.severity === "medium");
   const rejectionAdvisoryLow =
-    verdict === "pass" &&
+    rawVerdict === "pass" &&
     rejectionRan &&
     !rejectionPassed &&
     rejection?.severity === "low";
 
   const verdictLabel =
     verdict === "pass"
-      ? "PASSED HARD GATES"
+      ? eff.source === "manual_override"
+        ? "PASSED (OVERRIDE)"
+        : "PASSED HARD GATES"
       : verdict === "hard_disqualify"
         ? "HARD DISQUALIFY"
         : "NEEDS REVIEW";
@@ -1140,8 +1175,10 @@ function HardGateTrail({
       {/* Phase 71 — rejection sim is no longer a terminal hard gate when
           A/B/C all pass. Render the advisory panel in amber (high/medium
           severity) or muted gray (low severity) so the analyst still sees
-          the synthetic buyer's objections as a heads-up. */}
-      {verdict === "pass" &&
+          the synthetic buyer's objections as a heads-up. Keyed on the
+          RAW pass — override-promoted passes do not turn this advisory
+          card on for a brand that really failed Gate A/B/C. */}
+      {rawVerdict === "pass" &&
         rejectionRan &&
         !rejectionPassed &&
         rejection && (

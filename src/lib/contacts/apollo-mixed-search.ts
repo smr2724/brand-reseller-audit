@@ -37,6 +37,13 @@ export function buildApolloMixedSearchBody(
   for (const d of input.q_organization_domains ?? []) {
     body.append("q_organization_domains[]", d);
   }
+  // Phase 71 — q_keywords (free-text) lets the Gate C fallback
+  // disambiguate by name when the title-only search at a domain returns
+  // multiple candidates. Apollo accepts this as a scalar form field, not
+  // an array.
+  if (input.q_keywords && input.q_keywords.trim().length > 0) {
+    body.set("q_keywords", input.q_keywords.trim());
+  }
   return body;
 }
 
