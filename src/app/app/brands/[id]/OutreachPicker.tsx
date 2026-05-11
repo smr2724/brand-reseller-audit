@@ -19,6 +19,7 @@ interface VerifiedContact {
   last_name: string | null;
   full_name: string | null;
   title: string | null;
+  company_name: string | null;
   company_domain: string | null;
   email: string | null;
   email_status: string | null;
@@ -232,22 +233,24 @@ export default function OutreachPicker({ brandId }: { brandId: string }) {
     <div className="card p-4">
       <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
         <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Outreach</div>
-        <button
-          className="btn text-xs"
-          onClick={onSend}
-          disabled={!canSend}
-          title={
-            !outlookConnected
-              ? "Connect Outlook first"
-              : selectedCount === 0
-                ? "Pick at least one contact"
-                : "Create one Outlook draft per selected contact"
-          }
-        >
-          {sending && progress
-            ? `Sending… (${progress.done} of ${progress.total})`
-            : "Send to Outlook"}
-        </button>
+        {!empty && (
+          <button
+            className="btn text-xs"
+            onClick={onSend}
+            disabled={!canSend}
+            title={
+              !outlookConnected
+                ? "Connect Outlook first"
+                : selectedCount === 0
+                  ? "Pick at least one contact"
+                  : "Create one Outlook draft per selected contact"
+            }
+          >
+            {sending && progress
+              ? `Sending… (${progress.done} of ${progress.total})`
+              : "Send to Outlook"}
+          </button>
+        )}
       </div>
 
       {!outlookConnected && (
@@ -282,7 +285,7 @@ export default function OutreachPicker({ brandId }: { brandId: string }) {
               const checked = selected.has(c.id);
               const name = nameFor(c);
               const title = c.title ?? "";
-              const company = c.company_domain ?? "";
+              const company = c.company_name ?? c.company_domain ?? "";
               const titleLine = [title, company].filter(Boolean).join(", ");
               return (
                 <label
@@ -334,7 +337,7 @@ export default function OutreachPicker({ brandId }: { brandId: string }) {
             </li>
           ))}
           {persistedDraftLines.map((l) => (
-            <li key={l.id} className="text-[var(--text-muted)]">
+            <li key={l.id} className="text-[var(--text)]">
               • Sent to Outlook drafts: {l.name} ({fmtPT(l.ts)} PT)
             </li>
           ))}

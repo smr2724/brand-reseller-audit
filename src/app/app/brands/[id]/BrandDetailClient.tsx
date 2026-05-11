@@ -274,7 +274,7 @@ export default function BrandDetailClient({
         onRun={runScan}
       />
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card title="SmartScout signals">
           <Field label="Brand Score" v={formatNumber(brand.brand_score, { decimals: 2 })} />
           <Field label="Est Monthly Revenue" v={formatMoney(brand.est_monthly_revenue)} />

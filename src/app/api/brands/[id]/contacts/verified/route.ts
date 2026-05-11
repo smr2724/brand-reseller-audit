@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const CONTACT_SELECT =
-  "id, first_name, last_name, full_name, title, company_domain, email, email_status, email_verifier, email_verifier_score, is_primary, enrichment_state, created_at";
+  "id, first_name, last_name, full_name, title, company_name, company_domain, email, email_status, email_verifier, email_verifier_score, is_primary, enrichment_state, created_at";
 
 export async function GET(
   _req: Request,
