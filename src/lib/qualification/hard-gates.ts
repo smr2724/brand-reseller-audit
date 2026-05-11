@@ -339,7 +339,14 @@ export async function runHardGates(
     };
   }
 
-  // Stage 5 — rejection sim
+  // Stage 5 — rejection sim.
+  //
+  // Phase 71 — demoted from terminal hard-gate to advisory amber signal.
+  // When Pattern Prescreen + Gate A + Gate B + Gate C all pass, the brand
+  // passes hard gates regardless of the rejection sim outcome. The sim
+  // still runs, still writes its jsonb (with the new computed `severity`
+  // field), and the UI surfaces it in amber as a heads-up — but it does
+  // NOT flip hard_gate_verdict to hard_disqualify on its own.
   const rejection = await deps.simulateBuyerRejection({
     brand_name: input.brand_name,
     controlling_entity: controlling,
@@ -350,27 +357,7 @@ export async function runHardGates(
   totalTokensIn += rejection.tokens_in;
   totalTokensOut += rejection.tokens_out;
 
-  if (rejection.verdict === "do_not_pursue") {
-    return {
-      verdict: "hard_disqualify",
-      failure_gate: "rejection_sim",
-      failure_reason: rejection.rationale,
-      pattern: rejection.pattern,
-      prescreen,
-      gate_a: gateA,
-      gate_b: gateB,
-      gate_c: gateC,
-      rejection,
-      controlling_entity: controlling,
-      recoverable_to_controlling_ratio: gateB.ratio,
-      hierarchy_sources: gateA.sources,
-      total_cost_usd: totalCost,
-      total_tokens_in: totalTokensIn,
-      total_tokens_out: totalTokensOut,
-    };
-  }
-
-  // Pass.
+  // Pass — rejection sim does NOT veto when A/B/C all passed.
   return {
     verdict: "pass",
     failure_gate: null,

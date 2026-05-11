@@ -120,6 +120,8 @@ interface RejectionOutput {
   rejection_strength: number;
   verdict: "pursue_ok" | "do_not_pursue";
   rationale: string;
+  // Phase 71 — advisory severity for UI coloring (low/medium/high).
+  severity?: "low" | "medium" | "high";
 }
 
 interface QualificationRow {
@@ -978,12 +980,16 @@ function HardGateTrail({
 
   // Compute status per gate. ✓ when the gate ran and passed, ✗ when it
   // ran and failed, blank when it was skipped because an earlier gate
-  // short-circuited.
+  // short-circuited. Phase 71 supports an amber "[!]" advisory status
+  // for rejection-sim when Gate A/B/C passed but the synthetic buyer
+  // said do_not_pursue — it's a heads-up, not a block.
   function status(
     ran: boolean,
     passed: boolean,
     isFailureGate: boolean,
+    advisoryAmber: boolean = false,
   ): { icon: string; cls: string } {
+    if (advisoryAmber) return { icon: "!", cls: "text-amber-300" };
     if (isFailureGate) return { icon: "✗", cls: "text-red-300" };
     if (!ran) return { icon: " ", cls: "text-[var(--text-muted)] opacity-50" };
     if (passed) return { icon: "✓", cls: "text-green-300" };
@@ -1000,6 +1006,19 @@ function HardGateTrail({
   const gateCPassed = gateC?.passed === true;
   const rejectionRan = !!rejection;
   const rejectionPassed = rejection?.verdict === "pursue_ok";
+  // Phase 71 — rejection-sim advisory amber: hard_gate passed overall but
+  // the synthetic buyer said do_not_pursue. Severity 'high' or 'medium'
+  // gets the amber treatment; 'low' deemphasizes to muted gray.
+  const rejectionAdvisoryAmber =
+    verdict === "pass" &&
+    rejectionRan &&
+    !rejectionPassed &&
+    (rejection?.severity === "high" || rejection?.severity === "medium");
+  const rejectionAdvisoryLow =
+    verdict === "pass" &&
+    rejectionRan &&
+    !rejectionPassed &&
+    rejection?.severity === "low";
 
   const verdictLabel =
     verdict === "pass"
@@ -1082,6 +1101,7 @@ function HardGateTrail({
             rejectionRan,
             rejectionPassed,
             failureGate === "rejection_sim",
+            rejectionAdvisoryAmber,
           )}
           name="Rejection Simulation"
           detail={
@@ -1089,7 +1109,21 @@ function HardGateTrail({
               ? "skipped"
               : rejectionPassed
                 ? `hook ${rejection?.hook_strength}/10 > rejection ${rejection?.rejection_strength}/10 — pursue`
-                : `hook ${rejection?.hook_strength}/10 vs rejection ${rejection?.rejection_strength}/10 — buyer wins`
+                : `hook ${rejection?.hook_strength}/10 vs rejection ${rejection?.rejection_strength}/10 — advisory only`
+          }
+          labelCls={
+            rejectionAdvisoryAmber
+              ? "text-amber-300"
+              : rejectionAdvisoryLow
+                ? "text-[var(--text-muted)] opacity-70"
+                : undefined
+          }
+          detailCls={
+            rejectionAdvisoryAmber
+              ? "text-amber-200/80"
+              : rejectionAdvisoryLow
+                ? "text-[var(--text-muted)] opacity-70"
+                : undefined
           }
         />
       </div>
@@ -1101,8 +1135,18 @@ function HardGateTrail({
       {failureGate === "gate_b" && gateB && <RatioBar gateB={gateB} />}
       {failureGate === "gate_c" && gateC && <SearchTrailCard gateC={gateC} />}
       {failureGate === "rejection_sim" && rejection && (
-        <RejectionDetailCard rejection={rejection} />
+        <RejectionDetailCard rejection={rejection} advisory={false} />
       )}
+      {/* Phase 71 — rejection sim is no longer a terminal hard gate when
+          A/B/C all pass. Render the advisory panel in amber (high/medium
+          severity) or muted gray (low severity) so the analyst still sees
+          the synthetic buyer's objections as a heads-up. */}
+      {verdict === "pass" &&
+        rejectionRan &&
+        !rejectionPassed &&
+        rejection && (
+          <RejectionDetailCard rejection={rejection} advisory={true} />
+        )}
 
       {verdict === "needs_review" && !overrideApplied && (
         <div className="mt-3 flex items-center justify-between gap-3 p-2 rounded border border-amber-700 bg-amber-900/20">
@@ -1128,11 +1172,15 @@ function GateRow({
   name,
   detail,
   sourcesLine,
+  labelCls,
+  detailCls,
 }: {
   status: { icon: string; cls: string };
   name: string;
   detail: string;
   sourcesLine?: string | null;
+  labelCls?: string;
+  detailCls?: string;
 }) {
   return (
     <div>
@@ -1140,8 +1188,12 @@ function GateRow({
         <span className={`inline-block w-5 text-center ${status.cls}`}>
           [{status.icon}]
         </span>
-        <span className="font-semibold min-w-[200px] inline-block">{name}</span>
-        <span className="text-[var(--text-muted)]">{detail}</span>
+        <span
+          className={`font-semibold min-w-[200px] inline-block ${labelCls ?? ""}`}
+        >
+          {name}
+        </span>
+        <span className={detailCls ?? "text-[var(--text-muted)]"}>{detail}</span>
       </div>
       {sourcesLine && (
         <div className="ml-7 text-[var(--text-muted)] opacity-80">
@@ -1250,22 +1302,73 @@ function SearchTrailCard({ gateC }: { gateC: GateCOutput }) {
   );
 }
 
-function RejectionDetailCard({ rejection }: { rejection: RejectionOutput }) {
+function RejectionDetailCard({
+  rejection,
+  advisory,
+}: {
+  rejection: RejectionOutput;
+  advisory: boolean;
+}) {
   const hookPct = (rejection.hook_strength / 10) * 100;
   const rejPct = (rejection.rejection_strength / 10) * 100;
+
+  // Phase 71 — advisory mode (Gate A/B/C all passed but synthetic buyer
+  // said do_not_pursue) renders amber when severity is high/medium and
+  // muted gray when severity is low. The terminal-failure mode (rejection
+  // was the hard-disqualify reason — legacy backfill rows only) keeps the
+  // original red treatment.
+  const severity = rejection.severity ?? "high";
+  const amber = advisory && (severity === "high" || severity === "medium");
+  const lowAdvisory = advisory && severity === "low";
+
+  const containerCls = advisory
+    ? amber
+      ? "border-amber-700/60 bg-amber-950/30"
+      : "border-[var(--border-soft)] bg-[var(--surface-2,rgba(255,255,255,0.04))] opacity-90"
+    : "border-red-700/60 bg-red-900/20";
+  const headerCls = amber
+    ? "text-amber-300"
+    : lowAdvisory
+      ? "text-[var(--text-muted)]"
+      : "text-red-300";
+  const lineCls = amber
+    ? "text-amber-100"
+    : lowAdvisory
+      ? "text-[var(--text-muted)]"
+      : "text-red-100";
+  const labelCls = amber
+    ? "text-amber-300/80"
+    : lowAdvisory
+      ? "text-[var(--text-muted)]"
+      : "text-red-300/80";
+  const rationaleCls = amber
+    ? "text-amber-200/80"
+    : lowAdvisory
+      ? "text-[var(--text-muted)]"
+      : "text-red-200/80";
+  const rejBarCls = amber
+    ? "bg-amber-500/70"
+    : lowAdvisory
+      ? "bg-[var(--text-muted)] opacity-70"
+      : "bg-red-500/70";
+
+  const title = advisory
+    ? amber
+      ? "ADVISORY ONLY — pursue with caution"
+      : "Buyer rejection (low severity — advisory only)"
+    : `Buyer rejection (verdict: ${rejection.verdict.replace(/_/g, " ")})`;
+
   return (
-    <div className="mt-3 rounded border border-red-700/60 bg-red-900/20 p-3">
-      <div className="text-xs uppercase text-red-300 mb-2">
-        Buyer rejection (verdict: {rejection.verdict.replace(/_/g, " ")})
-      </div>
-      <ul className="space-y-1 text-sm text-red-100 mb-3">
+    <div className={`mt-3 rounded border p-3 ${containerCls}`}>
+      <div className={`text-xs uppercase mb-2 ${headerCls}`}>{title}</div>
+      <ul className={`space-y-1 text-sm mb-3 ${lineCls}`}>
         {rejection.rejection_lines.map((line, i) => (
           <li key={i}>&ldquo;{line}&rdquo;</li>
         ))}
       </ul>
       <div className="grid grid-cols-2 gap-3 text-xs">
         <div>
-          <div className="text-red-300/80 mb-1">
+          <div className={`mb-1 ${labelCls}`}>
             Hook strength: {rejection.hook_strength}/10
           </div>
           <div className="h-2 bg-[var(--surface-2,rgba(255,255,255,0.06))] rounded">
@@ -1276,20 +1379,26 @@ function RejectionDetailCard({ rejection }: { rejection: RejectionOutput }) {
           </div>
         </div>
         <div>
-          <div className="text-red-300/80 mb-1">
+          <div className={`mb-1 ${labelCls}`}>
             Rejection strength: {rejection.rejection_strength}/10
           </div>
           <div className="h-2 bg-[var(--surface-2,rgba(255,255,255,0.06))] rounded">
             <div
-              className="h-2 bg-red-500/70 rounded"
+              className={`h-2 rounded ${rejBarCls}`}
               style={{ width: `${rejPct}%` }}
             />
           </div>
         </div>
       </div>
       {rejection.rationale && (
-        <div className="text-xs text-red-200/80 mt-3 italic">
+        <div className={`text-xs mt-3 italic ${rationaleCls}`}>
           {rejection.rationale}
+        </div>
+      )}
+      {advisory && (
+        <div className={`text-[11px] mt-3 italic ${rationaleCls}`}>
+          This is a synthetic LLM roleplay, not real buyer feedback. Use it as
+          a heads-up on objections to prepare for — it does not block the deal.
         </div>
       )}
     </div>

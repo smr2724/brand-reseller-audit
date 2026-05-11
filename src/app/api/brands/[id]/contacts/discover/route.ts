@@ -17,6 +17,7 @@ import {
   createSupabaseServerClient,
 } from "@/lib/supabase/server";
 import { runContactDiscovery } from "@/lib/contacts/orchestrate";
+import { effectiveVerdict } from "@/lib/qualification/verdict";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -147,10 +148,11 @@ export async function POST(
   }
   const { data: qual } = await admin
     .from("brand_qualifications")
-    .select("icp_verdict, manual_override, state")
+    .select("icp_verdict, hard_gate_verdict, manual_override, state")
     .eq("brand_id", params.id)
     .maybeSingle<{
-      icp_verdict: string;
+      icp_verdict: "qualified" | "disqualified" | "needs_review";
+      hard_gate_verdict: "pass" | "hard_disqualify" | "needs_review" | null;
       manual_override: boolean;
       state: string;
     }>();
@@ -167,10 +169,11 @@ export async function POST(
       { status: 400 },
     );
   }
+  // Phase 71 — read the EFFECTIVE verdict. manual_override forces
+  // qualified+pass; otherwise raw fields pass through.
+  const eff = effectiveVerdict(qual);
   const allowed =
-    qual.icp_verdict === "qualified" ||
-    qual.icp_verdict === "needs_review" ||
-    qual.manual_override === true;
+    eff.icp_verdict === "qualified" || eff.icp_verdict === "needs_review";
   if (!allowed && !force) {
     return NextResponse.json(
       {

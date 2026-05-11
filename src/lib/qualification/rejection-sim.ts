@@ -22,6 +22,7 @@ import type { ControllingEntity } from "./hierarchy";
 import type { GateCPerson } from "./gate-c";
 
 export type RejectionVerdict = "pursue_ok" | "do_not_pursue";
+export type RejectionSeverity = "low" | "medium" | "high";
 
 export interface RejectionSimResult {
   rejection_lines: string[];
@@ -30,9 +31,33 @@ export interface RejectionSimResult {
   verdict: RejectionVerdict;
   rationale: string;
   pattern: string | null;
+  /**
+   * Phase 71 — advisory severity for UI coloring. Computed from
+   * (hook_strength, rejection_strength):
+   *   high   → rejection_strength >= 7 AND hook_strength <= rejection_strength - 2
+   *   medium → rejection_strength >= 5 AND hook_strength < rejection_strength
+   *   low    → otherwise (deemphasize)
+   */
+  severity: RejectionSeverity;
   cost_usd: number;
   tokens_in: number;
   tokens_out: number;
+}
+
+/**
+ * Phase 71 — compute the advisory severity bucket for UI coloring.
+ */
+export function computeRejectionSeverity(
+  hook_strength: number,
+  rejection_strength: number,
+): RejectionSeverity {
+  if (rejection_strength >= 7 && hook_strength <= rejection_strength - 2) {
+    return "high";
+  }
+  if (rejection_strength >= 5 && hook_strength < rejection_strength) {
+    return "medium";
+  }
+  return "low";
 }
 
 export interface RejectionSimInput {
@@ -95,6 +120,7 @@ export async function simulateBuyerRejection(
       verdict: "do_not_pursue",
       rationale: "LLM call failed; defaulted to do_not_pursue for safety.",
       pattern: "buyer_rejection_wins",
+      severity: computeRejectionSeverity(0, 10),
       cost_usd: 0,
       tokens_in: 0,
       tokens_out: 0,
@@ -130,7 +156,11 @@ export async function simulateBuyerRejection(
     rejection_strength: rejection,
     verdict: finalVerdict,
     rationale: String(parsed.rationale ?? "").slice(0, 800),
+    // Phase 71 — pattern is preserved for backfill compatibility (widened
+    // enum still accepts 'buyer_rejection_wins') but the hard-gates
+    // evaluator no longer propagates it when Gate A/B/C all passed.
     pattern: finalVerdict === "do_not_pursue" ? "buyer_rejection_wins" : null,
+    severity: computeRejectionSeverity(hook, rejection),
     cost_usd: llm.cost_usd,
     tokens_in: llm.tokens_in,
     tokens_out: llm.tokens_out,
