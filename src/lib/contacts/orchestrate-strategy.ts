@@ -18,6 +18,7 @@
  * verdict='error' on the persisted row rather than a silent 500.
  */
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { effectiveVerdict } from "@/lib/qualification/verdict";
 import { classifyTier, gatherSizeSignals } from "./size-tier";
 import { runContactStrategyLLM, computeStrategyVerdict } from "./strategy";
 import { apolloMixedPeopleSearch } from "./apollo-mixed-search";
@@ -251,14 +252,21 @@ async function buildContactStrategyInner(
     };
   }
 
-  // Phase 68 strict gate: hard_gate_verdict must be 'pass'. The earlier
-  // icp_verdict='qualified' fallback was removed because that's exactly
-  // the population that hasn't been re-qualified under Phase 68 — we
-  // don't want those to leak through.
-  const hardGate = (qual as any).hard_gate_verdict ?? null;
-  if (hardGate !== "pass") {
+  // Phase 71 — read the EFFECTIVE verdict so a manual override propagates
+  // through to Contact Strategy. Preserves the Phase 69 server-side hard
+  // gate bypass safety: we still refuse when the effective
+  // hard_gate_verdict isn't 'pass'. The override path forces
+  // hard_gate_verdict='pass'; raw 'qualified' icp_verdict alone cannot
+  // bypass a 'hard_disqualify' hard gate.
+  const rawHardGate = (qual as any).hard_gate_verdict ?? null;
+  const eff = effectiveVerdict({
+    icp_verdict: (qual as any).icp_verdict ?? null,
+    hard_gate_verdict: rawHardGate,
+    manual_override: (qual as any).manual_override === true,
+  });
+  if (eff.hard_gate_verdict !== "pass") {
     const reason =
-      hardGate == null
+      rawHardGate == null
         ? "Brand must be re-qualified under Phase 68 hard gates before contact strategy can run. Re-trigger qualification first."
         : 'Brand not qualified — hard_gate_verdict is not "pass".';
     return {

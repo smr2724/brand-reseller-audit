@@ -82,6 +82,10 @@ export interface ApolloMixedSearchInput {
   person_titles: string[];
   person_seniorities?: string[];
   person_departments?: string[];
+  /** Phase 71 — free-text keywords passed to Apollo's mixed_people/search
+   *  `q_keywords` filter. Used to seed Gate C name disambiguation when
+   *  searching by title at a domain returns multiple candidates. */
+  q_keywords?: string;
   page?: number;
   per_page?: number;
 }

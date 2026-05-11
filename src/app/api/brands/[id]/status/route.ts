@@ -10,6 +10,7 @@
  */
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { effectiveVerdict } from "@/lib/qualification/verdict";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -45,6 +46,8 @@ interface QualRow {
   state: string | null;
   selected_entity: unknown;
   icp_verdict: string | null;
+  hard_gate_verdict: string | null;
+  manual_override: boolean | null;
   narrative_markdown: string | null;
   error_message: string | null;
   updated_at: string | null;
@@ -73,7 +76,16 @@ function resolveStep(
   const enr = brand.enrichment_state ?? "pending";
   const qualState = brand.qualification_state ?? "pending";
   const contactsState = brand.contacts_state ?? "pending";
-  const verdict = qual?.icp_verdict ?? null;
+  // Phase 71 — read the EFFECTIVE verdict so an active override stops
+  // suppressing the contact-discovery row. Without this, the status
+  // endpoint keeps claiming "disqualified" post-override.
+  const verdict: string | null = qual
+    ? effectiveVerdict({
+        icp_verdict: qual.icp_verdict as any,
+        hard_gate_verdict: qual.hard_gate_verdict as any,
+        manual_override: qual.manual_override,
+      }).icp_verdict
+    : null;
   // Phase 52: contact discovery is only auto-run on qualified brands.
   // For disqualified / needs_review / override_disqualified verdicts the
   // user manually clicks "Discover" — so a contacts_state='pending' row
@@ -266,7 +278,7 @@ export async function GET(
   const { data: qual } = await supabase
     .from("brand_qualifications")
     .select(
-      "state, selected_entity, icp_verdict, narrative_markdown, error_message, updated_at, created_at",
+      "state, selected_entity, icp_verdict, hard_gate_verdict, manual_override, narrative_markdown, error_message, updated_at, created_at",
     )
     .eq("brand_id", params.id)
     .maybeSingle<QualRow>();
@@ -297,7 +309,14 @@ export async function GET(
   // Phase 52: contact discovery is opt-in (manual click) when the brand
   // is disqualified / needs_review / override_disqualified. The client
   // uses this flag to suppress the "Contact discovery" row in those cases.
-  const verdict = qual?.icp_verdict ?? null;
+  // Phase 71 — read the EFFECTIVE verdict so override flips the badge.
+  const verdict: string | null = qual
+    ? effectiveVerdict({
+        icp_verdict: qual.icp_verdict as any,
+        hard_gate_verdict: qual.hard_gate_verdict as any,
+        manual_override: qual.manual_override,
+      }).icp_verdict
+    : null;
   const contactsAutoSkipped =
     (brand.qualification_state ?? "pending") === "complete" &&
     (brand.contacts_state ?? "pending") === "pending" &&

@@ -38,8 +38,25 @@ import { readPatternCache, writePatternCache } from "./pattern";
 import { recordDiscoveryEvent } from "./events";
 import { rankCandidates } from "./rank";
 import { enrichSingleContact } from "./enrich-contact";
+import { seedFromGateC, type GateCPersonSeed } from "./gate-c-seed";
+import { verifyEmail } from "./email-verify";
 
 const SEARCH_TITLES = ["founder", "ceo", "president", "owner"];
+
+interface GateCJson {
+  passed?: boolean;
+  person?: {
+    full_name?: string | null;
+    first_name?: string | null;
+    last_name?: string | null;
+    title?: string | null;
+    linkedin_url?: string | null;
+  } | null;
+}
+
+interface GateAJson {
+  controlling_entity?: { domain?: string | null } | null;
+}
 
 export interface RunContactDiscoveryResult {
   ok: boolean;
@@ -143,12 +160,23 @@ export async function runContactDiscovery(
 
   const { data: qual } = await admin
     .from("brand_qualifications")
-    .select("id, selected_entity")
+    .select(
+      "id, selected_entity, gate_c_named_decision_maker, gate_a_corporate_hierarchy",
+    )
     .eq("brand_id", brandId)
-    .maybeSingle<{ id: string; selected_entity: { evidence_url?: string } | null }>();
+    .maybeSingle<{
+      id: string;
+      selected_entity: { evidence_url?: string } | null;
+      gate_c_named_decision_maker: GateCJson | null;
+      gate_a_corporate_hierarchy: GateAJson | null;
+    }>();
 
+  const gateCJson = qual?.gate_c_named_decision_maker ?? null;
+  const gateADomain =
+    qual?.gate_a_corporate_hierarchy?.controlling_entity?.domain ?? null;
   const domain =
     extractDomain(brand.resolved_owner_domain) ||
+    extractDomain(gateADomain) ||
     extractDomain(qual?.selected_entity?.evidence_url ?? null);
   if (!domain) {
     await recordDiscoveryEvent({
@@ -159,6 +187,281 @@ export async function runContactDiscovery(
       reason: "No domain resolved for brand — set resolved_owner_domain or selected_entity.evidence_url.",
     });
     return await markError(brandId, "no domain resolved for brand", runId);
+  }
+
+  // 1b. Phase 71 — Gate C decision-maker seeding.
+  //
+  // When Gate C (Phase 68) named a specific human, that person is the
+  // highest-confidence seed for enrichment. We attempt Apollo
+  // /people/match keyed on LinkedIn URL → Apollo mixed_people/search
+  // seeded with the Gate C title → Hunter email-finder. On a hit we
+  // write the contact straight into brand_contacts (verified via MV)
+  // and skip the generic founder/CEO title scan below. On a full miss
+  // we log NEEDS_HUMAN_REVIEW so the Contact Strategy UI surfaces the
+  // specific copy ("Gate C identified X but we couldn't find their
+  // email via Apollo or Hunter").
+  let gateCSeededPrimaryId: string | null = null;
+  let gateCMissed = false;
+  let gateCMissedReason: string | null = null;
+  const gateCPerson: GateCPersonSeed | null =
+    gateCJson?.passed === true && gateCJson?.person
+      ? {
+          full_name: gateCJson.person.full_name ?? null,
+          first_name: gateCJson.person.first_name ?? null,
+          last_name: gateCJson.person.last_name ?? null,
+          title: gateCJson.person.title ?? null,
+          linkedin_url: gateCJson.person.linkedin_url ?? null,
+        }
+      : null;
+
+  if (gateCPerson) {
+    const seed = await seedFromGateC({
+      person: gateCPerson,
+      brand_name: brand.name,
+      domain,
+    });
+
+    if (seed.provider === "needs_review") {
+      gateCMissed = true;
+      gateCMissedReason = seed.reason;
+      await recordDiscoveryEvent({
+        brand_id: brandId,
+        run_id: runId,
+        provider: "orchestrator",
+        outcome: "not_found",
+        reason: `gate_c_needs_review: ${seed.reason}`,
+      });
+    } else if (seed.person) {
+      // Verify via MillionVerifier when we have an email.
+      let verifyStatus: string | null = null;
+      let verifyScore: number | null = null;
+      let verifierName: "millionverifier" | "zerobounce" | "none" | null =
+        null;
+      let emailVerifiedAt: string | null = null;
+      if (seed.person.email) {
+        const v = await verifyEmail(seed.person.email).catch(() => null);
+        if (v) {
+          verifyStatus = v.status;
+          verifyScore = typeof v.score === "number" ? v.score : null;
+          verifierName = v.verifier;
+          emailVerifiedAt = new Date().toISOString();
+          await recordDiscoveryEvent({
+            brand_id: brandId,
+            run_id: runId,
+            provider: "millionverifier",
+            outcome:
+              v.status === "verified" || v.status === "likely"
+                ? "found"
+                : v.status === "invalid"
+                  ? "not_found"
+                  : "skipped",
+            reason: `MillionVerifier verdict ${v.status} for ${seed.person.email}.`,
+            status_returned: v.status,
+            score_returned:
+              typeof v.score === "number" ? v.score : null,
+          });
+        }
+      }
+
+      // Phase 65 — trust the bounce signal: downgrade to invalid when
+      // MillionVerifier said so.
+      const isVerified = verifyStatus === "verified";
+      const finalStatus =
+        verifyStatus === "verified"
+          ? "verified"
+          : verifyStatus === "likely"
+            ? "likely"
+            : verifyStatus === "invalid"
+              ? "invalid"
+              : verifyStatus === "risky"
+                ? "risky"
+                : verifyStatus === "catch_all"
+                  ? "catch_all"
+                  : seed.person.email
+                    ? "unknown"
+                    : "unknown";
+
+      const fullName =
+        (seed.person.name ??
+          `${seed.person.first_name ?? ""} ${seed.person.last_name ?? ""}`.trim()) ||
+        gateCPerson.full_name ||
+        "(unnamed)";
+
+      // Sticky-merge protection — Phase 47/61 invariant: rows with
+      // `email_source='manual'` OR `ready_to_send=true` are user-pinned
+      // and survive re-discovery. Look up any existing sticky primary
+      // before we touch is_primary on anything; if one exists for a
+      // DIFFERENT person, the new Gate C row goes in as is_primary=false
+      // so we don't clobber the user's pin.
+      const { data: existingRowsForBrand } = await admin
+        .from("brand_contacts")
+        .select("id, full_name, email_source, is_primary, ready_to_send")
+        .eq("brand_id", brandId);
+      const existingList = (existingRowsForBrand ?? []) as Array<{
+        id: string;
+        full_name: string | null;
+        email_source: string | null;
+        is_primary: boolean | null;
+        ready_to_send: boolean | null;
+      }>;
+      const stickyPrimary = existingList.find(
+        (r) =>
+          r.is_primary === true &&
+          (r.email_source === "manual" || r.ready_to_send === true),
+      );
+      const stickyPrimaryMatchesGateC =
+        !!stickyPrimary &&
+        (stickyPrimary.full_name ?? "").trim().toLowerCase() ===
+          fullName.trim().toLowerCase();
+
+      // Demote existing primaries — but NEVER touch user-pinned rows
+      // (manual or ready_to_send=true).
+      await admin
+        .from("brand_contacts")
+        .update({ is_primary: false, updated_at: new Date().toISOString() })
+        .eq("brand_id", brandId)
+        .neq("email_source", "manual")
+        .neq("ready_to_send", true);
+
+      // Sticky-merge: prefer updating an existing row that matches by
+      // full_name (case-insensitive) so we don't duplicate the row.
+      const existingForName =
+        existingList.find(
+          (r) =>
+            (r.full_name ?? "").trim().toLowerCase() ===
+            fullName.trim().toLowerCase(),
+        ) ?? null;
+
+      // Promote the Gate C row to primary only when no sticky-pinned
+      // OTHER person owns the slot already. If the sticky primary is
+      // the same Gate C person, we still want is_primary=true (which
+      // it already is on the sticky row).
+      const wantPrimary = !stickyPrimary || stickyPrimaryMatchesGateC;
+
+      const baseFields: Record<string, unknown> = {
+        brand_id: brandId,
+        qualification_id: qual?.id ?? null,
+        full_name: fullName,
+        first_name: seed.person.first_name ?? gateCPerson.first_name,
+        last_name: seed.person.last_name ?? gateCPerson.last_name,
+        title: seed.person.title ?? gateCPerson.title,
+        linkedin_url: seed.person.linkedin_url ?? gateCPerson.linkedin_url,
+        company_domain: domain,
+        apollo_person_id: seed.person.id?.startsWith("hunter:")
+          ? null
+          : seed.person.id || null,
+        email: seed.person.email,
+        email_source: seed.person.email ? seed.email_source : null,
+        email_status: finalStatus,
+        email_verifier: verifierName,
+        email_verifier_score: verifyScore,
+        email_verified_at: emailVerifiedAt,
+        is_primary: wantPrimary,
+        ready_to_send: isVerified,
+        enrichment_state: "enriched",
+        raw_apollo_match: seed.person,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (existingForName?.id) {
+        // Existing row matches Gate C person by name. If that row is
+        // user-pinned (manual or ready_to_send), do NOT overwrite the
+        // user-edited fields — only refresh metadata + enrichment state.
+        const existingIsSticky =
+          existingForName.email_source === "manual" ||
+          existingForName.ready_to_send === true;
+        const updateFields: Record<string, unknown> = existingIsSticky
+          ? {
+              full_name: fullName,
+              first_name: baseFields.first_name,
+              last_name: baseFields.last_name,
+              title: baseFields.title,
+              linkedin_url: baseFields.linkedin_url,
+              company_domain: baseFields.company_domain,
+              apollo_person_id: baseFields.apollo_person_id,
+              raw_apollo_match: baseFields.raw_apollo_match,
+              enrichment_state: "enriched",
+              updated_at: baseFields.updated_at,
+            }
+          : baseFields;
+        const { data: upd } = await admin
+          .from("brand_contacts")
+          .update(updateFields)
+          .eq("id", existingForName.id)
+          .eq("brand_id", brandId)
+          .select("id")
+          .maybeSingle();
+        gateCSeededPrimaryId = upd?.id ?? null;
+      } else {
+        const { data: ins } = await admin
+          .from("brand_contacts")
+          .insert(baseFields)
+          .select("id")
+          .maybeSingle();
+        gateCSeededPrimaryId = ins?.id ?? null;
+      }
+
+      // Telemetry: provider+reason per spec.
+      const eventProvider =
+        seed.provider === "apollo_linkedin_match" ||
+        seed.provider === "apollo_mixed_search"
+          ? "apollo_match"
+          : "hunter_finder";
+      const eventReason =
+        seed.provider === "apollo_linkedin_match"
+          ? "gate_c_linkedin_match"
+          : seed.provider === "apollo_mixed_search"
+            ? "gate_c_mixed_search"
+            : "gate_c_hunter_finder";
+      await recordDiscoveryEvent({
+        brand_id: brandId,
+        run_id: runId,
+        contact_id: gateCSeededPrimaryId,
+        provider: eventProvider,
+        outcome: seed.person.email ? "found" : "not_found",
+        reason: `${eventReason}: ${fullName}${seed.person.title ? ` (${seed.person.title})` : ""}.`,
+        email_returned: seed.person.email ?? null,
+      });
+
+      // Skip the generic founder/CEO scan: the Gate C person IS the
+      // primary, and we don't silently fall back to title-scanning per
+      // Phase 71 spec.
+      await admin
+        .from("brands")
+        .update({
+          contacts_state: "complete",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", brandId);
+      return {
+        ok: true,
+        state: "complete",
+        contact_count: 1,
+        primary_id: gateCSeededPrimaryId,
+        run_id: runId,
+      };
+    }
+  }
+
+  // Phase 71 — When Gate C found a person but Apollo+Hunter all missed
+  // their email, surface NEEDS_HUMAN_REVIEW. Do NOT silently fall back
+  // to a generic CEO/founder title scan.
+  if (gateCMissed) {
+    await admin
+      .from("brands")
+      .update({
+        contacts_state: "complete",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", brandId);
+    return {
+      ok: true,
+      state: "complete",
+      contact_count: 0,
+      primary_id: null,
+      run_id: runId,
+      error: gateCMissedReason ?? undefined,
+    };
   }
 
   // 2. Apollo search.
