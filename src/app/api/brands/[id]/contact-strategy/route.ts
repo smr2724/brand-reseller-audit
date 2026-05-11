@@ -65,7 +65,22 @@ export async function GET(
     .limit(1)
     .maybeSingle();
 
-  return NextResponse.json({ strategy: strategy ?? null });
+  // Phase 72 — surface qualification.updated_at alongside the strategy
+  // row so the UI can flag a stale strategy (strategy.created_at <
+  // qualification.updated_at → "Qualification updated — re-run contact
+  // strategy" banner).
+  const { data: qual } = await supabase
+    .from("brand_qualifications")
+    .select("updated_at")
+    .eq("brand_id", params.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle<{ updated_at: string | null }>();
+
+  return NextResponse.json({
+    strategy: strategy ?? null,
+    qualification_updated_at: qual?.updated_at ?? null,
+  });
 }
 
 export async function POST(

@@ -66,6 +66,10 @@ interface StrategyRow {
 
 interface ApiResponse {
   strategy: StrategyRow | null;
+  // Phase 72 — when set, the most-recent qualification was updated
+  // after the cached strategy was written. The UI shows a "re-run
+  // contact strategy" banner so reviewers don't act on stale data.
+  qualification_updated_at?: string | null;
 }
 
 interface RunResponse {
@@ -98,6 +102,7 @@ function formatRevenue(n: number | null): string {
 
 export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
   const [strategy, setStrategy] = useState<StrategyRow | null>(null);
+  const [qualUpdatedAt, setQualUpdatedAt] = useState<string | null>(null);
   const [ranked, setRanked] = useState<RunResponse["ranked"]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [running, setRunning] = useState<boolean>(false);
@@ -112,10 +117,12 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
       });
       if (!r.ok) {
         setStrategy(null);
+        setQualUpdatedAt(null);
         return;
       }
       const j = (await r.json()) as ApiResponse;
       setStrategy(j.strategy);
+      setQualUpdatedAt(j.qualification_updated_at ?? null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -195,10 +202,35 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
   const ready = strategy.verdict === "ready";
   const errorVerdict = strategy.verdict === "error";
 
+  // Phase 72 — show a banner when qualification was updated after the
+  // displayed strategy row was written. Cheap timestamp compare; the
+  // server-side qualification re-run also DELETEs the stale row so a
+  // page reload will trigger a fresh strategy run, but if the user
+  // is still on the page when re-qualification finishes elsewhere we
+  // want them to see the staleness flag without a hard refresh.
+  const strategyStale =
+    !!qualUpdatedAt &&
+    !!strategy.created_at &&
+    Date.parse(strategy.created_at) < Date.parse(qualUpdatedAt);
+
   const rankedDisplay = (ranked ?? []).slice(0, 5);
 
   return (
     <div className="card p-4 mb-4">
+      {strategyStale && (
+        <div className="mb-3 p-2 rounded border border-amber-700 bg-amber-950/40 text-xs flex items-center justify-between gap-2">
+          <span className="text-amber-100">
+            Qualification updated — re-run contact strategy
+          </span>
+          <button
+            className="btn"
+            onClick={() => void run()}
+            disabled={running}
+          >
+            {running ? "Running…" : "Re-run"}
+          </button>
+        </div>
+      )}
       <div className="flex items-center justify-between gap-3 mb-2">
         <div>
           <div className="text-sm font-semibold">Contact Strategy</div>

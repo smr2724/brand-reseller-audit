@@ -31,6 +31,14 @@ export interface NamedCandidate {
   reason: string;
   can_sign_50k: boolean;
   personal_stake: PersonalStake;
+  // Phase 72 — optional Gate C provenance fields. Present on candidates
+  // seeded from gate_c_named_decision_maker; absent on LLM-named candidates.
+  full_name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  source?: "gate_c" | "llm" | null;
+  confidence_seed?: "high" | "medium" | "low" | null;
+  evidence_sources?: string[] | null;
 }
 
 export interface SizeSignals {
