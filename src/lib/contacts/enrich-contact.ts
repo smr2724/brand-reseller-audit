@@ -142,6 +142,14 @@ export async function enrichSingleContact(
   let raw_hunter: unknown = null;
   let verify: VerifyResult | null = null;
   let emailStatus: EnrichEmailStatus = "not_found";
+  // Phase 64 — track Apollo's own verdict separately. If Apollo says
+  // "verified", that is the authoritative ground truth: MillionVerifier
+  // /  ZeroBounce returning `unknown` later means the verifier is
+  // uncertain, NOT that Apollo's answer is wrong. We must NOT downgrade
+  // a verified-by-Apollo email to status='unknown' / 'not_found' on the
+  // back of an inconclusive verifier. We still persist the verifier
+  // score so the operator can see the verifier was inconclusive.
+  let apolloVerified = false;
 
   // 1. Apollo unlock.
   const unlock = await apolloUnlockPerson({
@@ -175,8 +183,19 @@ export async function enrichSingleContact(
     );
     if (matchedEmail) {
       email = matchedEmail;
-      email_source = "apollo_match";
-      emailStatus = apolloMapped === "found" ? "verified" : "guessed";
+      // Phase 64 — write the constraint-allowed 'apollo' value to
+      // brand_contacts.email_source. The DB CHECK declared in migration
+      // 0040 does NOT include 'apollo_match', so writing 'apollo_match'
+      // here was the root cause of the persistence failure: Postgres
+      // rejected the update, leaving email/email_source/last_name as
+      // null while the audit events still logged success. The Phase
+      // 63 'apollo_match' provider tag survives unchanged on
+      // brand_contact_discovery_events (provider CHECK there does
+      // allow it) — only the brand_contacts column value moves to the
+      // permitted enum.
+      email_source = "apollo";
+      apolloVerified = apolloMapped === "found";
+      emailStatus = apolloVerified ? "verified" : "guessed";
       await recordDiscoveryEvent({
         brand_id,
         run_id,
@@ -373,15 +392,51 @@ export async function enrichSingleContact(
   // 4. Verify whatever email we have.
   if (email) {
     verify = await verifyEmail(email);
-    emailStatus = mapVerifyStatus(verify.status);
+    const verifierStatus = mapVerifyStatus(verify.status);
+    // Phase 64 — don't downgrade an Apollo-verified email to
+    // 'unknown' / 'not_found' just because the verifier was
+    // inconclusive. If Apollo said 'verified', keep emailStatus
+    // 'verified' (we still persist the verifier score so the operator
+    // can see the verifier disagreed). If Apollo said 'guessed', keep
+    // 'guessed' on inconclusive verifier — but a definite negative
+    // verifier verdict (invalid / risky) DOES override Apollo's
+    // optimism. catch_all / unknown are inconclusive and must not
+    // downgrade.
+    const verifierIsDefiniteNegative =
+      verify.status === "invalid" || verify.status === "risky";
+    const verifierIsInconclusive =
+      verify.status === "unknown" ||
+      verify.status === "catch_all" ||
+      verify.verifier === "none";
+    if (verifierIsDefiniteNegative) {
+      emailStatus = verifierStatus;
+    } else if (apolloVerified && verifierIsInconclusive) {
+      // Keep emailStatus = 'verified' from Apollo.
+    } else if (apolloVerified) {
+      // Verifier returned 'verified' / 'likely' — still verified.
+      emailStatus = "verified";
+    } else {
+      // Apollo wasn't a definite verified, defer to the verifier
+      // (but its 'unknown' just means 'guessed', not 'not_found').
+      emailStatus = verifierIsInconclusive ? "guessed" : verifierStatus;
+    }
     const isMv = verify.verifier === "millionverifier";
     const isZb = verify.verifier === "zerobounce";
-    const mvOutcome: "found" | "skipped" = isMv ? "found" : "skipped";
-    const mvReason = isMv
-      ? `MillionVerifier: ${verify.status}${typeof verify.score === "number" ? ` (score ${verify.score.toFixed(2)})` : ""} for ${email}.`
+    // Phase 64 — when MV returned 'unknown' / 'catch_all' AND we then
+    // called ZB, `verify.verifier` is "zerobounce" (ZB's verdict won)
+    // but we still want to record what MV said. The new mv_raw /
+    // mv_status fields on VerifyResult carry the MV response forward.
+    const mvCalled =
+      isMv || verify.mv_raw != null || verify.mv_status !== undefined;
+    const mvStatus = isMv
+      ? verify.status
+      : (verify.mv_status ?? null);
+    const mvOutcome: "found" | "skipped" = mvCalled ? "found" : "skipped";
+    const mvReason = mvCalled
+      ? `MillionVerifier: ${mvStatus ?? "unknown"} for ${email}${isMv && typeof verify.score === "number" ? ` (score ${verify.score.toFixed(2)})` : ""}${isZb ? "; fell through to ZeroBounce" : ""}.`
       : verify.verifier === "none"
         ? `MillionVerifier: skipped — provider unavailable or unconfigured.`
-        : `MillionVerifier: ${verify.status === "catch_all" || verify.status === "unknown" ? `returned ${verify.status}, deferred to ZeroBounce` : "skipped"}.`;
+        : `MillionVerifier: skipped.`;
     await recordDiscoveryEvent({
       brand_id,
       run_id,
@@ -390,17 +445,22 @@ export async function enrichSingleContact(
       outcome: mvOutcome,
       reason: mvReason,
       email_returned: email,
-      status_returned: isMv ? verify.status : null,
+      status_returned: mvStatus,
       score_returned:
         isMv && typeof verify.score === "number" ? clampScore(verify.score) : null,
-      raw_payload: isMv ? verify.raw : null,
+      // Phase 64 — persist the MV raw payload regardless of which
+      // verifier ended up authoritative. We need this to debug the
+      // "MV returns unknown for everything" symptom from prod.
+      raw_payload: isMv ? verify.raw : (verify.mv_raw ?? null),
     });
     const zbOutcome: "found" | "skipped" = isZb ? "found" : "skipped";
     const zbReason = isZb
       ? `ZeroBounce: ${verify.status}${typeof verify.score === "number" ? ` (score ${verify.score.toFixed(2)})` : ""} for ${email}.`
       : isMv
-        ? `ZeroBounce: skipped — MillionVerifier returned ${verify.status}.`
-        : `ZeroBounce: skipped — no verifier returned a definite result.`;
+        ? `ZeroBounce: skipped — MillionVerifier returned a definite verdict (${verify.status}).`
+        : mvCalled
+          ? `ZeroBounce: skipped — provider unavailable or unconfigured.`
+          : `ZeroBounce: skipped — no verifier returned a definite result.`;
     await recordDiscoveryEvent({
       brand_id,
       run_id,

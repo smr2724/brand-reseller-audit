@@ -175,7 +175,14 @@ export async function POST(
       apollo_person_id: claimed.apollo_person_id,
     });
 
-    const { data: updated } = await admin
+    // Phase 64 — the prior code path silently dropped the update error
+    // when Postgres rejected our payload (e.g., CHECK constraint
+    // violation on email_source='apollo_match' before migration 0049).
+    // That left enrichment_state stuck at 'enriching' for the three
+    // Shearwater rows in the live Phase 63 test. We now surface the
+    // update error and flip the row to 'error' instead of leaving it
+    // 'enriching' forever.
+    const { data: updated, error: updateErr } = await admin
       .from("brand_contacts")
       .update({
         email: enriched.email,
@@ -197,6 +204,11 @@ export async function POST(
       .eq("brand_id", params.id)
       .select(CONTACT_SELECT)
       .maybeSingle();
+    if (updateErr) {
+      throw new Error(
+        `brand_contacts update failed: ${updateErr.message ?? String(updateErr)}`,
+      );
+    }
 
     const { data: events } = await admin
       .from("brand_contact_discovery_events")

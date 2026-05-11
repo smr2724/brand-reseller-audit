@@ -438,7 +438,11 @@ export async function runContactDiscovery(
           organization_name: c.organization_name,
           apollo_person_id: c.apollo_person_id,
         });
-        await admin
+        // Phase 64 — surface update errors so a CHECK violation or
+        // schema mismatch flips state to 'error' instead of leaving
+        // the row stuck at 'enriching'. See the matching guard in
+        // src/app/api/brands/[id]/contacts/[contactId]/enrich/route.ts.
+        const { error: updateErr } = await admin
           .from("brand_contacts")
           .update({
             email: enriched.email,
@@ -460,6 +464,11 @@ export async function runContactDiscovery(
           })
           .eq("id", primaryId)
           .eq("brand_id", brandId);
+        if (updateErr) {
+          throw new Error(
+            `brand_contacts update failed: ${(updateErr as { message?: string }).message ?? String(updateErr)}`,
+          );
+        }
       } catch (err) {
         await admin
           .from("brand_contacts")

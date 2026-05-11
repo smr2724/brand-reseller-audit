@@ -29,6 +29,14 @@ export type VerifyResult = {
   verifier: "millionverifier" | "zerobounce" | "none";
   score?: number; // 0-1, when provider returns one
   raw?: unknown;
+  // Phase 64 — preserve BOTH providers' raw responses so the audit
+  // trail can show what MV said even when we ended up using ZB's
+  // verdict (and vice versa). `raw` continues to point at the
+  // authoritative provider's payload to preserve the prior contract.
+  mv_raw?: unknown;
+  mv_status?: VerifyStatus;
+  zb_raw?: unknown;
+  zb_status?: VerifyStatus;
 };
 
 const SYNTAX_RE =
@@ -302,6 +310,13 @@ async function callZeroBounce(
 
 /**
  * Verify a single email. See module docstring for behavior.
+ *
+ * Phase 64 — when MV returns 'unknown' (or 'catch_all', or fails) we
+ * MUST fall through to ZeroBounce. The earlier behavior already did
+ * this, but the surrounding code path was reading MV's raw_payload as
+ * null on the MV event when ZB ended up authoritative. We now stash
+ * BOTH providers' raw responses on the returned VerifyResult so the
+ * caller can persist each one onto its own audit event row.
  */
 export async function verifyEmail(email: string): Promise<VerifyResult> {
   if (!syntaxOk(email)) {
@@ -311,13 +326,31 @@ export async function verifyEmail(email: string): Promise<VerifyResult> {
   const mv = await callMillionVerifier(email);
   // MV returned a definite result — short-circuit.
   if (mv && (mv.status === "verified" || mv.status === "invalid" || mv.status === "risky")) {
-    return mv;
+    return {
+      ...mv,
+      mv_raw: mv.raw,
+      mv_status: mv.status,
+    };
   }
   // MV returned catch_all / unknown / error, OR no key → fall through to ZB.
   const zb = await callZeroBounce(email);
-  if (zb) return zb;
+  if (zb) {
+    return {
+      ...zb,
+      mv_raw: mv?.raw ?? null,
+      mv_status: mv?.status,
+      zb_raw: zb.raw,
+      zb_status: zb.status,
+    };
+  }
   // Both providers down/unconfigured.
-  if (mv) return mv;
+  if (mv) {
+    return {
+      ...mv,
+      mv_raw: mv.raw,
+      mv_status: mv.status,
+    };
+  }
   return { status: "unknown", verifier: "none" };
 }
 
