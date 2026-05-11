@@ -30,7 +30,7 @@ import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const Body = z.object({
   brand_name: z.string().trim().min(1).max(200),
