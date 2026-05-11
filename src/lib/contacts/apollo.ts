@@ -97,6 +97,11 @@ async function postForm(
   throw new Error("apollo_retry_exhausted");
 }
 
+// Phase 62 — slim payload MUST surface `first_name`, `last_name`, AND
+// `name`. Hunter email-finder needs first+last to run; the orchestrator
+// uses `name` as a fallback when Apollo only returns the combined form.
+// Dropping any of these three regresses Bug B from the Shearwater audit
+// (full_name="Jason" with no last name). Covered by apollo.test.ts.
 function slimPerson(p: any): ApolloPersonSlim {
   return {
     id: String(p?.id ?? ""),
@@ -131,6 +136,10 @@ export async function apolloMatchPerson(input: {
   const key = process.env.APOLLO_API_KEY;
   if (!key) return { ok: false, error: "APOLLO_API_KEY missing" };
   if (!input.domain) return { ok: false, error: "domain required" };
+  // Phase 62 — `reveal_personal_emails: true` is REQUIRED for Apollo's
+  // /people/match to actually return the business email on paid plans.
+  // The Shearwater audit trail (run_id 6097131f) confirmed missing emails
+  // when this flag was dropped. Covered by apollo.test.ts.
   const body: Record<string, unknown> = {
     reveal_personal_emails: true,
     domain: input.domain,
