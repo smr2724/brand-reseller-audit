@@ -1021,13 +1021,65 @@ function EmailPill({
   );
 }
 
+// Phase 65 — verifier verdict classification mirrors the same logic in
+// enrich-contact.ts. A provider's run resolves to one of four states:
+//   verified     — outcome='found' AND status is a definite verdict
+//                  (verified / invalid / risky / catch_all)
+//   inconclusive — outcome='found' AND status is 'unknown' (or null)
+//   failed       — outcome='error' (provider-level failure: HTTP / auth /
+//                  Apikey not found / network)
+//   skipped      — outcome='skipped' (provider not called)
+type VerifierVerdict = "verified" | "inconclusive" | "failed" | "skipped";
+
+function classifyVerifierEvent(ev: DiscoveryEvent | undefined): VerifierVerdict {
+  if (!ev) return "skipped";
+  if (ev.outcome === "error" || ev.outcome === "retry_exhausted") return "failed";
+  if (ev.outcome === "skipped") return "skipped";
+  if (ev.outcome === "found") {
+    const s = ev.status_returned;
+    if (
+      s === "verified" ||
+      s === "invalid" ||
+      s === "risky" ||
+      s === "catch_all"
+    ) {
+      return "verified";
+    }
+    return "inconclusive";
+  }
+  return "skipped";
+}
+
+function verdictLabel(name: string, v: VerifierVerdict): string {
+  switch (v) {
+    case "verified":
+      return `${name}: verified ✓`;
+    case "inconclusive":
+      return `${name}: inconclusive`;
+    case "failed":
+      return `${name}: failed`;
+    case "skipped":
+      return `${name}: skipped`;
+  }
+}
+
 function describeProvenance(events: DiscoveryEvent[]): string {
-  // Determine which provider yielded the persisted email, then which
-  // verifier last spoke.
+  // Determine the email's source (Apollo / Hunter / Pattern).
   let source: string | null = null;
-  let verifier: { name: string; outcome: string; status: string | null } | null = null;
-  // Iterate in chronological order.
+  // Use the LATEST run's verifier events — older runs would otherwise
+  // muddle the trail when discovery has been re-run.
+  let latestRunId: string | null = null;
   for (const ev of events) {
+    if (!latestRunId || ev.run_id !== latestRunId) {
+      // events are ordered ascending; the last one we see is from the latest run
+      latestRunId = ev.run_id;
+    }
+  }
+  // Pick the source from any 'found' provider event in the latest run.
+  const runEvents = latestRunId
+    ? events.filter((e) => e.run_id === latestRunId)
+    : events;
+  for (const ev of runEvents) {
     if (ev.outcome === "found") {
       if (ev.provider === "apollo_match" || ev.provider === "apollo_search") {
         source = "Apollo";
@@ -1037,21 +1089,31 @@ function describeProvenance(events: DiscoveryEvent[]): string {
         source = "Pattern guess";
       }
     }
-    if (ev.provider === "millionverifier" && ev.outcome === "found") {
-      verifier = { name: "MillionVerifier", outcome: ev.outcome, status: ev.status_returned };
-    }
-    if (ev.provider === "zerobounce" && ev.outcome === "found") {
-      verifier = { name: "ZeroBounce", outcome: ev.outcome, status: ev.status_returned };
-    }
   }
   if (!source) return "";
-  if (!verifier) return source;
-  const ok = verifier.status === "verified";
-  const verifierLabel =
-    verifier.status && verifier.status !== "verified"
-      ? `${verifier.name} ${verifier.status}`
-      : `${verifier.name} ${ok ? "✓" : ""}`.trim();
-  return `${source} → ${verifierLabel}`;
+  const mvEvent = runEvents.find((e) => e.provider === "millionverifier");
+  const zbEvent = runEvents.find((e) => e.provider === "zerobounce");
+  const mv = classifyVerifierEvent(mvEvent);
+  const zb = classifyVerifierEvent(zbEvent);
+  // No verifier ran at all → just show the source.
+  if (mv === "skipped" && zb === "skipped") return source;
+  // MV returned a definite verdict — ZB was short-circuited.
+  if (mv === "verified") {
+    return `${source} → ${verdictLabel("MV", "verified")}`;
+  }
+  // MV failed or inconclusive — show the three-step trail with ZB.
+  const mvLabel = verdictLabel("MV", mv === "skipped" ? "failed" : mv);
+  if (zb === "skipped") {
+    // MV ran but ZB didn't — unusual; surface as two-step.
+    return `${source} → ${mvLabel}`;
+  }
+  const zbLabel = verdictLabel("ZB", zb);
+  // When both verifiers failed and Apollo had verified the row, the
+  // Apollo verdict is preserved (no-downgrade rule). Make that explicit.
+  if (mv === "failed" && zb === "failed") {
+    return `${source} → ${mvLabel} → ${zbLabel} (Apollo verdict preserved)`;
+  }
+  return `${source} → ${mvLabel} → ${zbLabel}`;
 }
 
 function safeStringify(v: unknown): string {
