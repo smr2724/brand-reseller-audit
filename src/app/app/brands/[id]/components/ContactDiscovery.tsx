@@ -407,6 +407,25 @@ export default function ContactDiscovery({
         </div>
       )}
 
+      {/* Phase 62 — surface brand/run-level events (Apollo search,
+          Hunter domain-pattern) above the per-contact table so the user
+          can see what happened at the run level even when no contacts
+          were resolved (or before they expand a row). */}
+      {latestRunId &&
+        (brandLevelEventsByRun.get(latestRunId) ?? []).length > 0 && (
+          <details className="mb-3 rounded border border-[var(--border-soft)] p-2">
+            <summary className="text-xs text-[var(--text-muted)] cursor-pointer select-none">
+              Discovery run audit ({(brandLevelEventsByRun.get(latestRunId) ?? []).length} run-level event{(brandLevelEventsByRun.get(latestRunId) ?? []).length === 1 ? "" : "s"})
+            </summary>
+            <div className="mt-2">
+              <EventTrail
+                latestEvents={[]}
+                brandEvents={brandLevelEventsByRun.get(latestRunId) ?? []}
+              />
+            </div>
+          </details>
+        )}
+
       {contacts.length === 0 ? (
         <div className="text-sm text-[var(--text-muted)]">
           No contacts found yet. Click{" "}
