@@ -25,10 +25,14 @@ export async function GET(
 
   const { data: brand } = await supabase
     .from("brands")
-    .select("id, qualification_state")
+    .select("id, qualification_state, qualification_error")
     .eq("id", params.id)
     .eq("user_id", user.id)
-    .maybeSingle<{ id: string; qualification_state: string | null }>();
+    .maybeSingle<{
+      id: string;
+      qualification_state: string | null;
+      qualification_error: string | null;
+    }>();
   if (!brand) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
@@ -36,6 +40,9 @@ export async function GET(
   const row = await getQualification(params.id);
   return NextResponse.json({
     qualification_state: brand.qualification_state ?? "pending",
+    // Phase 67 — non-null when the previous run failed; UI surfaces this
+    // in the "Qualification error" panel instead of the generic fallback.
+    qualification_error: brand.qualification_error ?? null,
     qualification: row,
   });
 }
