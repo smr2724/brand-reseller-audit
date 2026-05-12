@@ -92,27 +92,20 @@ export async function POST(
     );
   }
 
-  // OPTIMISTIC CLAIM: only one caller can transition discovered → enriching.
+  // OPTIMISTIC CLAIM: only one caller can transition into 'enriching'.
   // Two simultaneous /enrich requests on the same contact id race here; the
   // loser sees no rows updated and returns 409 without ever hitting Apollo.
-  const { data: claimed, error: claimErr } = await admin
-    .from("brand_contacts")
-    .update({
-      enrichment_state: "enriching",
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", params.contactId)
-    .eq("brand_id", params.id)
-    .eq("enrichment_state", "discovered")
-    .select(CLAIM_SELECT)
-    .maybeSingle<ClaimedRow>();
-
-  // PGRST116 = "no rows" — the row exists but wasn't in 'discovered' state.
-  // maybeSingle returns data=null instead in some Supabase versions; cover
-  // both shapes.
-  const errCode =
-    (claimErr as { code?: string } | null | undefined)?.code ?? null;
-  if (!claimed || errCode === "PGRST116") {
+  //
+  // Phase 73.1 retry semantics — three eligible source states:
+  //   - 'discovered' (first attempt)
+  //   - 'error' (previous attempt threw)
+  //   - 'enriched' with email IS NULL (previous chain ran but every
+  //     step missed; user wants another shot — Apollo credits may
+  //     have been topped up, the LLM index may be fresher, etc.)
+  // Anything else (enriched-with-email, enriching) is owned by
+  // another run.
+  const claimed = await tryClaim(admin, params.id, params.contactId);
+  if (!claimed) {
     const { data: current } = await admin
       .from("brand_contacts")
       .select("enrichment_state")
@@ -131,15 +124,6 @@ export async function POST(
         state: current.enrichment_state,
       },
       { status: 409 },
-    );
-  }
-  if (claimErr) {
-    const errMsg =
-      (claimErr as { message?: string } | null | undefined)?.message ??
-      String(claimErr);
-    return NextResponse.json(
-      { error: `claim_failed: ${errMsg}` },
-      { status: 500 },
     );
   }
 
@@ -264,4 +248,50 @@ function extractDomain(input: string | null): string | null {
   s = s.split("?")[0];
   if (!s.includes(".")) return null;
   return s;
+}
+
+/**
+ * Phase 73.1 retry-aware atomic claim — see route comment for the
+ * three eligible source states. Returns null when no row was
+ * transitioned (another caller owns this contact's enrich).
+ */
+async function tryClaim(
+  admin: NonNullable<ReturnType<typeof createSupabaseAdminClient>>,
+  brandId: string,
+  contactId: string,
+): Promise<ClaimedRow | null> {
+  const now = new Date().toISOString();
+
+  const { data: discovered } = await admin
+    .from("brand_contacts")
+    .update({ enrichment_state: "enriching", updated_at: now })
+    .eq("id", contactId)
+    .eq("brand_id", brandId)
+    .eq("enrichment_state", "discovered")
+    .select(CLAIM_SELECT)
+    .maybeSingle<ClaimedRow>();
+  if (discovered) return discovered;
+
+  const { data: errored } = await admin
+    .from("brand_contacts")
+    .update({ enrichment_state: "enriching", updated_at: now })
+    .eq("id", contactId)
+    .eq("brand_id", brandId)
+    .eq("enrichment_state", "error")
+    .select(CLAIM_SELECT)
+    .maybeSingle<ClaimedRow>();
+  if (errored) return errored;
+
+  const { data: enrichedEmpty } = await admin
+    .from("brand_contacts")
+    .update({ enrichment_state: "enriching", updated_at: now })
+    .eq("id", contactId)
+    .eq("brand_id", brandId)
+    .eq("enrichment_state", "enriched")
+    .is("email", null)
+    .select(CLAIM_SELECT)
+    .maybeSingle<ClaimedRow>();
+  if (enrichedEmpty) return enrichedEmpty;
+
+  return null;
 }

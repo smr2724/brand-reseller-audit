@@ -290,6 +290,38 @@ export async function runContactDiscovery(
             status_returned: mv_status,
             raw_payload: { email, source_url, confidence, mv_status },
           });
+          // Phase 73.1 — mandatory MV-verify audit on the
+          // llm_websearch path. We only emit an explicit
+          // provider='millionverifier' event for the REJECTED case
+          // (MV said invalid or otherwise didn't lift the email
+          // into a seed). On accept (verified/risky/catch_all), the
+          // downstream seed-write block already emits a
+          // millionverifier event with the same verdict — emitting
+          // one here too would duplicate.
+          //
+          // The score / contact_id columns are left null at this
+          // boundary because they're recorded by the per-contact
+          // seed write further down once the brand_contacts row
+          // exists.
+          if (
+            email &&
+            mv_status &&
+            mv_status !== "verified" &&
+            mv_status !== "risky" &&
+            mv_status !== "catch_all"
+          ) {
+            await recordDiscoveryEvent({
+              brand_id: brandId,
+              run_id: runId,
+              provider: "millionverifier",
+              outcome:
+                mv_status === "invalid" ? "not_found" : "skipped",
+              reason: `MillionVerifier gate (llm_websearch): ${mv_status} for ${email}`,
+              email_returned: email,
+              status_returned: mv_status,
+              raw_payload: { source: "llm_websearch_gate", source_url, confidence },
+            });
+          }
         },
       },
     );
