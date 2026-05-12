@@ -500,12 +500,30 @@ export async function enrichSingleContact(
     llm_cost_usd += LLM_WEBSEARCH_COST_USD;
     if (websearch.email) {
       // Phase 73.1 — MV-verify the LLM-returned email BEFORE writing
-      // it to brand_contacts. We record TWO discovery events: the
-      // llm_websearch hit, and an explicit `millionverifier` event
-      // with the MV verdict. Invariant: no brand_contacts row may
-      // have email_status='verified' from the LLM path without a
-      // passing MV event in brand_contact_discovery_events.
-      const v = await verifyEmail(websearch.email).catch(() => null);
+      // it to brand_contacts.
+      //
+      // Two cases:
+      //   (a) MV says verified/risky/catch_all → we set `email` here
+      //       so step 4 short-circuits via `alreadyVerifiedStatus`,
+      //       AND step 4 emits its own provider='millionverifier'
+      //       event with the same verdict. So we DO NOT emit a
+      //       millionverifier event here — it would duplicate.
+      //   (b) MV says invalid (or anything else that doesn't lift
+      //       to `email`) → step 4 won't run with this LLM email,
+      //       so there is NO downstream MV event. We emit a
+      //       millionverifier event here so the invariant "no
+      //       LLM-sourced email skipped by MV without an
+      //       MV audit row" holds.
+      //
+      // Use try/catch (not .catch) so a verifyEmail throw doesn't
+      // get swallowed silently — surface it via an error event.
+      let v: Awaited<ReturnType<typeof verifyEmail>> | null = null;
+      let verifyError: string | null = null;
+      try {
+        v = await verifyEmail(websearch.email);
+      } catch (e) {
+        verifyError = e instanceof Error ? e.message : String(e);
+      }
       const mvStatus = v?.status ?? "unknown";
       const mvScore =
         typeof v?.score === "number" ? clampScore(v.score) : null;
@@ -522,7 +540,7 @@ export async function enrichSingleContact(
             : mvStatus === "invalid"
               ? "not_found"
               : "skipped",
-        reason: `llm_websearch found ${websearch.email} (confidence=${websearch.confidence}); MV=${mvStatus}`,
+        reason: `llm_websearch found ${websearch.email} (confidence=${websearch.confidence}); MV=${mvStatus}${verifyError ? ` (MV error: ${verifyError})` : ""}`,
         email_returned: websearch.email,
         status_returned: mvStatus,
         raw_payload: {
@@ -530,35 +548,38 @@ export async function enrichSingleContact(
           confidence: websearch.confidence,
         },
       });
-      await recordDiscoveryEvent({
-        brand_id,
-        run_id,
-        contact_id,
-        provider: "millionverifier",
-        outcome:
-          isVerified || isRisky
-            ? "found"
-            : mvStatus === "invalid"
-              ? "not_found"
-              : "skipped",
-        reason: `MillionVerifier gate (llm_websearch): ${mvStatus} for ${websearch.email}`,
-        email_returned: websearch.email,
-        status_returned: mvStatus,
-        score_returned: mvScore,
-        raw_payload: v?.raw ?? null,
-      });
       if (isVerified || isRisky) {
+        // Case (a) — lift email and let step 4 emit the MV event.
         email = websearch.email;
         email_source = "llm_websearch";
         email_pattern_used = null;
         notes = `Found via LLM web search; source: ${websearch.source_url ?? "(no URL)"}`;
         alreadyVerifiedStatus = mvStatus;
         alreadyVerifiedScore = typeof v?.score === "number" ? v.score : null;
+      } else {
+        // Case (b) — MV rejected (invalid) OR verifyEmail threw OR
+        // MV returned unknown for the LLM email. Step 4 won't run
+        // with this email; emit an explicit millionverifier audit
+        // event here so the invariant holds.
+        await recordDiscoveryEvent({
+          brand_id,
+          run_id,
+          contact_id,
+          provider: "millionverifier",
+          outcome: verifyError
+            ? "error"
+            : mvStatus === "invalid"
+              ? "not_found"
+              : "skipped",
+          reason: verifyError
+            ? `MillionVerifier gate (llm_websearch) error: ${verifyError}`
+            : `MillionVerifier gate (llm_websearch): ${mvStatus} for ${websearch.email}`,
+          email_returned: websearch.email,
+          status_returned: verifyError ? null : mvStatus,
+          score_returned: mvScore,
+          raw_payload: v?.raw ?? null,
+        });
       }
-      // mvStatus === 'invalid' (or disposable→risky) is already
-      // handled above: we never set `email`, so the row is not
-      // written. The MV audit event is the spec-required
-      // provider='millionverifier' record of that rejection.
     } else {
       await recordDiscoveryEvent({
         brand_id,

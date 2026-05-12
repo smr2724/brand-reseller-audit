@@ -104,21 +104,6 @@ interface DiscoverGet {
   error?: string;
 }
 
-interface BulkEnrichResp {
-  ok: boolean;
-  enriched: number;
-  skipped: number;
-  errors: number;
-  llm_cost_usd?: number;
-  results: Array<{
-    contact_id: string;
-    state: "enriched" | "error" | "already" | "not_found" | "no_domain";
-    contact?: BrandContactRow | null;
-    error?: string;
-    llm_cost_usd?: number;
-  }>;
-}
-
 interface PerRowEnrichResp {
   ok?: boolean;
   contact?: BrandContactRow;
@@ -390,26 +375,47 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
     }
   }
 
+  /**
+   * Phase 73.1 — Bulk "Enrich top N" dispatches to the SAME row-
+   * level handler the per-row button uses, so seeded and unseeded
+   * candidates take the right path:
+   *   - seeded (contact present)   → /contacts/[contactId]/enrich
+   *   - unseeded (named-only)      → /contacts/enrich-candidate
+   *
+   * The previous bulk implementation hit /contacts/enrich which only
+   * targets `enrichment_state='discovered'` rows in brand_contacts —
+   * named candidates without a contact row silently produced
+   * `{enriched: 0}` (the Maria-Ringo-on-Carna4 bug). Routing through
+   * the row handler means there is exactly one source of truth for
+   * what an Enrich click does.
+   *
+   * Runs the first N=Math.min(unEnrichedCount, 3) candidates in
+   * parallel via Promise.allSettled; per-row failures don't abort
+   * the rest.
+   */
   async function enrichTop3(): Promise<void> {
     setBulkRunning(true);
     setErr(null);
     try {
-      const r = await fetch(`/api/brands/${brandId}/contacts/enrich`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const j = (await r.json().catch(() => ({}))) as Partial<BulkEnrichResp> & {
-        error?: string;
-      };
-      if (!r.ok) {
-        setErr(j.error ?? `enrich error ${r.status}`);
-        return;
+      const targets = candidateRows
+        .filter((r) => !r.contact || !r.contact.email)
+        .slice(0, 3);
+      if (targets.length === 0) return;
+      const settled = await Promise.allSettled(
+        targets.map((row) =>
+          row.contact ? enrichSingle(row.contact.id) : enrichCandidate(row),
+        ),
+      );
+      const failures = settled.filter((s) => s.status === "rejected");
+      if (failures.length > 0 && failures.length === settled.length) {
+        // All failed; surface a single banner. Per-row errors are
+        // already set by the handlers via setErr.
+        setErr(
+          `bulk enrich: ${failures.length} of ${settled.length} failed`,
+        );
       }
-      if (typeof j.llm_cost_usd === "number" && j.llm_cost_usd > 0) {
-        setExtraLlmCost((c) => c + j.llm_cost_usd!);
-      }
-      // Reload after bulk so contacts + events come back as a coherent set.
+      // Reload so the discovery audit and other contacts catch up
+      // with anything the chain wrote (Hunter domain cache, etc.).
       await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -601,11 +607,24 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
               // Phase 73.1 — "already enriched" means the row has a
               // non-null email. Rows in `enriched` state without an
               // email (Apollo unlock burned but missed) still get a
-              // re-enrich shot via the fallback chain.
+              // re-enrich shot via the fallback chain — labeled
+              // "Retry" so the user can see this is a re-attempt.
               const alreadyEnriched =
                 contact != null &&
                 contact.email != null &&
                 contact.email.length > 0;
+              const isRetry =
+                contact != null &&
+                !alreadyEnriched &&
+                (contact.enrichment_state === "error" ||
+                  contact.enrichment_state === "enriched");
+              const buttonLabel = enriching
+                ? isRetry
+                  ? "Retrying…"
+                  : "Enriching…"
+                : isRetry
+                  ? "Retry"
+                  : "Enrich";
               return (
                 <li
                   key={contact?.id ?? `nc:${idx}`}
@@ -635,10 +654,14 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
                         type="button"
                         className="btn btn-ghost text-[11px]"
                         disabled={enriching}
-                        title="Run the fallback chain (Apollo → Hunter → 8-pattern → LLM web-search) for this row."
+                        title={
+                          isRetry
+                            ? "Previous attempt finished without an email. Re-run the fallback chain."
+                            : "Run the fallback chain (Apollo → Hunter → 8-pattern → LLM web-search) for this row."
+                        }
                         onClick={() => void enrichSingle(contact.id)}
                       >
-                        {enriching ? "Enriching…" : "Enrich"}
+                        {buttonLabel}
                       </button>
                     ) : (
                       <button
@@ -648,7 +671,7 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
                         title="Seed this candidate and run the full fallback chain."
                         onClick={() => void enrichCandidate(row)}
                       >
-                        {enriching ? "Enriching…" : "Enrich"}
+                        {buttonLabel}
                       </button>
                     )}
                   </div>
