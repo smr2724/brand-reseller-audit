@@ -5,7 +5,6 @@ import BrandDetailClient from "./BrandDetailClient";
 import EnrichmentStatusCard from "./components/EnrichmentStatusCard";
 import QualificationReview from "./components/QualificationReview";
 import ContactStrategyPanel from "./components/ContactStrategyPanel";
-import ContactDiscovery from "./components/ContactDiscovery";
 import { computeBrandDetailFinancials } from "@/lib/brand-detail/financial-model";
 
 export const dynamic = "force-dynamic";
@@ -71,10 +70,6 @@ export default async function BrandDetail({ params }: { params: { id: string } }
         initialState={brand.qualification_state ?? "pending"}
       />
       <ContactStrategyPanel brandId={brand.id} />
-      <ContactDiscovery
-        brandId={brand.id}
-        initialContactsState={brand.contacts_state ?? "pending"}
-      />
       <BrandDetailClient
         brand={brand}
         asins={asins ?? []}

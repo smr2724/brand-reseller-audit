@@ -12,7 +12,9 @@
  *
  * Status interpretation:
  *   200            → reachable
- *   999            → reachable (LinkedIn's anti-bot status)
+ *   999            → rate_limited (LinkedIn anti-bot — NOT proof of slug
+ *                    existence; Phase 73 fix. Caller falls through to
+ *                    Apollo without the URL.)
  *   301/302        → follow ONE redirect, treat the final hop as result
  *   404            → not_found (definitely bogus)
  *   429            → rate_limited (don't penalize the URL)
@@ -107,8 +109,15 @@ async function mapStatusToResult(
   if (res.status === "timeout" || res.status === "error") {
     return { ok: false, normalized, reason: "timeout" };
   }
-  if (res.status === 200 || res.status === 999) {
+  if (res.status === 200) {
     return { ok: true, normalized, reason: "reachable" };
+  }
+  // Phase 73 — HTTP 999 is LinkedIn's anti-bot status. It does NOT
+  // confirm the profile slug exists. Treat it the same as 429 so Gate C
+  // seeding falls through to Apollo without the (potentially
+  // hallucinated) URL.
+  if (res.status === 999) {
+    return { ok: false, normalized, reason: "rate_limited" };
   }
   if ((res.status === 301 || res.status === 302) && res.location) {
     // Follow exactly one redirect. If the redirect target is itself
@@ -116,9 +125,10 @@ async function mapStatusToResult(
     const next = resolveLocation(normalized, res.location);
     if (!next) return { ok: false, normalized, reason: "not_found" };
     const r2 = await followOnce(next);
-    if (r2.status === 200 || r2.status === 999) {
+    if (r2.status === 200) {
       return { ok: true, normalized: next, reason: "reachable" };
     }
+    if (r2.status === 999) return { ok: false, normalized, reason: "rate_limited" };
     if (r2.status === 404) return { ok: false, normalized, reason: "not_found" };
     if (r2.status === 429) return { ok: false, normalized, reason: "rate_limited" };
     return { ok: false, normalized, reason: "timeout" };

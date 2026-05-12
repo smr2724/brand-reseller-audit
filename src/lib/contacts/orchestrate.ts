@@ -238,9 +238,9 @@ export async function runContactDiscovery(
             raw_payload: { raw_url, normalized, ok, reason },
           });
         },
-        // Phase 72 — Hunter pattern-construction fallback events. Fires
-        // when Apollo + Hunter email-finder all miss and we attempt to
-        // synthesize an email from Hunter's domain pattern + Gate C name.
+        // Phase 72 — Hunter pattern-construction fallback events. Phase
+        // 73 — also fires per-attempt during the 8-pattern loop and on
+        // a summary `pattern_loop_complete` event.
         onHunterPattern: async ({
           pattern,
           pattern_confidence,
@@ -267,6 +267,28 @@ export async function runContactDiscovery(
               constructed_email,
               mv_status,
             },
+          });
+        },
+        // Phase 73 — LLM web-search last-resort events. Fires when
+        // Apollo + Hunter-finder + 8-pattern all miss and we ask an
+        // LLM with web_search to look for a published email.
+        onLlmWebSearch: async ({
+          email,
+          source_url,
+          confidence,
+          mv_status,
+          outcome,
+          reason,
+        }) => {
+          await recordDiscoveryEvent({
+            brand_id: brandId,
+            run_id: runId,
+            provider: "llm_websearch",
+            outcome,
+            reason,
+            email_returned: email,
+            status_returned: mv_status,
+            raw_payload: { email, source_url, confidence, mv_status },
           });
         },
       },
@@ -310,6 +332,25 @@ export async function runContactDiscovery(
                 ? "not_found"
                 : "skipped",
           reason: `MillionVerifier verdict ${verifyStatus} for ${seed.person.email} (hunter_pattern).`,
+          status_returned: verifyStatus,
+        });
+      } else if (seed.provider === "llm_websearch" && seed.llm_websearch_meta) {
+        // Phase 73 — LLM web-search already MV-verified inside the
+        // seed. Trust its mv_status and skip the second verify call.
+        verifyStatus = seed.llm_websearch_meta.mv_status;
+        verifierName = "millionverifier";
+        emailVerifiedAt = new Date().toISOString();
+        await recordDiscoveryEvent({
+          brand_id: brandId,
+          run_id: runId,
+          provider: "millionverifier",
+          outcome:
+            verifyStatus === "verified"
+              ? "found"
+              : verifyStatus === "invalid"
+                ? "not_found"
+                : "skipped",
+          reason: `MillionVerifier verdict ${verifyStatus} for ${seed.person.email} (llm_websearch).`,
           status_returned: verifyStatus,
         });
       } else if (seed.person.email) {
@@ -419,13 +460,19 @@ export async function runContactDiscovery(
       if (seed.provider === "hunter_pattern" && seed.hunter_pattern_meta) {
         wantPrimary = wantPrimary && seed.hunter_pattern_meta.is_primary;
       }
+      if (seed.provider === "llm_websearch" && seed.llm_websearch_meta) {
+        wantPrimary = wantPrimary && seed.llm_websearch_meta.is_primary;
+      }
 
-      // Phase 72 — pattern-source rows carry a transparent note so the
-      // reviewer can see the email was constructed, not retrieved.
-      const hunterPatternNotes =
+      // Phase 72/73 — fallback rows carry a transparent note so the
+      // reviewer can see the email was constructed (hunter_pattern) or
+      // discovered via LLM web search.
+      const seedNotes =
         seed.provider === "hunter_pattern" && seed.hunter_pattern_meta
           ? seed.hunter_pattern_meta.notes
-          : null;
+          : seed.provider === "llm_websearch" && seed.llm_websearch_meta
+            ? seed.llm_websearch_meta.notes
+            : null;
 
       const baseFields: Record<string, unknown> = {
         brand_id: brandId,
@@ -438,7 +485,8 @@ export async function runContactDiscovery(
         company_domain: domain,
         apollo_person_id:
           seed.person.id?.startsWith("hunter:") ||
-          seed.person.id?.startsWith("hunter_pattern:")
+          seed.person.id?.startsWith("hunter_pattern:") ||
+          seed.person.id?.startsWith("llm_websearch:")
             ? null
             : seed.person.id || null,
         email: seed.person.email,
@@ -452,7 +500,7 @@ export async function runContactDiscovery(
         enrichment_state: "enriched",
         raw_apollo_match: seed.person,
         updated_at: new Date().toISOString(),
-        ...(hunterPatternNotes ? { notes: hunterPatternNotes } : {}),
+        ...(seedNotes ? { notes: seedNotes } : {}),
       };
 
       if (existingForName?.id) {
@@ -500,7 +548,9 @@ export async function runContactDiscovery(
           ? "apollo_match"
           : seed.provider === "hunter_pattern"
             ? "hunter_pattern"
-            : "hunter_finder";
+            : seed.provider === "llm_websearch"
+              ? "llm_websearch"
+              : "hunter_finder";
       const eventReason =
         seed.provider === "apollo_linkedin_match"
           ? "gate_c_linkedin_match"
@@ -508,7 +558,9 @@ export async function runContactDiscovery(
             ? "gate_c_mixed_search"
             : seed.provider === "hunter_pattern"
               ? "gate_c_hunter_pattern"
-              : "gate_c_hunter_finder";
+              : seed.provider === "llm_websearch"
+                ? "gate_c_llm_websearch"
+                : "gate_c_hunter_finder";
       await recordDiscoveryEvent({
         brand_id: brandId,
         run_id: runId,

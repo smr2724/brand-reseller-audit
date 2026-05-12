@@ -31,13 +31,17 @@ import {
 } from "./hunter";
 import { verifyEmail, type VerifyResult } from "./email-verify";
 import {
-  applyEmailPattern,
   readPatternCache,
   writePatternCache,
 } from "./pattern";
 import { recordDiscoveryEvent } from "./events";
+import { runPatternLoop } from "./pattern-loop";
+import { llmWebSearchEmail } from "./llm-websearch";
+import { extractApexDomain } from "./domain";
 
-const PATTERN_CONFIDENCE_FLOOR = 0.7;
+/** Phase 73 — rough constant for one LLM web-search call. Used to
+ *  surface cost telemetry both here and in gate-c-seed. */
+const LLM_WEBSEARCH_COST_USD = 0.02;
 
 export type EnrichEmailStatus =
   | "verified"
@@ -56,7 +60,9 @@ export type EnrichEmailSource =
   | "apollo_match"
   | "apollo_crm"
   | "hunter"
+  | "hunter_finder"
   | "hunter_pattern"
+  | "llm_websearch"
   | "pattern_guess"
   | "manual"
   | "unknown";
@@ -71,6 +77,10 @@ export interface EnrichContactInput {
   full_name: string;
   organization_name: string | null;
   apollo_person_id: string | null;
+  /** Phase 73 — brand name for the LLM web-search prompt. Falls back
+   *  to `organization_name` when omitted; the LLM step is skipped if
+   *  neither is available. */
+  brand_name?: string | null;
 }
 
 export interface EnrichContactResult {
@@ -86,6 +96,12 @@ export interface EnrichContactResult {
   raw_apollo_match: unknown;
   raw_hunter: unknown;
   verify_raw: unknown;
+  /** Phase 73 — extra LLM cost (web-search) attributed to this enrich.
+   *  Folded into the parent flow's cost telemetry. 0 when web-search
+   *  didn't fire. */
+  llm_cost_usd?: number;
+  /** Phase 73 — notes (e.g., LLM web-search source URL) for the row. */
+  notes?: string | null;
 }
 
 function clampScore(n: number | null | undefined): number | null {
@@ -142,6 +158,27 @@ export async function enrichSingleContact(
   let raw_hunter: unknown = null;
   let verify: VerifyResult | null = null;
   let emailStatus: EnrichEmailStatus = "not_found";
+  // Phase 73 — track LLM web-search cost so the caller can fold it
+  // into the per-brand cost ledger. Notes carries the LLM source URL
+  // when a row is materialized from web-search.
+  let llm_cost_usd = 0;
+  let notes: string | null = null;
+  // Phase 73 — when the 8-pattern loop produces only `risky` /
+  // `catch_all` results we hold the best one back and try LLM
+  // web-search first. If web-search misses too, we fall back to the
+  // risky pattern hit (per spec §3b).
+  let riskyFallback: {
+    email: string;
+    status: VerifyResult["status"];
+    score: number | null;
+    pattern: string;
+  } | null = null;
+  // Phase 73 — when the pattern loop or LLM web-search already
+  // MV-verified the chosen email, skip the redundant MV call in
+  // step 4 to avoid double-spending MV credits and double-logging
+  // the millionverifier event.
+  let alreadyVerifiedStatus: VerifyResult["status"] | null = null;
+  let alreadyVerifiedScore: number | null = null;
   // Phase 64 — track Apollo's own verdict separately. If Apollo says
   // "verified", that is the authoritative ground truth: MillionVerifier
   // /  ZeroBounce returning `unknown` later means the verifier is
@@ -303,20 +340,40 @@ export async function enrichSingleContact(
     });
   }
 
-  // 3. Pattern-guess fallback (also requires last_name).
-  if (!email && first && last) {
-    let cache = await readPatternCache(domain);
+  // 3. Phase 73 — 8-pattern email construction loop. Replaces the
+  //    Phase 63 cached-pattern_guess step in the per-row enrich path.
+  //    Triggers only when Apollo + Hunter-finder didn't produce an
+  //    email. Iterates Hunter's recommended pattern (if confidence ≥
+  //    0.85, deduped, unrecognized tokens silently skipped) then the
+  //    seven canonical patterns. Per-pattern token requirements are
+  //    checked (so a `first=Madonna, last=null` candidate can still
+  //    try `{first}` / `{f}`). MV-verifies each; STOP on first
+  //    `verified`. Diacritics stripped before substitution (NFD +
+  //    drop combining marks) so `María` → `maria`.
+  //
+  //    The apex domain is used for construction — `shop.carna4.com`
+  //    becomes `carna4.com` so we don't burn credits on
+  //    `maria@shop.carna4.com`. The raw `domain` continues to flow
+  //    to Apollo / Hunter providers above (which sometimes accept
+  //    subdomains).
+  const apexDomain = extractApexDomain(domain) ?? domain;
+  if (!email && (first || last)) {
+    let recommendedPattern: string | null = null;
+    let recommendedConfidence: number | null = null;
+    // Read cached pattern (or fetch fresh) so the loop can prioritize
+    // Hunter's recommendation when it's high-confidence.
+    let cache = await readPatternCache(apexDomain);
     if (!cache) {
-      const pat = await hunterDomainPattern(domain);
+      const pat = await hunterDomainPattern(apexDomain);
       if (pat.ok) {
         await writePatternCache({
-          domain,
+          domain: apexDomain,
           email_pattern: pat.pattern,
           pattern_source: "hunter",
           pattern_confidence: pat.pattern_confidence,
           is_catch_all: pat.is_catch_all,
         });
-        cache = await readPatternCache(domain);
+        cache = await readPatternCache(apexDomain);
         await recordDiscoveryEvent({
           brand_id,
           run_id,
@@ -324,60 +381,165 @@ export async function enrichSingleContact(
           provider: "hunter_domain",
           outcome: pat.pattern ? "found" : "not_found",
           reason: pat.pattern
-            ? `Hunter: pattern ${pat.pattern} (confidence ${pat.pattern_confidence.toFixed(2)}) for ${domain}.`
-            : `Hunter: no email pattern available for ${domain}.`,
+            ? `Hunter: pattern ${pat.pattern} (confidence ${pat.pattern_confidence.toFixed(2)}) for ${apexDomain}.`
+            : `Hunter: no email pattern available for ${apexDomain}.`,
           score_returned: clampScore(pat.pattern_confidence),
           raw_payload: pat.raw,
         });
       }
     }
-    if (cache?.email_pattern) {
-      const conf = cache.pattern_confidence ?? 0;
-      if (conf >= PATTERN_CONFIDENCE_FLOOR) {
-        const guessed = applyEmailPattern(cache.email_pattern, first, last, domain);
-        if (guessed) {
-          email = guessed;
-          email_source = "pattern_guess";
-          email_pattern_used = cache.email_pattern;
+    recommendedPattern = cache?.email_pattern ?? null;
+    recommendedConfidence = cache?.pattern_confidence ?? null;
+
+    const loop = await runPatternLoop(
+      {
+        first_name: first || null,
+        last_name: last || null,
+        domain: apexDomain,
+        recommended_pattern: recommendedPattern,
+        recommended_confidence: recommendedConfidence,
+      },
+      {
+        onAttempt: async (a) => {
           await recordDiscoveryEvent({
             brand_id,
             run_id,
             contact_id,
-            provider: "pattern_guess",
-            outcome: "found",
-            reason: `Pattern guess: applied ${cache.email_pattern} (confidence ${conf.toFixed(2)}) → ${guessed}.`,
-            email_returned: guessed,
-            score_returned: clampScore(conf),
+            provider: "hunter_pattern",
+            outcome:
+              a.outcome === "verified"
+                ? "found"
+                : a.outcome === "risky" || a.outcome === "catch_all"
+                  ? "found"
+                  : "not_found",
+            reason: `pattern_loop attempt ${a.pattern} → ${a.email || "(unconstructable)"}: MV=${a.mv_status ?? "error"}`,
+            email_returned: a.email || null,
+            status_returned: a.mv_status,
+            score_returned:
+              typeof recommendedConfidence === "number"
+                ? recommendedConfidence
+                : null,
           });
-        } else {
-          await recordDiscoveryEvent({
-            brand_id,
-            run_id,
-            contact_id,
-            provider: "pattern_guess",
-            outcome: "not_found",
-            reason: `Pattern guess: pattern ${cache.email_pattern} present but could not synthesize email for ${fullName}.`,
-          });
-        }
-      } else {
-        await recordDiscoveryEvent({
-          brand_id,
-          run_id,
-          contact_id,
-          provider: "pattern_guess",
-          outcome: "skipped",
-          reason: `Pattern guess: pattern_confidence ${conf.toFixed(2)} below floor ${PATTERN_CONFIDENCE_FLOOR} — skipped.`,
-          score_returned: clampScore(conf),
-        });
+        },
+      },
+    );
+    // Summary event.
+    await recordDiscoveryEvent({
+      brand_id,
+      run_id,
+      contact_id,
+      provider: "hunter_pattern",
+      outcome:
+        loop.best_kind === "valid" || loop.best_kind === "risky"
+          ? "found"
+          : "not_found",
+      reason: `pattern_loop_complete: tried ${loop.attempts.length} patterns; best=${loop.best_email ?? "none"}; best_status=${loop.best_status ?? "none"}`,
+      email_returned: loop.best_email,
+      status_returned: loop.best_status,
+    });
+    if (loop.ok && loop.best_kind === "valid" && loop.best_email) {
+      email = loop.best_email;
+      email_source = "hunter_pattern";
+      email_pattern_used = loop.best_pattern;
+      alreadyVerifiedStatus = loop.best_status;
+      alreadyVerifiedScore = loop.best_score;
+    } else if (loop.ok && loop.best_kind === "risky" && loop.best_email) {
+      riskyFallback = {
+        email: loop.best_email,
+        status: (loop.best_status ?? "risky") as VerifyResult["status"],
+        score: loop.best_score,
+        pattern: loop.best_pattern ?? "",
+      };
+    }
+  } else if (!email) {
+    await recordDiscoveryEvent({
+      brand_id,
+      run_id,
+      contact_id,
+      provider: "hunter_pattern",
+      outcome: "skipped",
+      reason: `pattern_loop skipped — neither first_name nor last_name available for ${fullName}.`,
+    });
+  } else {
+    await recordDiscoveryEvent({
+      brand_id,
+      run_id,
+      contact_id,
+      provider: "hunter_pattern",
+      outcome: "skipped",
+      reason: `pattern_loop skipped — email already resolved via ${email_source}.`,
+    });
+  }
+
+  // 3b. Phase 73 — LLM web-search last resort. Fires when Apollo +
+  //     Hunter-finder + 8-pattern loop all miss (or only produced
+  //     risky), AND we have at least full_name + brand_name. Uses
+  //     the OpenAI Responses API with the web_search tool and the
+  //     verbatim Phase 73 prompt. The result is MV-verified inside
+  //     llmWebSearchEmail's downstream verify; here we MV-verify
+  //     once after writing the candidate.
+  const brandNameForSearch =
+    (input.brand_name ?? "").trim() ||
+    (input.organization_name ?? "").trim();
+  if (!email && first && last && fullName && brandNameForSearch) {
+    let websearch;
+    try {
+      websearch = await llmWebSearchEmail({
+        full_name: fullName,
+        brand_name: brandNameForSearch,
+      });
+    } catch (e) {
+      websearch = {
+        email: null,
+        source_url: null,
+        confidence: "none" as const,
+        error: e instanceof Error ? e.message : String(e),
+        raw_text: null,
+      };
+    }
+    llm_cost_usd += LLM_WEBSEARCH_COST_USD;
+    if (websearch.email) {
+      const v = await verifyEmail(websearch.email).catch(() => null);
+      const mvStatus = v?.status ?? "unknown";
+      const isVerified = mvStatus === "verified";
+      const isRisky = mvStatus === "risky" || mvStatus === "catch_all";
+      await recordDiscoveryEvent({
+        brand_id,
+        run_id,
+        contact_id,
+        provider: "llm_websearch",
+        outcome:
+          isVerified || isRisky
+            ? "found"
+            : mvStatus === "invalid"
+              ? "not_found"
+              : "skipped",
+        reason: `llm_websearch found ${websearch.email} (confidence=${websearch.confidence}); MV=${mvStatus}`,
+        email_returned: websearch.email,
+        status_returned: mvStatus,
+        raw_payload: {
+          source_url: websearch.source_url,
+          confidence: websearch.confidence,
+        },
+      });
+      if (isVerified || isRisky) {
+        email = websearch.email;
+        email_source = "llm_websearch";
+        email_pattern_used = null;
+        notes = `Found via LLM web search; source: ${websearch.source_url ?? "(no URL)"}`;
+        alreadyVerifiedStatus = mvStatus;
+        alreadyVerifiedScore = typeof v?.score === "number" ? v.score : null;
       }
     } else {
       await recordDiscoveryEvent({
         brand_id,
         run_id,
         contact_id,
-        provider: "pattern_guess",
-        outcome: "skipped",
-        reason: `Pattern guess skipped — no domain pattern available for ${domain}.`,
+        provider: "llm_websearch",
+        outcome: websearch.error ? "error" : "not_found",
+        reason: websearch.error
+          ? `llm_websearch error: ${websearch.error}`
+          : `llm_websearch found no public email for ${fullName} at ${brandNameForSearch}`,
       });
     }
   } else if (!email) {
@@ -385,24 +547,42 @@ export async function enrichSingleContact(
       brand_id,
       run_id,
       contact_id,
-      provider: "pattern_guess",
+      provider: "llm_websearch",
       outcome: "skipped",
-      reason: `Pattern guess skipped — missing last_name for ${fullName}.`,
+      reason: brandNameForSearch
+        ? `llm_websearch skipped — need full first+last+full_name for ${fullName}.`
+        : `llm_websearch skipped — no brand_name available.`,
     });
-  } else {
-    await recordDiscoveryEvent({
-      brand_id,
-      run_id,
-      contact_id,
-      provider: "pattern_guess",
-      outcome: "skipped",
-      reason: `Pattern guess skipped — email already resolved via ${email_source}.`,
-    });
+  }
+
+  // 3c. Phase 73 — fall back to best-risky pattern hit when LLM
+  //     web-search didn't improve on it.
+  if (!email && riskyFallback) {
+    email = riskyFallback.email;
+    email_source = "hunter_pattern";
+    email_pattern_used = riskyFallback.pattern;
+    alreadyVerifiedStatus = riskyFallback.status;
+    alreadyVerifiedScore = riskyFallback.score;
   }
 
   // 4. Verify whatever email we have.
   if (email) {
-    verify = await verifyEmail(email);
+    // Phase 73 — skip the redundant MV call when the pattern loop or
+    // LLM web-search already MV-verified this exact email. We fabricate
+    // a `verify` shape that matches the millionverifier branch so the
+    // downstream classification + event-logging behaves identically.
+    if (alreadyVerifiedStatus) {
+      verify = {
+        status: alreadyVerifiedStatus,
+        verifier: "millionverifier",
+        score: alreadyVerifiedScore ?? undefined,
+        raw: { source: "phase73_already_verified" },
+        mv_status: alreadyVerifiedStatus,
+        mv_raw: { source: "phase73_already_verified" },
+      } as VerifyResult;
+    } else {
+      verify = await verifyEmail(email);
+    }
     const verifierStatus = mapVerifyStatus(verify.status);
     // Phase 64 — don't downgrade an Apollo-verified email to
     // 'unknown' / 'not_found' just because the verifier was
@@ -621,5 +801,7 @@ export async function enrichSingleContact(
     raw_apollo_match,
     raw_hunter,
     verify_raw: verify?.raw ?? null,
+    llm_cost_usd,
+    notes,
   };
 }
