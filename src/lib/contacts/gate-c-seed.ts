@@ -519,7 +519,17 @@ export async function seedFromGateC(
   // web_search tool. If a high-confidence published email is found,
   // MV-verify it and write either a verified-primary row or a risky
   // fallback row.
-  if (first && last && full && input.brand_name) {
+  //
+  // Phase 73.2 — the gate previously required BOTH first AND last,
+  // which silently skipped this step whenever Gate C only captured a
+  // single-part name (e.g., Maria Ringo on Carna4 where deriveName
+  // produced first='Maria' last='' from the bare "Ringo" surname the
+  // pattern loop tried as `{last}@carna4.com`). The LLM web-search
+  // prompt only needs a full-name string + brand name, so the
+  // requirement is relaxed accordingly. When we can't even form a
+  // prompt (no full name / no brand name) we still emit a skipped
+  // audit event so the trail shows the step was considered.
+  if (full && input.brand_name) {
     const websearchFn = deps.llmWebSearch ?? llmWebSearchEmail;
     let websearchResult;
     try {
@@ -615,6 +625,21 @@ export async function seedFromGateC(
         }),
       );
     }
+  } else if (deps.onLlmWebSearch) {
+    // Phase 73.2 — emit a skipped audit event when we couldn't form a
+    // prompt. Keeps the discovery trail honest about what we tried.
+    await safe(() =>
+      deps.onLlmWebSearch!({
+        email: null,
+        source_url: null,
+        confidence: "none",
+        mv_status: null,
+        outcome: "skipped",
+        reason: !full
+          ? `llm_websearch skipped — no full_name available.`
+          : `llm_websearch skipped — no brand_name available.`,
+      }),
+    );
   }
 
   // 6. Fall back to best risky pattern hit if the loop produced one

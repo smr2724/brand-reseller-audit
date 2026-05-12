@@ -129,6 +129,25 @@ interface CandidateEnrichResp {
   llm_cost_usd?: number;
 }
 
+/** Phase 73.2 — manual-add route response shape. `mv_status` is the
+ *  authoritative verifier's verdict — could come from MV or ZB after
+ *  the cascade. `verifier` tells us which provider produced it. */
+interface ManualAddResp {
+  ok?: boolean;
+  contact?: BrandContactRow;
+  error?: string;
+  mv_status?: string;
+  mv_score?: number;
+  verifier?: "millionverifier" | "zerobounce" | "none";
+  detail?: string;
+}
+
+// Phase 73.2 — match server-side EMAIL_SHAPE. Permits apostrophes etc.
+// so `j.o'connor@x.com` is not rejected client-side. Server still runs
+// the strict MV/ZB syntax check inside `verifyEmail`.
+const EMAIL_SHAPE =
+  /^[A-Za-z0-9._%+\-'!#$&*/=?^_`{|}~]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+
 function formatRevenue(n: number | null): string {
   if (!n) return "—";
   if (n >= 1_000_000_000) return `~$${(n / 1_000_000_000).toFixed(1)}B`;
@@ -219,6 +238,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   zerobounce: "ZeroBounce",
   orchestrator: "Orchestrator",
   enrichment_deferred: "Enrichment Deferred",
+  manual: "Manual",
 };
 
 export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
@@ -241,6 +261,21 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
    *  calls this session. Surfaced in the cost footer so the user can
    *  see when the last-resort step billed. */
   const [extraLlmCost, setExtraLlmCost] = useState<number>(0);
+
+  // Phase 73.2 — manual contact entry modal state. Triggered by the
+  // "Add contact manually" button at the bottom of the card. Submits to
+  // /api/brands/[id]/contacts/manual-add which MV-gates the email before
+  // writing.
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualFirst, setManualFirst] = useState("");
+  const [manualLast, setManualLast] = useState("");
+  const [manualTitle, setManualTitle] = useState("");
+  const [manualEmail, setManualEmail] = useState("");
+  const [manualLinkedIn, setManualLinkedIn] = useState("");
+  const [manualSubmitting, setManualSubmitting] = useState(false);
+  const [manualInlineError, setManualInlineError] = useState<string | null>(
+    null,
+  );
 
   async function load(): Promise<void> {
     setLoading(true);
@@ -428,6 +463,82 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [brandId]);
+
+  function openManual(): void {
+    setManualFirst("");
+    setManualLast("");
+    setManualTitle("");
+    setManualEmail("");
+    setManualLinkedIn("");
+    setManualInlineError(null);
+    setManualOpen(true);
+  }
+
+  function closeManual(): void {
+    if (manualSubmitting) return;
+    setManualOpen(false);
+    setManualInlineError(null);
+  }
+
+  async function submitManual(): Promise<void> {
+    setManualInlineError(null);
+    const first = manualFirst.trim();
+    const last = manualLast.trim();
+    const title = manualTitle.trim();
+    const email = manualEmail.trim().toLowerCase();
+    const linkedinUrl = manualLinkedIn.trim();
+    if (!first || !last || !title) {
+      setManualInlineError("First name, last name, and title are required.");
+      return;
+    }
+    if (!EMAIL_SHAPE.test(email)) {
+      setManualInlineError("Please enter a valid email address.");
+      return;
+    }
+    setManualSubmitting(true);
+    try {
+      const r = await fetch(`/api/brands/${brandId}/contacts/manual-add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          first_name: first,
+          last_name: last,
+          title,
+          email,
+          linkedin_url: linkedinUrl || null,
+        }),
+      });
+      const j = (await r.json().catch(() => ({}))) as ManualAddResp;
+      if (r.status === 422 && j.error === "mv_rejected") {
+        const verifierName =
+          j.verifier === "zerobounce"
+            ? "ZeroBounce"
+            : j.verifier === "millionverifier"
+              ? "MillionVerifier"
+              : "The email verifier";
+        setManualInlineError(
+          `${verifierName} says this address is ${j.mv_status ?? "non-valid"}. Manual entries must be MV-valid. Please try a different email.`,
+        );
+        return;
+      }
+      if (r.status === 502 && j.error === "mv_unavailable") {
+        setManualInlineError(
+          `Email verifier is currently unavailable — we couldn't determine whether the address is valid. Please try again in a few minutes. ${j.detail ?? ""}`.trim(),
+        );
+        return;
+      }
+      if (!r.ok || !j.ok) {
+        setErr(j.error ?? j.detail ?? `manual-add error ${r.status}`);
+        return;
+      }
+      setManualOpen(false);
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setManualSubmitting(false);
+    }
+  }
 
   // Build the unified candidate-row list: named_candidates + any
   // brand_contacts rows that don't appear in named_candidates by name
@@ -787,17 +898,114 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
         <button className="btn" onClick={() => void run()} disabled={running}>
           {running ? "Retrying…" : "Retry with different titles"}
         </button>
-        <button
-          className="btn"
-          onClick={() => {
-            alert(
-              "Manual contact entry not yet wired — coming in a follow-up phase.",
-            );
-          }}
-        >
+        <button className="btn" onClick={openManual}>
           Add contact manually
         </button>
       </div>
+
+      {manualOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={closeManual}
+        >
+          <div
+            className="card w-full max-w-md p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-semibold mb-2">
+              Add contact manually
+            </div>
+            <div className="text-xs text-[var(--text-muted)] mb-3">
+              The email is sent to MillionVerifier. Only addresses MV
+              marks <code>valid</code> are saved.
+            </div>
+            <div className="space-y-2 text-xs">
+              <label className="block">
+                <div className="text-[var(--text-muted)] mb-1">First name</div>
+                <input
+                  type="text"
+                  className="w-full rounded border border-[var(--border-soft)] bg-transparent px-2 py-1"
+                  value={manualFirst}
+                  onChange={(e) => setManualFirst(e.target.value)}
+                  disabled={manualSubmitting}
+                />
+              </label>
+              <label className="block">
+                <div className="text-[var(--text-muted)] mb-1">Last name</div>
+                <input
+                  type="text"
+                  className="w-full rounded border border-[var(--border-soft)] bg-transparent px-2 py-1"
+                  value={manualLast}
+                  onChange={(e) => setManualLast(e.target.value)}
+                  disabled={manualSubmitting}
+                />
+              </label>
+              <label className="block">
+                <div className="text-[var(--text-muted)] mb-1">Title</div>
+                <input
+                  type="text"
+                  className="w-full rounded border border-[var(--border-soft)] bg-transparent px-2 py-1"
+                  value={manualTitle}
+                  onChange={(e) => setManualTitle(e.target.value)}
+                  disabled={manualSubmitting}
+                  placeholder="Owner / Founder / President / …"
+                />
+              </label>
+              <label className="block">
+                <div className="text-[var(--text-muted)] mb-1">Email</div>
+                <input
+                  type="email"
+                  className="w-full rounded border border-[var(--border-soft)] bg-transparent px-2 py-1"
+                  value={manualEmail}
+                  onChange={(e) => setManualEmail(e.target.value)}
+                  disabled={manualSubmitting}
+                />
+              </label>
+              <label className="block">
+                <div className="text-[var(--text-muted)] mb-1">
+                  LinkedIn URL <span className="opacity-60">(optional)</span>
+                </div>
+                <input
+                  type="url"
+                  className="w-full rounded border border-[var(--border-soft)] bg-transparent px-2 py-1"
+                  value={manualLinkedIn}
+                  onChange={(e) => setManualLinkedIn(e.target.value)}
+                  disabled={manualSubmitting}
+                />
+              </label>
+            </div>
+            {manualInlineError && (
+              <div className="mt-3 text-xs text-red-300">
+                {manualInlineError}
+              </div>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={closeManual}
+                disabled={manualSubmitting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void submitManual()}
+                disabled={
+                  manualSubmitting ||
+                  manualFirst.trim().length === 0 ||
+                  manualLast.trim().length === 0 ||
+                  manualTitle.trim().length === 0 ||
+                  !EMAIL_SHAPE.test(manualEmail.trim().toLowerCase())
+                }
+              >
+                {manualSubmitting ? "Verifying…" : "Verify & save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {(strategy.total_cost_usd != null || extraLlmCost > 0) && (
         <div className="text-[10px] text-[var(--text-muted)] mt-2">
