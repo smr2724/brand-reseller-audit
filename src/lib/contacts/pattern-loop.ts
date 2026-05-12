@@ -62,6 +62,63 @@ const BASE_PATTERNS = [
   "{last}",
 ] as const;
 
+const RECOGNIZED_TOKENS = new Set([
+  "{first}",
+  "{last}",
+  "{f}",
+  "{l}",
+]);
+
+/**
+ * Phase 73 — strip diacritics (NFD-normalize, drop combining marks)
+ * and remove characters that are not SMTP local-part-safe. Hyphens
+ * are preserved (Smith-Jones stays Smith-Jones); apostrophes and
+ * other punctuation are dropped (O'Brien → obrien). Spaces in
+ * multi-part last names collapse out.
+ *
+ * MV (and most provider MTAs) reject SMTPUTF8 local parts, so
+ * `María.Ringo@…` returns invalid 100% of the time. Normalizing
+ * here avoids burning 8 MV credits on doomed addresses.
+ */
+function safeLocalPart(input: string): string {
+  return input
+    .trim()
+    .toLocaleLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9\-]/g, "");
+}
+
+/**
+ * Inspect the tokens in `pattern` and return the set of required
+ * fields. Used so we can skip patterns whose required fields are
+ * unavailable (e.g., skip `{last}` for a single-name candidate).
+ */
+function patternRequires(pattern: string): {
+  needsFirst: boolean;
+  needsLast: boolean;
+  unknownTokens: string[];
+} {
+  const tokens = Array.from(pattern.matchAll(/\{[^}]+\}/g)).map((m) => m[0]);
+  let needsFirst = false;
+  let needsLast = false;
+  const unknownTokens: string[] = [];
+  for (const t of tokens) {
+    if (t === "{first}" || t === "{f}") {
+      needsFirst = true;
+      continue;
+    }
+    if (t === "{last}" || t === "{l}") {
+      needsLast = true;
+      continue;
+    }
+    if (!RECOGNIZED_TOKENS.has(t)) {
+      unknownTokens.push(t);
+    }
+  }
+  return { needsFirst, needsLast, unknownTokens };
+}
+
 function constructFromToken(
   pattern: string,
   first: string,
@@ -69,6 +126,7 @@ function constructFromToken(
   domain: string,
 ): string | null {
   const f = first[0] ?? "";
+  const l = last[0] ?? "";
   // Substitute multi-char tokens first so single-char ones don't eat
   // their substrings.
   let local = pattern
@@ -77,9 +135,11 @@ function constructFromToken(
     .replace(/\{f\}\.\{last\}/g, `${f}.${last}`)
     .replace(/\{f\}\{last\}/g, `${f}${last}`)
     .replace(/\{first\}\{last\}/g, `${first}${last}`)
+    .replace(/\{first\}\{l\}/g, `${first}${l}`)
     .replace(/\{first\}/g, first)
     .replace(/\{last\}/g, last)
-    .replace(/\{f\}/g, f);
+    .replace(/\{f\}/g, f)
+    .replace(/\{l\}/g, l);
   if (!local || local.includes("{") || local.includes("}")) return null;
   const email = `${local}@${domain}`;
   if (email.length < 5 || !email.includes("@") || !email.includes(".")) {
@@ -118,12 +178,19 @@ export async function runPatternLoop(
   input: PatternLoopInput,
   deps: PatternLoopDeps = {},
 ): Promise<PatternLoopResult> {
-  const first = (input.first_name ?? "").trim().toLowerCase();
-  const last = (input.last_name ?? "").trim().toLowerCase();
+  // Phase 73 BLOCKER 2 — strip diacritics + non-ASCII before
+  // constructing emails. MV rejects SMTPUTF8 local parts so
+  // `maría.ringo@…` returns invalid 100% of the time.
+  const first = safeLocalPart(input.first_name ?? "");
+  const last = safeLocalPart(input.last_name ?? "");
   const domain = (input.domain ?? "").trim().toLowerCase();
   const verify = deps.verifyEmail ?? verifyEmail;
 
-  if (!first || !last || !domain) {
+  // Phase 73 NIT 5 — we need a domain and at least one of first/last.
+  // Each pattern then independently checks its own required tokens
+  // (so a `first=Madonna, last=null` candidate can still try `{first}`
+  // and `{f}`).
+  if (!domain || (!first && !last)) {
     return {
       ok: false,
       best_email: null,
@@ -139,14 +206,21 @@ export async function runPatternLoop(
   const seen = new Set<string>();
 
   // 1. Hunter's recommended pattern — only when confidence ≥ 0.85.
+  //    Phase 73 NIT 6: if the recommendation contains unrecognized
+  //    tokens (e.g., `{first}-{last}` which our substituter doesn't
+  //    cover), silently skip it — don't burn an "attempted" slot in
+  //    telemetry.
   const recPattern = (input.recommended_pattern ?? "").trim();
   const recConf =
     typeof input.recommended_confidence === "number"
       ? input.recommended_confidence
       : 0;
   if (recPattern && recConf >= 0.85) {
-    ordered.push(recPattern);
-    seen.add(recPattern);
+    const recReq = patternRequires(recPattern);
+    if (recReq.unknownTokens.length === 0) {
+      ordered.push(recPattern);
+      seen.add(recPattern);
+    }
   }
 
   // 2-8. The seven canonical patterns. Deduped against recommended.
@@ -161,6 +235,12 @@ export async function runPatternLoop(
   let bestRisky: PatternAttempt | null = null;
 
   for (const pattern of ordered) {
+    // Phase 73 NIT 4 — per-pattern token check. Skip a pattern when
+    // its required field isn't filled (e.g., a `first=Madonna,
+    // last=""` candidate skips `{last}` but still tries `{first}`).
+    const req = patternRequires(pattern);
+    if (req.needsFirst && !first) continue;
+    if (req.needsLast && !last) continue;
     const email = constructFromToken(pattern, first, last, domain);
     if (!email) {
       const attempt: PatternAttempt = {

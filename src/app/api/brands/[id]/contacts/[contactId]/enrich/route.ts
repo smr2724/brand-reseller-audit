@@ -72,10 +72,14 @@ export async function POST(
   }
   const { data: brand } = await supabase
     .from("brands")
-    .select("id, resolved_owner_domain")
+    .select("id, name, resolved_owner_domain")
     .eq("id", params.id)
     .eq("user_id", user.id)
-    .maybeSingle<{ id: string; resolved_owner_domain: string | null }>();
+    .maybeSingle<{
+      id: string;
+      name: string;
+      resolved_owner_domain: string | null;
+    }>();
   if (!brand) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
@@ -173,6 +177,7 @@ export async function POST(
       full_name: claimed.full_name,
       organization_name: claimed.company_name,
       apollo_person_id: claimed.apollo_person_id,
+      brand_name: brand.name,
     });
 
     // Phase 64 — the prior code path silently dropped the update error
@@ -182,24 +187,30 @@ export async function POST(
     // Shearwater rows in the live Phase 63 test. We now surface the
     // update error and flip the row to 'error' instead of leaving it
     // 'enriching' forever.
+    const updateBase: Record<string, unknown> = {
+      email: enriched.email,
+      email_source: enriched.email ? enriched.email_source : null,
+      email_pattern_used: enriched.email_pattern_used,
+      email_status: enriched.email ? enriched.email_status : "not_found",
+      email_verifier: enriched.email_verifier,
+      email_verifier_score: enriched.email_verifier_score,
+      email_verified_at: enriched.email_verified_at,
+      last_name: enriched.last_name,
+      full_name: enriched.full_name,
+      raw_apollo_match: enriched.raw_apollo_match,
+      raw_hunter: enriched.raw_hunter,
+      ready_to_send: enriched.email_status === "verified",
+      enrichment_state: "enriched",
+      updated_at: new Date().toISOString(),
+    };
+    // Phase 73 — persist `notes` when LLM web-search resolved this
+    // row (the audit copy "Found via LLM web search; source: …").
+    if (enriched.notes) {
+      updateBase.notes = enriched.notes;
+    }
     const { data: updated, error: updateErr } = await admin
       .from("brand_contacts")
-      .update({
-        email: enriched.email,
-        email_source: enriched.email ? enriched.email_source : null,
-        email_pattern_used: enriched.email_pattern_used,
-        email_status: enriched.email ? enriched.email_status : "not_found",
-        email_verifier: enriched.email_verifier,
-        email_verifier_score: enriched.email_verifier_score,
-        email_verified_at: enriched.email_verified_at,
-        last_name: enriched.last_name,
-        full_name: enriched.full_name,
-        raw_apollo_match: enriched.raw_apollo_match,
-        raw_hunter: enriched.raw_hunter,
-        ready_to_send: enriched.email_status === "verified",
-        enrichment_state: "enriched",
-        updated_at: new Date().toISOString(),
-      })
+      .update(updateBase)
       .eq("id", claimed.id)
       .eq("brand_id", params.id)
       .select(CONTACT_SELECT)
@@ -222,6 +233,7 @@ export async function POST(
       contact: updated ?? null,
       events: events ?? [],
       run_id: runId,
+      llm_cost_usd: enriched.llm_cost_usd ?? 0,
     });
   } catch (err) {
     // Enrichment pipeline threw — make sure the row never stays at

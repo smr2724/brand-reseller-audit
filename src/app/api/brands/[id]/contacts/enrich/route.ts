@@ -59,6 +59,9 @@ interface PerResult {
   state: "enriched" | "error" | "already" | "not_found" | "no_domain";
   contact?: Record<string, unknown> | null;
   error?: string;
+  /** Phase 73 — extra LLM cost (web-search) on this row, when the
+   *  last-resort step fired. 0 / undefined otherwise. */
+  llm_cost_usd?: number;
 }
 
 export async function POST(
@@ -74,10 +77,14 @@ export async function POST(
   }
   const { data: brand } = await supabase
     .from("brands")
-    .select("id, resolved_owner_domain")
+    .select("id, name, resolved_owner_domain")
     .eq("id", params.id)
     .eq("user_id", user.id)
-    .maybeSingle<{ id: string; resolved_owner_domain: string | null }>();
+    .maybeSingle<{
+      id: string;
+      name: string;
+      resolved_owner_domain: string | null;
+    }>();
   if (!brand) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
@@ -119,16 +126,36 @@ export async function POST(
     targetIds = (pending ?? []).map((r) => r.id);
   }
 
-  const results: PerResult[] = [];
-  for (const contactId of targetIds) {
-    results.push(await enrichOne(admin, params.id, contactId, brand.resolved_owner_domain));
-  }
+  // Phase 73 NIT 6 — bulk enrich runs in parallel (spec §1a).
+  // Each call does its own atomic discovered → enriching claim, so
+  // there's no race between siblings. Promise.allSettled keeps a
+  // single failure from short-circuiting the rest.
+  const settled = await Promise.allSettled(
+    targetIds.map((cid) =>
+      enrichOne(admin, params.id, cid, brand.name, brand.resolved_owner_domain),
+    ),
+  );
+  const results: PerResult[] = settled.map((s, i) =>
+    s.status === "fulfilled"
+      ? s.value
+      : {
+          contact_id: targetIds[i],
+          state: "error",
+          error: s.reason instanceof Error ? s.reason.message : String(s.reason),
+        },
+  );
+
+  const llm_cost_usd = results.reduce(
+    (acc, r) => acc + (typeof r.llm_cost_usd === "number" ? r.llm_cost_usd : 0),
+    0,
+  );
 
   return NextResponse.json({
     ok: true,
     enriched: results.filter((r) => r.state === "enriched").length,
     skipped: results.filter((r) => r.state === "already").length,
     errors: results.filter((r) => r.state === "error").length,
+    llm_cost_usd,
     results,
   });
 }
@@ -137,6 +164,7 @@ async function enrichOne(
   admin: ReturnType<typeof createSupabaseAdminClient>,
   brandId: string,
   contactId: string,
+  brandName: string | null,
   brandDomain: string | null,
 ): Promise<PerResult> {
   if (!admin) {
@@ -201,19 +229,29 @@ async function enrichOne(
       full_name: claimed.full_name,
       organization_name: claimed.company_name,
       apollo_person_id: claimed.apollo_person_id,
+      brand_name: brandName,
     });
+    // Phase 73 — persist `notes` when the LLM web-search step
+    // resolved this row, so the audit copy ("Found via LLM web
+    // search; source: …") sticks on the brand_contacts row.
+    const baseUpdate: Record<string, unknown> = {
+      email: enriched.email,
+      email_source: enriched.email ? enriched.email_source : null,
+      email_pattern_used: enriched.email_pattern_used,
+      email_status: enriched.email ? enriched.email_status : "not_found",
+      email_verifier: enriched.email_verifier,
+      email_verifier_score: enriched.email_verifier_score,
+      email_verified_at: enriched.email_verified_at,
+      last_name: enriched.last_name,
+      full_name: enriched.full_name,
+    };
+    if (enriched.notes) {
+      baseUpdate.notes = enriched.notes;
+    }
     const { data: updated, error: updateErr } = await admin
       .from("brand_contacts")
       .update({
-        email: enriched.email,
-        email_source: enriched.email ? enriched.email_source : null,
-        email_pattern_used: enriched.email_pattern_used,
-        email_status: enriched.email ? enriched.email_status : "not_found",
-        email_verifier: enriched.email_verifier,
-        email_verifier_score: enriched.email_verifier_score,
-        email_verified_at: enriched.email_verified_at,
-        last_name: enriched.last_name,
-        full_name: enriched.full_name,
+        ...baseUpdate,
         raw_apollo_match: enriched.raw_apollo_match,
         raw_hunter: enriched.raw_hunter,
         ready_to_send: enriched.email_status === "verified",
@@ -229,7 +267,12 @@ async function enrichOne(
         `brand_contacts update failed: ${updateErr.message ?? String(updateErr)}`,
       );
     }
-    return { contact_id: contactId, state: "enriched", contact: updated ?? null };
+    return {
+      contact_id: contactId,
+      state: "enriched",
+      contact: updated ?? null,
+      llm_cost_usd: enriched.llm_cost_usd ?? 0,
+    };
   } catch (err) {
     await admin
       .from("brand_contacts")

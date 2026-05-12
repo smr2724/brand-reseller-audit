@@ -109,11 +109,13 @@ interface BulkEnrichResp {
   enriched: number;
   skipped: number;
   errors: number;
+  llm_cost_usd?: number;
   results: Array<{
     contact_id: string;
     state: "enriched" | "error" | "already" | "not_found" | "no_domain";
     contact?: BrandContactRow | null;
     error?: string;
+    llm_cost_usd?: number;
   }>;
 }
 
@@ -122,6 +124,7 @@ interface PerRowEnrichResp {
   contact?: BrandContactRow;
   events?: DiscoveryEvent[];
   error?: string;
+  llm_cost_usd?: number;
 }
 
 interface CandidateRowState {
@@ -236,6 +239,10 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
   const [enrichingIds, setEnrichingIds] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
+  /** Phase 73 — extra LLM web-search cost accumulated across enrich
+   *  calls this session. Surfaced in the cost footer so the user can
+   *  see when the last-resort step billed. */
+  const [extraLlmCost, setExtraLlmCost] = useState<number>(0);
 
   async function load(): Promise<void> {
     setLoading(true);
@@ -303,6 +310,9 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
           prev.map((c) => (c.id === j.contact!.id ? j.contact! : c)),
         );
         if (j.events) setEvents((prev) => [...prev, ...(j.events ?? [])]);
+        if (typeof j.llm_cost_usd === "number" && j.llm_cost_usd > 0) {
+          setExtraLlmCost((c) => c + j.llm_cost_usd!);
+        }
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -330,6 +340,9 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
       if (!r.ok) {
         setErr(j.error ?? `enrich error ${r.status}`);
         return;
+      }
+      if (typeof j.llm_cost_usd === "number" && j.llm_cost_usd > 0) {
+        setExtraLlmCost((c) => c + j.llm_cost_usd!);
       }
       // Reload after bulk so contacts + events come back as a coherent set.
       await load();
@@ -680,9 +693,13 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
         </button>
       </div>
 
-      {strategy.total_cost_usd != null && (
+      {(strategy.total_cost_usd != null || extraLlmCost > 0) && (
         <div className="text-[10px] text-[var(--text-muted)] mt-2">
-          cost: ${strategy.total_cost_usd.toFixed(2)}
+          cost: $
+          {(((strategy.total_cost_usd ?? 0) + extraLlmCost) || 0).toFixed(2)}
+          {extraLlmCost > 0 && (
+            <span> (incl. ${extraLlmCost.toFixed(2)} LLM web-search)</span>
+          )}
         </div>
       )}
       {err && <div className="text-sm text-red-400 mt-2">{err}</div>}

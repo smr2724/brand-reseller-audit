@@ -27,7 +27,13 @@ import { verifyLinkedInUrl } from "./linkedin-verify";
 import { verifyEmail } from "./email-verify";
 import { runPatternLoop, type PatternAttempt } from "./pattern-loop";
 import { llmWebSearchEmail } from "./llm-websearch";
+import { extractApexDomain } from "./domain";
 import type { ApolloPerson } from "./strategy-types";
+
+/** Phase 73 — rough constant for one LLM web-search call. Used to
+ *  fold the cost into the contact-strategy total. Exposed so the
+ *  per-row enrich path can reuse the same constant. */
+export const LLM_WEBSEARCH_COST_USD = 0.02;
 
 export interface GateCPersonSeed {
   full_name: string | null;
@@ -63,6 +69,10 @@ export interface GateCSeedHit {
     | "unknown";
   cost_credits: number;
   hunter_cost_usd: number;
+  /** Phase 73 — extra LLM cost incurred during the seed (web-search
+   *  last resort). Folded into the strategy total cost so the card
+   *  reflects what was actually spent. */
+  llm_cost_usd?: number;
   /** Phase 72/73 — set when the email came from the Hunter pattern-
    *  construction fallback OR the 8-pattern loop. Lets the orchestrator
    *  stamp email_verifier='millionverifier' / email_status='verified'
@@ -91,6 +101,7 @@ export interface GateCSeedMiss {
   person: null;
   email_source: "unknown";
   cost_credits: number;
+  llm_cost_usd?: number;
   hunter_cost_usd: number;
   /** Free-text reason ("Gate C identified X (Y), but ..."). */
   reason: string;
@@ -205,6 +216,12 @@ export async function seedFromGateC(
   const linkedinRaw = normalizeLinkedInUrl(input.person.linkedin_url);
   let cost_credits = 0;
   let hunter_cost_usd = 0;
+  let llm_cost_usd = 0;
+  // Phase 73 BLOCKER 3 — collapse subdomains so `shop.carna4.com`
+  // becomes `carna4.com` for the pattern loop + LLM web-search. Apollo
+  // / Hunter providers above still use the raw input.domain (some
+  // accept subdomains).
+  const apexDomain = extractApexDomain(input.domain ?? null);
 
   // Phase 72 — HEAD-verify the Gate C LinkedIn URL before passing it
   // to Apollo. Gate C's LLM is reliable on the *name* but routinely
@@ -385,11 +402,13 @@ export async function seedFromGateC(
     mv_status: string;
     notes: string;
   } | null = null;
-  if (first && last && input.domain) {
+  // Phase 73 NIT 4 — pattern loop now per-pattern-checks first/last
+  // requirements; allow it to run when ANY of first/last is present.
+  if ((first || last) && apexDomain) {
     // Pull Hunter's recommended pattern (best-effort; loop runs even
     // when Hunter has no recommendation — per spec §3e).
     try {
-      const pat = await hunterDomain(input.domain);
+      const pat = await hunterDomain(input.domain ?? apexDomain);
       hunter_cost_usd += 0.04;
       recommendedPattern = pat.pattern ?? null;
       recommendedConfidence =
@@ -402,7 +421,7 @@ export async function seedFromGateC(
       {
         first_name: first,
         last_name: last,
-        domain: input.domain,
+        domain: apexDomain,
         recommended_pattern: recommendedPattern,
         recommended_confidence: recommendedConfidence,
       },
@@ -466,11 +485,12 @@ export async function seedFromGateC(
           email_status: "verified",
           organization_id: null,
           organization_name: null,
-          organization_domain: input.domain,
+          organization_domain: apexDomain,
         },
         email_source: "hunter_pattern",
         cost_credits,
         hunter_cost_usd,
+        llm_cost_usd,
         hunter_pattern_meta: {
           pattern: loop.best_pattern ?? "",
           constructed_email: loop.best_email,
@@ -516,6 +536,8 @@ export async function seedFromGateC(
         raw_text: null,
       };
     }
+    // Track the call regardless of outcome — the LLM was billed.
+    llm_cost_usd += LLM_WEBSEARCH_COST_USD;
     if (websearchResult.email) {
       // Verify the LLM-claimed email.
       const v = await runVerifyForLoop(websearchResult.email).catch(() => null);
@@ -568,6 +590,7 @@ export async function seedFromGateC(
           email_source: "llm_websearch",
           cost_credits,
           hunter_cost_usd,
+          llm_cost_usd,
           llm_websearch_meta: {
             source_url: websearchResult.source_url,
             confidence: conf,
@@ -619,6 +642,7 @@ export async function seedFromGateC(
       email_source: "hunter_pattern",
       cost_credits,
       hunter_cost_usd,
+      llm_cost_usd,
       hunter_pattern_meta: {
         pattern: loopRiskyMeta.pattern,
         constructed_email: loopRiskyMeta.constructed_email,
@@ -640,6 +664,7 @@ export async function seedFromGateC(
     email_source: "unknown",
     cost_credits,
     hunter_cost_usd,
+    llm_cost_usd,
     reason: missCopy,
   };
 }
