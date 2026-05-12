@@ -1,49 +1,37 @@
 "use client";
 /**
- * Phase 69 — Contact Strategy panel.
+ * Phase 73 — Merged Decision-Makers card.
  *
- * Renders below QualificationReview on /app/brands/[id]. Shows the
- * size-tier classification, ideal contact profile, ranked candidates
- * with score + stake, and action buttons.
+ * Replaces the prior split between Phase 69 Contact Strategy and the
+ * legacy/Phase 71 Contact Discovery card. This single card now shows:
+ *   - verdict pill (ready / needs human review / error)
+ *   - size tier + profile / avoid / rationale
+ *   - CANDIDATES section: one row per `named_candidates` entry +
+ *     persisted brand_contacts rows; each row has a per-row Enrich
+ *     button + status (not enriched / enriching… / verified email /
+ *     invalid / risky)
+ *   - collapsible Discovery audit (the per-provider event trail)
+ *   - bulk actions: Enrich top 3 / Retry / Add contact manually + cost
  *
- * When verdict='needs_human_review', the panel surfaces the search
- * trail + reason and disables the "Enrich top 3" button (per spec).
- * "Add contact manually" and "Retry with different titles" buttons are
- * always exposed.
- *
- * The ContactDiscovery flow is left intact; enriching the top-3 from
- * this panel re-uses that pipeline via the existing
- * `/api/brands/[id]/contacts/enrich` endpoint. (BrandContactsCard was
- * removed in Phase 70; the new OutreachPicker reads the verified
- * subset of `brand_contacts` for draft creation.)
+ * The /app/contacts page is untouched. The bulk Enrich button now
+ * targets `/api/brands/[id]/contacts/enrich` (a POST route added in
+ * Phase 73 — see route.ts comment for the 405 root-cause).
  */
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 type Verdict = "ready" | "needs_human_review" | "error" | null;
-
-interface ApolloPerson {
-  id: string;
-  first_name: string | null;
-  last_name: string | null;
-  name: string | null;
-  title: string | null;
-  linkedin_headline: string | null;
-  linkedin_url: string | null;
-  seniority: string | null;
-  department: string | null;
-  email: string | null;
-  email_status: string | null;
-  organization_id: string | null;
-  organization_name: string | null;
-  organization_domain: string | null;
-}
 
 interface NamedCandidate {
   name: string;
   title: string | null;
+  linkedin_url?: string | null;
   reason: string;
   can_sign_50k: boolean;
   personal_stake: "equity_owner" | "p_and_l_owner" | "comp_tied_to_channel" | "none";
+  full_name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  source?: "gate_c" | "llm" | null;
 }
 
 interface StrategyRow {
@@ -66,9 +54,6 @@ interface StrategyRow {
 
 interface ApiResponse {
   strategy: StrategyRow | null;
-  // Phase 72 — when set, the most-recent qualification was updated
-  // after the cached strategy was written. The UI shows a "re-run
-  // contact strategy" banner so reviewers don't act on stale data.
   qualification_updated_at?: string | null;
 }
 
@@ -77,20 +62,74 @@ interface RunResponse {
   verdict: Verdict;
   strategy_id: string | null;
   reason?: string;
-  ranked?: { candidate: ApolloPerson; score: number }[];
 }
 
-function formatStake(stake: NamedCandidate["personal_stake"]): string {
-  switch (stake) {
-    case "equity_owner":
-      return "equity_owner";
-    case "p_and_l_owner":
-      return "p_and_l_owner";
-    case "comp_tied_to_channel":
-      return "comp_tied_to_channel";
-    default:
-      return "none";
-  }
+interface BrandContactRow {
+  id: string;
+  full_name: string;
+  title: string | null;
+  linkedin_url: string | null;
+  email: string | null;
+  email_status: string | null;
+  email_source: string | null;
+  email_verifier: string | null;
+  email_verifier_score: number | null;
+  is_primary: boolean;
+  ready_to_send: boolean;
+  enrichment_state: "discovered" | "enriching" | "enriched" | "error" | null;
+}
+
+interface DiscoveryEvent {
+  id: string;
+  brand_id: string;
+  contact_id: string | null;
+  run_id: string;
+  provider: string;
+  outcome: string;
+  reason: string | null;
+  email_returned: string | null;
+  status_returned: string | null;
+  score_returned: number | null;
+  http_status: number | null;
+  raw_payload: unknown;
+  created_at: string;
+}
+
+interface DiscoverGet {
+  state: string;
+  contacts: BrandContactRow[];
+  events: DiscoveryEvent[];
+  domain_pattern: string | null;
+  is_catch_all: boolean | null;
+  error?: string;
+}
+
+interface BulkEnrichResp {
+  ok: boolean;
+  enriched: number;
+  skipped: number;
+  errors: number;
+  results: Array<{
+    contact_id: string;
+    state: "enriched" | "error" | "already" | "not_found" | "no_domain";
+    contact?: BrandContactRow | null;
+    error?: string;
+  }>;
+}
+
+interface PerRowEnrichResp {
+  ok?: boolean;
+  contact?: BrandContactRow;
+  events?: DiscoveryEvent[];
+  error?: string;
+}
+
+interface CandidateRowState {
+  name: string;
+  title: string | null;
+  linkedin_url: string | null;
+  source: string;
+  contact: BrandContactRow | null;
 }
 
 function formatRevenue(n: number | null): string {
@@ -100,29 +139,125 @@ function formatRevenue(n: number | null): string {
   return `~$${Math.round(n).toLocaleString()}`;
 }
 
+function sourceLabel(c: NamedCandidate | null, contact: BrandContactRow | null): string {
+  if (contact?.email_source) {
+    switch (contact.email_source) {
+      case "apollo":
+      case "apollo_crm":
+      case "apollo_match":
+      case "apollo_linkedin_match":
+        return "Apollo";
+      case "hunter":
+      case "hunter_finder":
+        return "Hunter";
+      case "hunter_pattern":
+        return "Pattern";
+      case "llm_websearch":
+        return "LLM web-search";
+      case "manual":
+        return "Manual";
+      default:
+        return contact.email_source;
+    }
+  }
+  if (c?.source === "gate_c") return "Gate C";
+  if (c?.source === "llm") return "LLM size-tier";
+  return "—";
+}
+
+function statusLine(contact: BrandContactRow | null, enriching: boolean): React.ReactNode {
+  if (enriching) return <span className="text-amber-300">enriching…</span>;
+  if (!contact) return <span className="text-[var(--text-muted)]">not enriched</span>;
+  const state = contact.enrichment_state;
+  if (state === "discovered" && !contact.email) {
+    return <span className="text-[var(--text-muted)]">not enriched</span>;
+  }
+  if (state === "enriching") {
+    return <span className="text-amber-300">enriching…</span>;
+  }
+  if (state === "error") {
+    return <span className="text-red-300">error</span>;
+  }
+  if (contact.email && contact.email_status === "verified") {
+    return (
+      <span className="text-emerald-300">
+        ✓ verified: <code>{contact.email}</code>
+      </span>
+    );
+  }
+  if (contact.email && contact.email_status === "risky") {
+    return (
+      <span className="text-amber-200">
+        risky: <code>{contact.email}</code>
+      </span>
+    );
+  }
+  if (contact.email && contact.email_status === "invalid") {
+    return (
+      <span className="text-red-300">
+        invalid: <code>{contact.email}</code>
+      </span>
+    );
+  }
+  if (contact.email) {
+    return (
+      <span className="text-zinc-300">
+        {contact.email_status ?? "unverified"}: <code>{contact.email}</code>
+      </span>
+    );
+  }
+  return <span className="text-[var(--text-muted)]">no email found</span>;
+}
+
+const PROVIDER_LABEL: Record<string, string> = {
+  apollo_search: "Apollo Search",
+  apollo_match: "Apollo Match",
+  hunter_domain: "Hunter Domain",
+  hunter_finder: "Hunter Finder",
+  hunter_pattern: "Hunter Pattern",
+  pattern_guess: "Pattern Guess",
+  linkedin_verify: "LinkedIn Verify",
+  llm_websearch: "LLM Web Search",
+  millionverifier: "MillionVerifier",
+  zerobounce: "ZeroBounce",
+  orchestrator: "Orchestrator",
+  enrichment_deferred: "Enrichment Deferred",
+};
+
 export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
   const [strategy, setStrategy] = useState<StrategyRow | null>(null);
   const [qualUpdatedAt, setQualUpdatedAt] = useState<string | null>(null);
-  const [ranked, setRanked] = useState<RunResponse["ranked"]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [running, setRunning] = useState<boolean>(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const [contacts, setContacts] = useState<BrandContactRow[]>([]);
+  const [events, setEvents] = useState<DiscoveryEvent[]>([]);
+  const [enrichingIds, setEnrichingIds] = useState<Set<string>>(new Set());
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [auditOpen, setAuditOpen] = useState(false);
 
   async function load(): Promise<void> {
     setLoading(true);
     setErr(null);
     try {
-      const r = await fetch(`/api/brands/${brandId}/contact-strategy`, {
-        cache: "no-store",
-      });
-      if (!r.ok) {
+      const [stratR, discR] = await Promise.all([
+        fetch(`/api/brands/${brandId}/contact-strategy`, { cache: "no-store" }),
+        fetch(`/api/brands/${brandId}/contacts/discover`, { method: "GET" }),
+      ]);
+      if (stratR.ok) {
+        const j = (await stratR.json()) as ApiResponse;
+        setStrategy(j.strategy);
+        setQualUpdatedAt(j.qualification_updated_at ?? null);
+      } else {
         setStrategy(null);
         setQualUpdatedAt(null);
-        return;
       }
-      const j = (await r.json()) as ApiResponse;
-      setStrategy(j.strategy);
-      setQualUpdatedAt(j.qualification_updated_at ?? null);
+      if (discR.ok) {
+        const j = (await discR.json()) as Partial<DiscoverGet>;
+        setContacts(j.contacts ?? []);
+        setEvents(j.events ?? []);
+      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -141,7 +276,6 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
       if (!r.ok || !j.ok) {
         setErr(j.reason ?? `error ${r.status}`);
       }
-      setRanked(j.ranked ?? []);
       await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -150,18 +284,59 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
     }
   }
 
+  async function enrichSingle(contactId: string): Promise<void> {
+    setEnrichingIds((prev) => new Set(prev).add(contactId));
+    setErr(null);
+    try {
+      const r = await fetch(
+        `/api/brands/${brandId}/contacts/${contactId}/enrich`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      const j = (await r.json().catch(() => ({}))) as PerRowEnrichResp;
+      if (!r.ok) {
+        setErr(j.error ?? `enrich error ${r.status}`);
+      } else if (j.contact) {
+        setContacts((prev) =>
+          prev.map((c) => (c.id === j.contact!.id ? j.contact! : c)),
+        );
+        if (j.events) setEvents((prev) => [...prev, ...(j.events ?? [])]);
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setEnrichingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(contactId);
+        return next;
+      });
+    }
+  }
+
   async function enrichTop3(): Promise<void> {
+    setBulkRunning(true);
     setErr(null);
     try {
       const r = await fetch(`/api/brands/${brandId}/contacts/enrich`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
       });
+      const j = (await r.json().catch(() => ({}))) as Partial<BulkEnrichResp> & {
+        error?: string;
+      };
       if (!r.ok) {
-        const j = (await r.json().catch(() => ({}))) as { error?: string };
         setErr(j.error ?? `enrich error ${r.status}`);
+        return;
       }
+      // Reload after bulk so contacts + events come back as a coherent set.
+      await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBulkRunning(false);
     }
   }
 
@@ -170,10 +345,52 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [brandId]);
 
-  if (loading && !strategy) {
+  // Build the unified candidate-row list: named_candidates + any
+  // brand_contacts rows that don't appear in named_candidates by name
+  // (covers contacts persisted by the legacy/Apollo founder scan).
+  const candidateRows: CandidateRowState[] = useMemo(() => {
+    if (!strategy) {
+      return contacts.map((c) => ({
+        name: c.full_name,
+        title: c.title,
+        linkedin_url: c.linkedin_url,
+        source: sourceLabel(null, c),
+        contact: c,
+      }));
+    }
+    const used = new Set<string>();
+    const out: CandidateRowState[] = [];
+    for (const nc of strategy.named_candidates) {
+      const lname = (nc.name ?? "").trim().toLowerCase();
+      const match = contacts.find(
+        (c) => (c.full_name ?? "").trim().toLowerCase() === lname,
+      );
+      if (match) used.add(match.id);
+      out.push({
+        name: nc.name,
+        title: nc.title,
+        linkedin_url: nc.linkedin_url ?? match?.linkedin_url ?? null,
+        source: sourceLabel(nc, match ?? null),
+        contact: match ?? null,
+      });
+    }
+    for (const c of contacts) {
+      if (used.has(c.id)) continue;
+      out.push({
+        name: c.full_name,
+        title: c.title,
+        linkedin_url: c.linkedin_url,
+        source: sourceLabel(null, c),
+        contact: c,
+      });
+    }
+    return out;
+  }, [strategy, contacts]);
+
+  if (loading && !strategy && contacts.length === 0) {
     return (
       <div className="card p-4 mb-4">
-        <div className="text-sm font-semibold">Contact Strategy</div>
+        <div className="text-sm font-semibold">Decision-Makers</div>
         <div className="text-xs text-[var(--text-muted)] mt-1">Loading…</div>
       </div>
     );
@@ -184,7 +401,7 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
       <div className="card p-4 mb-4">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-sm font-semibold">Contact Strategy</div>
+            <div className="text-sm font-semibold">Decision-Makers</div>
             <div className="text-xs text-[var(--text-muted)] mt-1">
               No strategy yet. Run after qualification passes.
             </div>
@@ -202,18 +419,14 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
   const ready = strategy.verdict === "ready";
   const errorVerdict = strategy.verdict === "error";
 
-  // Phase 72 — show a banner when qualification was updated after the
-  // displayed strategy row was written. Cheap timestamp compare; the
-  // server-side qualification re-run also DELETEs the stale row so a
-  // page reload will trigger a fresh strategy run, but if the user
-  // is still on the page when re-qualification finishes elsewhere we
-  // want them to see the staleness flag without a hard refresh.
   const strategyStale =
     !!qualUpdatedAt &&
     !!strategy.created_at &&
     Date.parse(strategy.created_at) < Date.parse(qualUpdatedAt);
 
-  const rankedDisplay = (ranked ?? []).slice(0, 5);
+  const unEnrichedCount = candidateRows.filter(
+    (r) => !r.contact || r.contact.enrichment_state === "discovered",
+  ).length;
 
   return (
     <div className="card p-4 mb-4">
@@ -233,15 +446,20 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
       )}
       <div className="flex items-center justify-between gap-3 mb-2">
         <div>
-          <div className="text-sm font-semibold">Contact Strategy</div>
+          <div className="text-sm font-semibold">Decision-Makers</div>
           <div className="text-xs text-[var(--text-muted)]">
-            Size tier: <span className="font-mono">{strategy.company_size_tier}</span>
-            {strategy.employees_estimate ? ` (${strategy.employees_estimate} employees, ${formatRevenue(strategy.revenue_estimate_usd)} revenue)` : ""}
+            Size tier:{" "}
+            <span className="font-mono">{strategy.company_size_tier}</span>
+            {strategy.employees_estimate
+              ? ` (${strategy.employees_estimate} employees, ${formatRevenue(strategy.revenue_estimate_usd)} revenue)`
+              : ""}
           </div>
         </div>
         <div className="flex items-center gap-2">
           {ready && (
-            <span className="text-xs px-2 py-1 rounded bg-green-900 text-green-200">ready</span>
+            <span className="text-xs px-2 py-1 rounded bg-green-900 text-green-200">
+              ready
+            </span>
           )}
           {needsReview && (
             <span className="text-xs px-2 py-1 rounded bg-yellow-900 text-yellow-200">
@@ -249,18 +467,25 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
             </span>
           )}
           {errorVerdict && (
-            <span className="text-xs px-2 py-1 rounded bg-red-900 text-red-200">error</span>
+            <span className="text-xs px-2 py-1 rounded bg-red-900 text-red-200">
+              error
+            </span>
           )}
+          <button className="btn btn-ghost text-xs" onClick={() => void run()} disabled={running}>
+            {running ? "…" : "Re-run"}
+          </button>
         </div>
       </div>
 
       <div className="text-xs text-[var(--text-muted)] mt-2">
         <div>
-          <span className="font-semibold">Profile:</span> {strategy.primary_titles.slice(0, 4).join(", ") || "—"}
+          <span className="font-semibold">Profile:</span>{" "}
+          {strategy.primary_titles.slice(0, 4).join(", ") || "—"}
         </div>
         {strategy.titles_to_avoid.length > 0 && (
           <div>
-            <span className="font-semibold">Avoid:</span> {strategy.titles_to_avoid.join(", ")}
+            <span className="font-semibold">Avoid:</span>{" "}
+            {strategy.titles_to_avoid.join(", ")}
           </div>
         )}
         {strategy.profile_rationale && (
@@ -268,39 +493,159 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
         )}
       </div>
 
-      {rankedDisplay.length > 0 && (
-        <div className="mt-3">
-          <div className="text-xs font-semibold mb-1">Recommended candidates (ranked):</div>
-          <ol className="text-xs space-y-1">
-            {rankedDisplay.map((r, idx) => {
-              const c = r.candidate;
-              const stakeMatch = strategy.named_candidates.find(
-                (n) => n.name.trim().toLowerCase() === (c.name ?? `${c.first_name ?? ""} ${c.last_name ?? ""}`).trim().toLowerCase(),
-              );
-              const stake = stakeMatch ? formatStake(stakeMatch.personal_stake) : "—";
-              const stakeOk = stakeMatch && stakeMatch.personal_stake !== "none" && stakeMatch.can_sign_50k;
+      {/* Candidates section */}
+      <div className="mt-4 border-t border-[var(--border-soft)] pt-3">
+        <div className="text-xs font-semibold mb-2 uppercase tracking-wide text-[var(--text-muted)]">
+          Candidates ({candidateRows.length})
+        </div>
+        {candidateRows.length === 0 ? (
+          <div className="text-xs text-[var(--text-muted)]">
+            No candidates yet.
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {candidateRows.map((row, idx) => {
+              const contact = row.contact;
+              const enriching =
+                contact != null &&
+                (enrichingIds.has(contact.id) ||
+                  contact.enrichment_state === "enriching");
+              const alreadyEnriched =
+                contact != null &&
+                (contact.enrichment_state === "enriched" ||
+                  contact.enrichment_state === "enriching");
               return (
-                <li key={c.id || idx} className="flex gap-2">
-                  <span className="font-mono">{idx + 1}.</span>
-                  <span className="flex-1">{c.name ?? (`${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() || "(unknown)")}</span>
-                  <span className="text-[var(--text-muted)]">{c.title ?? ""}</span>
-                  <span className="font-mono">score {r.score}</span>
-                  <span>{stakeOk ? "✓" : "◯"}</span>
-                  <span className="text-[var(--text-muted)]">stake: {stake}</span>
+                <li
+                  key={contact?.id ?? `nc:${idx}`}
+                  className="rounded border border-[var(--border-soft)] p-2 text-xs"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{row.name}</span>
+                      <span className="text-[var(--text-muted)]">
+                        {row.title ?? "—"}
+                      </span>
+                      {contact?.is_primary && (
+                        <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-700/40 text-amber-200">
+                          Primary
+                        </span>
+                      )}
+                    </div>
+                    {contact ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost text-[11px]"
+                        disabled={enriching || alreadyEnriched}
+                        title={
+                          alreadyEnriched
+                            ? "Already enriched"
+                            : "Spend an Apollo email credit to unlock this contact's email."
+                        }
+                        onClick={() => void enrichSingle(contact.id)}
+                      >
+                        {enriching
+                          ? "Enriching…"
+                          : alreadyEnriched
+                            ? "✓ enriched"
+                            : "Enrich"}
+                      </button>
+                    ) : (
+                      <span
+                        className="text-[11px] text-[var(--text-muted)]"
+                        title="Run contact strategy to materialize this candidate."
+                      >
+                        not seeded
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 text-[var(--text-muted)] flex flex-wrap gap-x-2">
+                    <span>Source: {row.source}</span>
+                    {row.linkedin_url && (
+                      <span>
+                        ·{" "}
+                        <a
+                          className="underline hover:text-[var(--text)]"
+                          href={row.linkedin_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          LinkedIn ↗
+                        </a>
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1">{statusLine(contact, enriching)}</div>
                 </li>
               );
             })}
-          </ol>
+          </ul>
+        )}
+      </div>
+
+      {/* Discovery audit (collapsible) */}
+      {events.length > 0 && (
+        <div className="mt-4 border-t border-[var(--border-soft)] pt-3">
+          <button
+            type="button"
+            className="text-xs text-[var(--text-muted)] hover:text-[var(--text)] underline"
+            onClick={() => setAuditOpen((v) => !v)}
+          >
+            {auditOpen ? "▾" : "▸"} Discovery audit ({events.length} event
+            {events.length === 1 ? "" : "s"})
+          </button>
+          {auditOpen && (
+            <div className="mt-2 space-y-1">
+              {events
+                .slice()
+                .sort(
+                  (a, b) =>
+                    Date.parse(a.created_at) - Date.parse(b.created_at),
+                )
+                .map((ev) => (
+                  <div
+                    key={ev.id}
+                    className="rounded border border-[var(--border-soft)] p-2 text-[11px]"
+                  >
+                    <div className="flex flex-wrap gap-2">
+                      <span className="font-mono px-1.5 py-0.5 rounded bg-zinc-800/60 text-zinc-200">
+                        {PROVIDER_LABEL[ev.provider] ?? ev.provider}
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-300">
+                        {ev.outcome}
+                      </span>
+                      {ev.status_returned && (
+                        <span className="text-[var(--text-muted)]">
+                          {ev.status_returned}
+                        </span>
+                      )}
+                      {ev.email_returned && (
+                        <code className="text-[var(--text-muted)]">
+                          {ev.email_returned}
+                        </code>
+                      )}
+                    </div>
+                    {ev.reason && (
+                      <div className="mt-1 text-[var(--text)]">{ev.reason}</div>
+                    )}
+                  </div>
+                ))}
+            </div>
+          )}
         </div>
       )}
 
       {needsReview && (
         <div className="mt-3 p-2 rounded border border-yellow-700 bg-yellow-950/40 text-xs">
           <div className="font-semibold text-yellow-200">Why human review?</div>
-          <div className="text-yellow-100 mt-1">{strategy.verdict_reason ?? "—"}</div>
+          <div className="text-yellow-100 mt-1">
+            {strategy.verdict_reason ?? "—"}
+          </div>
           <div className="mt-2 text-yellow-200/80">
-            Search trail: tier={strategy.company_size_tier}, primary titles attempted:{" "}
-            <span className="font-mono">{strategy.primary_titles.slice(0, 3).join(", ")}</span>
+            Search trail: tier={strategy.company_size_tier}, primary titles
+            attempted:{" "}
+            <span className="font-mono">
+              {strategy.primary_titles.slice(0, 3).join(", ")}
+            </span>
           </div>
         </div>
       )}
@@ -309,10 +654,16 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
         <button
           className="btn"
           onClick={() => void enrichTop3()}
-          disabled={!ready}
-          title={ready ? "Enrich top 3 candidates" : "Available only when verdict=ready"}
+          disabled={bulkRunning || unEnrichedCount === 0 || !ready}
+          title={
+            !ready
+              ? "Available only when verdict=ready"
+              : unEnrichedCount === 0
+                ? "All candidates already enriched"
+                : "Enrich up to the first 3 not-yet-enriched candidates"
+          }
         >
-          Enrich top 3
+          {bulkRunning ? "Enriching…" : "Enrich top 3"}
         </button>
         <button className="btn" onClick={() => void run()} disabled={running}>
           {running ? "Retrying…" : "Retry with different titles"}
@@ -320,7 +671,9 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
         <button
           className="btn"
           onClick={() => {
-            alert("Manual contact entry not yet wired — coming in a follow-up phase.");
+            alert(
+              "Manual contact entry not yet wired — coming in a follow-up phase.",
+            );
           }}
         >
           Add contact manually

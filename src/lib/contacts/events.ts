@@ -25,7 +25,8 @@ export type DiscoveryEventProvider =
   | "orchestrator"
   | "enrichment_deferred"
   | "linkedin_verify"
-  | "hunter_pattern";
+  | "hunter_pattern"
+  | "llm_websearch";
 
 export type DiscoveryEventOutcome =
   | "found"

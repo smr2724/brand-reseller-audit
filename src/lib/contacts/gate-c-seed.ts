@@ -25,10 +25,8 @@ import {
 import { hunterEmailFinder, hunterDomainPattern } from "./hunter";
 import { verifyLinkedInUrl } from "./linkedin-verify";
 import { verifyEmail } from "./email-verify";
-import {
-  constructEmailFromHunterPattern,
-  HUNTER_PATTERN_MIN_CONFIDENCE,
-} from "./hunter-pattern";
+import { runPatternLoop, type PatternAttempt } from "./pattern-loop";
+import { llmWebSearchEmail } from "./llm-websearch";
 import type { ApolloPerson } from "./strategy-types";
 
 export interface GateCPersonSeed {
@@ -43,7 +41,8 @@ export type GateCHitProvider =
   | "apollo_linkedin_match"
   | "apollo_mixed_search"
   | "hunter_finder"
-  | "hunter_pattern";
+  | "hunter_pattern"
+  | "llm_websearch";
 
 export type GateCSeedProvider = GateCHitProvider | "needs_review";
 
@@ -60,16 +59,27 @@ export interface GateCSeedHit {
     | "apollo_match"
     | "hunter"
     | "hunter_pattern"
+    | "llm_websearch"
     | "unknown";
   cost_credits: number;
   hunter_cost_usd: number;
-  /** Phase 72 — set when the email came from the Hunter pattern-
-   *  construction fallback. Lets the orchestrator stamp
-   *  email_verifier='millionverifier' / email_status='verified' or
-   *  'risky' on the brand_contacts row without recomputing here. */
+  /** Phase 72/73 — set when the email came from the Hunter pattern-
+   *  construction fallback OR the 8-pattern loop. Lets the orchestrator
+   *  stamp email_verifier='millionverifier' / email_status='verified'
+   *  or 'risky' on the brand_contacts row without recomputing here. */
   hunter_pattern_meta?: {
     pattern: string;
     constructed_email: string;
+    mv_status: string;
+    is_primary: boolean;
+    notes: string;
+  };
+  /** Phase 73 — set when the email came from the LLM web-search
+   *  last-resort. `source_url` is the citation the model returned;
+   *  the orchestrator stamps it into brand_contacts.notes. */
+  llm_websearch_meta?: {
+    source_url: string | null;
+    confidence: "high" | "medium" | "low";
     mv_status: string;
     is_primary: boolean;
     notes: string;
@@ -128,13 +138,25 @@ export interface GateCSeedDeps {
     reason: "reachable" | "rate_limited" | "not_found" | "timeout" | "malformed";
   }) => Promise<void>;
   /** Phase 72 — optional event-logging hook for hunter_pattern outcomes
-   *  (construct + MV-verify). */
+   *  (construct + MV-verify). Phase 73 — also fires per-attempt during
+   *  the 8-pattern fallback loop. */
   onHunterPattern?: (info: {
     pattern: string | null;
     pattern_confidence: number | null;
     constructed_email: string | null;
     mv_status: string | null;
     outcome: "found" | "not_found" | "skipped";
+    reason: string;
+  }) => Promise<void>;
+  /** Phase 73 — pluggable web-search call. Tests inject a stub. */
+  llmWebSearch?: typeof llmWebSearchEmail;
+  /** Phase 73 — event-logging hook for the LLM web-search step. */
+  onLlmWebSearch?: (info: {
+    email: string | null;
+    source_url: string | null;
+    confidence: "high" | "medium" | "low" | "none";
+    mv_status: string | null;
+    outcome: "found" | "not_found" | "skipped" | "error";
     reason: string;
   }) => Promise<void>;
 }
@@ -340,156 +362,285 @@ export async function seedFromGateC(
     }
   }
 
-  // 4. Phase 72 — Hunter pattern construction fallback.
+  // 4. Phase 73 — 8-pattern email construction loop.
   //
-  // Trigger conditions (all of):
-  //   - Apollo people/match returned no email (covered: we fell
-  //     through above only when emailMatched was empty / not ok).
-  //   - Apollo mixed_people/search returned no name-matched candidate.
-  //   - Hunter email-finder returned no email.
-  //   - We have first + last from Gate C.
-  //   - We have brand.domain.
-  //   - Hunter domain-search returns a pattern with confidence ≥ 0.85.
+  // Replaces Phase 72's single-recommended-pattern fallback. When all
+  // upstream providers miss we iterate through Hunter's recommended
+  // pattern (if confidence ≥ 0.85, deduped) plus the seven canonical
+  // patterns, MV-verifying each one. STOP on the first MV=verified
+  // result. If only risky/catch_all results come back, keep the best
+  // one as a fallback (is_primary=false). If every attempt is invalid
+  // (or errors), fall through to LLM web-search.
   //
-  // Carna4 case: pattern `{last}` at 0.98 confidence + Maria Ringo →
-  // `ringo@carna4.com` → MV verifies → write contact row.
+  // Cost ceiling: 8 MV calls × ~$0.0008 = $0.0064/brand. Trivial.
   const hunterDomain = deps.hunterDomain ?? hunterDomainPattern;
-  const runVerify = deps.verifyEmail ?? verifyEmail;
+  const runVerifyForLoop = deps.verifyEmail ?? verifyEmail;
+  let recommendedPattern: string | null = null;
+  let recommendedConfidence: number | null = null;
+  let patternLoopRan = false;
+  let loopBestKind: "valid" | "risky" | "invalid" | "none" = "none";
+  let loopRiskyMeta: {
+    pattern: string;
+    constructed_email: string;
+    mv_status: string;
+    notes: string;
+  } | null = null;
   if (first && last && input.domain) {
-    const pat = await hunterDomain(input.domain);
-    hunter_cost_usd += 0.04;
-    if (
-      pat.ok &&
-      pat.pattern &&
-      pat.pattern_confidence >= HUNTER_PATTERN_MIN_CONFIDENCE
-    ) {
-      const constructed = constructEmailFromHunterPattern({
-        pattern: pat.pattern,
+    // Pull Hunter's recommended pattern (best-effort; loop runs even
+    // when Hunter has no recommendation — per spec §3e).
+    try {
+      const pat = await hunterDomain(input.domain);
+      hunter_cost_usd += 0.04;
+      recommendedPattern = pat.pattern ?? null;
+      recommendedConfidence =
+        typeof pat.pattern_confidence === "number" ? pat.pattern_confidence : null;
+    } catch {
+      /* loop runs anyway */
+    }
+
+    const loop = await runPatternLoop(
+      {
         first_name: first,
         last_name: last,
         domain: input.domain,
-      });
-      if (!constructed.ok) {
-        if (deps.onHunterPattern) {
+        recommended_pattern: recommendedPattern,
+        recommended_confidence: recommendedConfidence,
+      },
+      {
+        verifyEmail: runVerifyForLoop,
+        onAttempt: async (a: PatternAttempt) => {
+          if (!deps.onHunterPattern) return;
           await safe(() =>
             deps.onHunterPattern!({
-              pattern: pat.pattern,
-              pattern_confidence: pat.pattern_confidence,
-              constructed_email: null,
-              mv_status: null,
-              outcome: "not_found",
-              reason:
-                constructed.reason === "unrecognized_token"
-                  ? `unrecognized pattern token in ${pat.pattern}`
-                  : `hunter_pattern not constructable (${constructed.reason})`,
+              pattern: a.pattern,
+              pattern_confidence: recommendedConfidence,
+              constructed_email: a.email || null,
+              mv_status: a.mv_status,
+              outcome:
+                a.outcome === "verified"
+                  ? "found"
+                  : a.outcome === "risky" || a.outcome === "catch_all"
+                    ? "found"
+                    : "not_found",
+              reason: `pattern_loop attempt ${a.pattern} → ${a.email || "(unconstructable)"}: MV=${a.mv_status ?? "error"}`,
             }),
           );
-        }
-      } else {
-        const v = await runVerify(constructed.email).catch(() => null);
-        const mvStatus = v?.status ?? "unknown";
-        if (mvStatus === "invalid") {
-          if (deps.onHunterPattern) {
-            await safe(() =>
-              deps.onHunterPattern!({
-                pattern: pat.pattern,
-                pattern_confidence: pat.pattern_confidence,
-                constructed_email: constructed.email,
-                mv_status: mvStatus,
-                outcome: "not_found",
-                reason: `MV says invalid for constructed ${constructed.email} (pattern ${pat.pattern}).`,
-              }),
-            );
-          }
-          // Fall through to NEEDS_HUMAN_REVIEW — DO NOT write the row.
-        } else {
-          const isVerified = mvStatus === "verified";
-          const isRisky =
-            mvStatus === "catch_all" || mvStatus === "risky";
-          if (isVerified || isRisky) {
-            const notes = `Constructed from Hunter pattern ${pat.pattern} + Gate C name`;
-            if (deps.onHunterPattern) {
-              await safe(() =>
-                deps.onHunterPattern!({
-                  pattern: pat.pattern,
-                  pattern_confidence: pat.pattern_confidence,
-                  constructed_email: constructed.email,
-                  mv_status: mvStatus,
-                  outcome: "found",
-                  reason: `constructed ${constructed.email} from pattern ${pat.pattern}; MV=${mvStatus}`,
-                }),
-              );
-            }
-            return {
-              provider: "hunter_pattern",
-              person: {
-                id: `hunter_pattern:${full}`,
-                first_name: first || null,
-                last_name: last || null,
-                name: full || null,
-                title,
-                linkedin_headline: null,
-                linkedin_url: linkedinUrl,
-                seniority: null,
-                department: null,
-                email: constructed.email,
-                email_status: isVerified ? "verified" : "risky",
-                organization_id: null,
-                organization_name: null,
-                organization_domain: input.domain,
-              },
-              email_source: "hunter_pattern",
-              cost_credits,
-              hunter_cost_usd,
-              hunter_pattern_meta: {
-                pattern: pat.pattern,
-                constructed_email: constructed.email,
-                mv_status: mvStatus,
-                is_primary: isVerified,
-                notes,
-              },
-            };
-          }
-          // MV unknown / other — surface NEEDS_HUMAN_REVIEW (do not
-          // write the row at all).
-          if (deps.onHunterPattern) {
-            await safe(() =>
-              deps.onHunterPattern!({
-                pattern: pat.pattern,
-                pattern_confidence: pat.pattern_confidence,
-                constructed_email: constructed.email,
-                mv_status: mvStatus,
-                outcome: "not_found",
-                reason: `MV=${mvStatus} for constructed ${constructed.email}; not writing row.`,
-              }),
-            );
-          }
-        }
-      }
-    } else if (deps.onHunterPattern) {
+        },
+      },
+    );
+    patternLoopRan = true;
+    loopBestKind = loop.best_kind;
+
+    // Summary event so audit trail records what the loop tried.
+    if (deps.onHunterPattern) {
       await safe(() =>
         deps.onHunterPattern!({
-          pattern: pat.pattern,
-          pattern_confidence: pat.pattern_confidence,
-          constructed_email: null,
+          pattern: loop.best_pattern,
+          pattern_confidence: recommendedConfidence,
+          constructed_email: loop.best_email,
+          mv_status: loop.best_status,
+          outcome:
+            loop.best_kind === "valid" || loop.best_kind === "risky"
+              ? "found"
+              : "not_found",
+          reason: `pattern_loop_complete: tried ${loop.attempts.length} patterns; best=${loop.best_email ?? "none"}; best_status=${loop.best_status ?? "none"}`,
+        }),
+      );
+    }
+
+    if (loop.ok && loop.best_kind === "valid" && loop.best_email) {
+      const notes = `Constructed via 8-pattern loop (${loop.best_pattern}); MV=verified`;
+      return {
+        provider: "hunter_pattern",
+        person: {
+          id: `hunter_pattern:${full}`,
+          first_name: first || null,
+          last_name: last || null,
+          name: full || null,
+          title,
+          linkedin_headline: null,
+          linkedin_url: linkedinUrl,
+          seniority: null,
+          department: null,
+          email: loop.best_email,
+          email_status: "verified",
+          organization_id: null,
+          organization_name: null,
+          organization_domain: input.domain,
+        },
+        email_source: "hunter_pattern",
+        cost_credits,
+        hunter_cost_usd,
+        hunter_pattern_meta: {
+          pattern: loop.best_pattern ?? "",
+          constructed_email: loop.best_email,
+          mv_status: "verified",
+          is_primary: true,
+          notes,
+        },
+      };
+    }
+    if (loop.ok && loop.best_kind === "risky" && loop.best_email) {
+      // Defer returning the risky row — give LLM web-search a shot
+      // first. If web-search misses too, we return this risky fallback.
+      loopRiskyMeta = {
+        pattern: loop.best_pattern ?? "",
+        constructed_email: loop.best_email,
+        mv_status: loop.best_status ?? "risky",
+        notes: `Constructed via 8-pattern loop (${loop.best_pattern}); MV=${loop.best_status ?? "risky"}`,
+      };
+    }
+  }
+
+  // 5. Phase 73 — LLM web-search last resort.
+  //
+  // Fires when Apollo + Hunter-finder + 8-pattern all miss for a
+  // Gate-C-named candidate. Calls OpenAI Responses API with the
+  // web_search tool. If a high-confidence published email is found,
+  // MV-verify it and write either a verified-primary row or a risky
+  // fallback row.
+  if (first && last && full && input.brand_name) {
+    const websearchFn = deps.llmWebSearch ?? llmWebSearchEmail;
+    let websearchResult;
+    try {
+      websearchResult = await websearchFn({
+        full_name: full,
+        brand_name: input.brand_name,
+      });
+    } catch (e) {
+      websearchResult = {
+        email: null,
+        source_url: null,
+        confidence: "none" as const,
+        error: e instanceof Error ? e.message : String(e),
+        raw_text: null,
+      };
+    }
+    if (websearchResult.email) {
+      // Verify the LLM-claimed email.
+      const v = await runVerifyForLoop(websearchResult.email).catch(() => null);
+      const mvStatus = v?.status ?? "unknown";
+      const isVerified = mvStatus === "verified";
+      const isRisky = mvStatus === "risky" || mvStatus === "catch_all";
+      if (deps.onLlmWebSearch) {
+        await safe(() =>
+          deps.onLlmWebSearch!({
+            email: websearchResult.email,
+            source_url: websearchResult.source_url,
+            confidence: websearchResult.confidence,
+            mv_status: mvStatus,
+            outcome:
+              isVerified || isRisky
+                ? "found"
+                : mvStatus === "invalid"
+                  ? "not_found"
+                  : "skipped",
+            reason: `llm_websearch found ${websearchResult.email} (confidence=${websearchResult.confidence}); MV=${mvStatus}`,
+          }),
+        );
+      }
+      if (isVerified || isRisky) {
+        const conf =
+          websearchResult.confidence === "high" ||
+          websearchResult.confidence === "medium" ||
+          websearchResult.confidence === "low"
+            ? websearchResult.confidence
+            : "low";
+        const notes = `Found via LLM web search; source: ${websearchResult.source_url ?? "(no URL)"}`;
+        return {
+          provider: "llm_websearch",
+          person: {
+            id: `llm_websearch:${full}`,
+            first_name: first || null,
+            last_name: last || null,
+            name: full || null,
+            title,
+            linkedin_headline: null,
+            linkedin_url: linkedinUrl,
+            seniority: null,
+            department: null,
+            email: websearchResult.email,
+            email_status: isVerified ? "verified" : "risky",
+            organization_id: null,
+            organization_name: null,
+            organization_domain: input.domain,
+          },
+          email_source: "llm_websearch",
+          cost_credits,
+          hunter_cost_usd,
+          llm_websearch_meta: {
+            source_url: websearchResult.source_url,
+            confidence: conf,
+            mv_status: mvStatus,
+            is_primary: isVerified,
+            notes,
+          },
+        };
+      }
+      // MV=invalid → fall through.
+    } else if (deps.onLlmWebSearch) {
+      await safe(() =>
+        deps.onLlmWebSearch!({
+          email: null,
+          source_url: null,
+          confidence: websearchResult.confidence,
           mv_status: null,
-          outcome: "skipped",
-          reason: pat.pattern
-            ? `Hunter pattern ${pat.pattern} confidence ${pat.pattern_confidence.toFixed(2)} < ${HUNTER_PATTERN_MIN_CONFIDENCE}.`
-            : `No Hunter pattern available for ${input.domain}.`,
+          outcome: websearchResult.error ? "error" : "not_found",
+          reason: websearchResult.error
+            ? `llm_websearch error: ${websearchResult.error}`
+            : `llm_websearch found no public email for ${full} at ${input.brand_name}`,
         }),
       );
     }
   }
 
-  // 5. Full miss — caller surfaces NEEDS_HUMAN_REVIEW with the spec copy.
+  // 6. Fall back to best risky pattern hit if the loop produced one
+  //    and web-search did not improve on it. Phase 73 §3b: "If MV
+  //    returns only `risky` results, keep the best risky as fallback".
+  if (loopRiskyMeta) {
+    return {
+      provider: "hunter_pattern",
+      person: {
+        id: `hunter_pattern:${full}`,
+        first_name: first || null,
+        last_name: last || null,
+        name: full || null,
+        title,
+        linkedin_headline: null,
+        linkedin_url: linkedinUrl,
+        seniority: null,
+        department: null,
+        email: loopRiskyMeta.constructed_email,
+        email_status: "risky",
+        organization_id: null,
+        organization_name: null,
+        organization_domain: input.domain,
+      },
+      email_source: "hunter_pattern",
+      cost_credits,
+      hunter_cost_usd,
+      hunter_pattern_meta: {
+        pattern: loopRiskyMeta.pattern,
+        constructed_email: loopRiskyMeta.constructed_email,
+        mv_status: loopRiskyMeta.mv_status,
+        is_primary: false,
+        notes: loopRiskyMeta.notes,
+      },
+    };
+  }
+
+  // 7. Full miss — caller surfaces NEEDS_HUMAN_REVIEW with the spec copy.
+  const missCopy = patternLoopRan
+    ? `Gate C identified ${full || "(unnamed)"}${title ? ` (${title})` : ""}. Looked at Apollo, Hunter, 8 common patterns, and public web sources — no verifiable email found. [Manual research suggested.]`
+    : `Gate C identified ${full || "(unnamed)"}${title ? ` (${title})` : ""}, but we couldn't find their email via Apollo or Hunter. [Manual research suggested.]`;
+  void loopBestKind;
   return {
     provider: "needs_review",
     person: null,
     email_source: "unknown",
     cost_credits,
     hunter_cost_usd,
-    reason: `Gate C identified ${full || "(unnamed)"}${title ? ` (${title})` : ""}, but we couldn't find their email via Apollo or Hunter. [Manual research suggested.]`,
+    reason: missCopy,
   };
 }
 
