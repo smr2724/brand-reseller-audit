@@ -1,12 +1,23 @@
 /**
  * Phase 70 — Verified contacts for the OutreachPicker.
  *
- * Returns the brand's `brand_contacts` rows that are MillionVerifier-
- * confirmed (email_verifier='millionverifier' AND email_status='verified'),
- * along with recent outlook-draft creation events from
+ * Returns the brand's `brand_contacts` rows that have passed the
+ * verifier cascade — `email_status='verified' AND email IS NOT NULL`
+ * — along with recent outlook-draft creation events from
  * `brand_contact_discovery_events`. Read-only; the picker uses the
  * separate POST /api/outreach/send-to-outlook route to actually create
  * drafts.
+ *
+ * Phase 73.3: `email_status='verified'` is the single trust gate.
+ * `email_verifier` and `email_source` are NOT filtered here — the
+ * manual-add route (and any future cascaded ZeroBounce verdict) sets
+ * `email_status='verified'` only after the same verifier cascade that
+ * the enrichment pipeline uses, so all sources (apollo, hunter,
+ * hunter_finder, hunter_pattern, llm_websearch, pattern_guess, manual)
+ * and both verifiers (millionverifier, zerobounce) are equally trusted
+ * once they reach the verified state. Filtering on a specific verifier
+ * here would silently drop ZB-authoritative rows and manual entries
+ * that cascaded to ZB.
  */
 import { NextResponse } from "next/server";
 import {
@@ -47,16 +58,16 @@ export async function GET(
     );
   }
 
-  // Filter: MillionVerifier-confirmed only. The brand_contacts schema
-  // does not have a literal `enrichment_state='valid'` value — its
-  // enrichment_state lifecycle is discovered/enriching/enriched/error.
-  // "MillionVerifier confirmed" maps to email_status='verified' with
-  // email_verifier='millionverifier' (per Phase 65 verifier stamp).
+  // Filter: verifier-cascade confirmed. `email_status='verified'` is
+  // the single trust gate — write paths (enrich-contact, manual-add)
+  // only stamp it after an authoritative `verified` verdict from the
+  // MV→ZB cascade. Filtering on a specific `email_verifier` or
+  // `email_source` here would silently exclude legitimate rows (e.g.
+  // ZB-authoritative verdicts, manual entries that cascaded to ZB).
   const { data: contacts, error } = await admin
     .from("brand_contacts")
     .select(CONTACT_SELECT)
     .eq("brand_id", brand.id)
-    .eq("email_verifier", "millionverifier")
     .eq("email_status", "verified")
     .not("email", "is", null)
     .order("is_primary", { ascending: false })
