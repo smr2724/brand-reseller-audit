@@ -481,7 +481,14 @@ export async function enrichSingleContact(
   const brandNameForSearch =
     (input.brand_name ?? "").trim() ||
     (input.organization_name ?? "").trim();
-  if (!email && first && last && fullName && brandNameForSearch) {
+  // Phase 73.2 — the prior gate required BOTH first AND last names,
+  // which silently skipped LLM web-search whenever Gate C's name
+  // splitter only produced one part (e.g., the Maria Ringo on Carna4
+  // case where pattern loop ran but the first/last split came out
+  // unevenly). The prompt only needs a `full_name` + `brand_name`, so
+  // we relax to that. The full-name + brand-name guard is still
+  // enforced because the prompt template substitutes both.
+  if (!email && fullName && brandNameForSearch) {
     let websearch;
     try {
       websearch = await llmWebSearchEmail({
@@ -599,9 +606,11 @@ export async function enrichSingleContact(
       contact_id,
       provider: "llm_websearch",
       outcome: "skipped",
-      reason: brandNameForSearch
-        ? `llm_websearch skipped — need full first+last+full_name for ${fullName}.`
-        : `llm_websearch skipped — no brand_name available.`,
+      reason: !fullName
+        ? `llm_websearch skipped — no full_name available.`
+        : !brandNameForSearch
+          ? `llm_websearch skipped — no brand_name available.`
+          : `llm_websearch skipped — preconditions not met for ${fullName}.`,
     });
   }
 
