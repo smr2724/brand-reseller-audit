@@ -35,6 +35,7 @@ import {
   createSupabaseServerClient,
 } from "@/lib/supabase/server";
 import { enrichSingleContact } from "@/lib/contacts/enrich-contact";
+import { escapeIlike } from "@/lib/contacts/ilike";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -84,14 +85,9 @@ function extractDomain(input: string | null): string | null {
   return s;
 }
 
-/**
- * Case-insensitive name match scoped by brand_id. Uses Postgres
- * `lower(full_name)=lower($1)` semantics via `.ilike` with no
- * wildcards — server-side, no full-table scan in JS.
- */
-function escapeIlike(s: string): string {
-  return s.replace(/[\\%_]/g, (m) => `\\${m}`);
-}
+// escapeIlike now lives in src/lib/contacts/ilike.ts so manual-add can
+// share the same wildcard-safe lookup helper. See its docstring for the
+// `_` / `%` escape rationale.
 
 export async function POST(
   req: Request,

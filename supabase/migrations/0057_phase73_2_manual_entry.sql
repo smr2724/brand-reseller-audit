@@ -3,18 +3,20 @@
 -- Steve can now add a contact by hand from the merged Decision-Makers
 -- card (Apollo / Hunter / 8-pattern / LLM web-search all missed; he
 -- already knows the email from the brand's Contact page). The route
--- gates on MillionVerifier — only MV='valid' addresses get written —
--- and stamps the new row with `email_source='manual'`. The audit
--- trail surfaces a paired `provider='manual'` event so the discovery
--- panel shows that a human supplied the email.
+-- gates on the email-verifier cascade — only an authoritative
+-- `verified` verdict (MV-primary, ZeroBounce on MV catch_all/unknown)
+-- writes a row — and stamps the new row with `email_source='manual'`.
+-- The audit trail surfaces a paired `provider='manual'` event so the
+-- discovery panel shows that a human supplied the email.
 --
 -- Migration 0055 already allowed `email_source='manual'` on
--- brand_contacts (it was carried forward from the original 0040
--- constraint). The only widening needed here is the discovery-events
--- provider CHECK, which had no 'manual' value. Rebuild
--- brand_contacts.email_source_check too so this file is the canonical
--- statement of the current allowed set even if 0055 is ever rolled
--- back partially.
+-- brand_contacts. The new widening this file ships is on
+-- `brand_contact_discovery_events.provider`: the previous CHECK did
+-- not include 'manual', so the per-write audit event would otherwise
+-- be silently dropped by the events helper (which swallows insert
+-- errors by design). brand_contacts.email_source_check is rebuilt
+-- here too so this file is the canonical statement of the current
+-- allowed set even if 0055 is ever rolled back partially.
 --
 -- Idempotent: DROP CONSTRAINT IF EXISTS before ADD CONSTRAINT.
 

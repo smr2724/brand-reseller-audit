@@ -129,17 +129,24 @@ interface CandidateEnrichResp {
   llm_cost_usd?: number;
 }
 
-/** Phase 73.2 — manual-add route response shape. */
+/** Phase 73.2 — manual-add route response shape. `mv_status` is the
+ *  authoritative verifier's verdict — could come from MV or ZB after
+ *  the cascade. `verifier` tells us which provider produced it. */
 interface ManualAddResp {
   ok?: boolean;
   contact?: BrandContactRow;
   error?: string;
   mv_status?: string;
   mv_score?: number;
+  verifier?: "millionverifier" | "zerobounce" | "none";
   detail?: string;
 }
 
-const EMAIL_SHAPE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+// Phase 73.2 — match server-side EMAIL_SHAPE. Permits apostrophes etc.
+// so `j.o'connor@x.com` is not rejected client-side. Server still runs
+// the strict MV/ZB syntax check inside `verifyEmail`.
+const EMAIL_SHAPE =
+  /^[A-Za-z0-9._%+\-'!#$&*/=?^_`{|}~]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 
 function formatRevenue(n: number | null): string {
   if (!n) return "—";
@@ -231,6 +238,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   zerobounce: "ZeroBounce",
   orchestrator: "Orchestrator",
   enrichment_deferred: "Enrichment Deferred",
+  manual: "Manual",
 };
 
 export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
@@ -502,8 +510,20 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
       });
       const j = (await r.json().catch(() => ({}))) as ManualAddResp;
       if (r.status === 422 && j.error === "mv_rejected") {
+        const verifierName =
+          j.verifier === "zerobounce"
+            ? "ZeroBounce"
+            : j.verifier === "millionverifier"
+              ? "MillionVerifier"
+              : "The email verifier";
         setManualInlineError(
-          `MillionVerifier says this address is ${j.mv_status ?? "non-valid"}. Manual entries must be MV-valid. Please try a different email.`,
+          `${verifierName} says this address is ${j.mv_status ?? "non-valid"}. Manual entries must be MV-valid. Please try a different email.`,
+        );
+        return;
+      }
+      if (r.status === 502 && j.error === "mv_unavailable") {
+        setManualInlineError(
+          `Email verifier is currently unavailable — we couldn't determine whether the address is valid. Please try again in a few minutes. ${j.detail ?? ""}`.trim(),
         );
         return;
       }
@@ -972,7 +992,13 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
                 type="button"
                 className="btn"
                 onClick={() => void submitManual()}
-                disabled={manualSubmitting}
+                disabled={
+                  manualSubmitting ||
+                  manualFirst.trim().length === 0 ||
+                  manualLast.trim().length === 0 ||
+                  manualTitle.trim().length === 0 ||
+                  !EMAIL_SHAPE.test(manualEmail.trim().toLowerCase())
+                }
               >
                 {manualSubmitting ? "Verifying…" : "Verify & save"}
               </button>
