@@ -135,6 +135,15 @@ interface CandidateRowState {
   contact: BrandContactRow | null;
 }
 
+interface CandidateEnrichResp {
+  ok?: boolean;
+  state?: "enriched" | "already" | "error";
+  contact?: BrandContactRow | null;
+  events?: DiscoveryEvent[];
+  error?: string;
+  llm_cost_usd?: number;
+}
+
 function formatRevenue(n: number | null): string {
   if (!n) return "—";
   if (n >= 1_000_000_000) return `~$${(n / 1_000_000_000).toFixed(1)}B`;
@@ -237,6 +246,10 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
   const [contacts, setContacts] = useState<BrandContactRow[]>([]);
   const [events, setEvents] = useState<DiscoveryEvent[]>([]);
   const [enrichingIds, setEnrichingIds] = useState<Set<string>>(new Set());
+  /** Phase 73.1 — track in-flight enriches for unseeded named
+   *  candidates (no brand_contact row yet). Keyed by lower-cased name
+   *  since there's no id to track. */
+  const [enrichingNames, setEnrichingNames] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   /** Phase 73 — extra LLM web-search cost accumulated across enrich
@@ -320,6 +333,58 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
       setEnrichingIds((prev) => {
         const next = new Set(prev);
         next.delete(contactId);
+        return next;
+      });
+    }
+  }
+
+  /** Phase 73.1 — per-row Enrich for a named candidate that has no
+   *  brand_contacts row yet. The server endpoint either finds the
+   *  existing row by full_name OR seeds a new one in `discovered`
+   *  state, then runs the same fallback chain as bulk Enrich. */
+  async function enrichCandidate(row: CandidateRowState): Promise<void> {
+    const key = row.name.trim().toLowerCase();
+    if (!key) return;
+    setEnrichingNames((prev) => new Set(prev).add(key));
+    setErr(null);
+    try {
+      const r = await fetch(
+        `/api/brands/${brandId}/contacts/enrich-candidate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: row.name,
+            title: row.title,
+            linkedin_url: row.linkedin_url,
+          }),
+        },
+      );
+      const j = (await r.json().catch(() => ({}))) as CandidateEnrichResp;
+      if (!r.ok) {
+        setErr(j.error ?? `enrich error ${r.status}`);
+        return;
+      }
+      if (j.contact) {
+        setContacts((prev) => {
+          const has = prev.some((c) => c.id === j.contact!.id);
+          return has
+            ? prev.map((c) => (c.id === j.contact!.id ? j.contact! : c))
+            : [...prev, j.contact!];
+        });
+      }
+      if (j.events && j.events.length > 0) {
+        setEvents((prev) => [...prev, ...(j.events ?? [])]);
+      }
+      if (typeof j.llm_cost_usd === "number" && j.llm_cost_usd > 0) {
+        setExtraLlmCost((c) => c + j.llm_cost_usd!);
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setEnrichingNames((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
         return next;
       });
     }
@@ -437,9 +502,16 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
     !!strategy.created_at &&
     Date.parse(strategy.created_at) < Date.parse(qualUpdatedAt);
 
+  // Phase 73.1 — "unenriched" = no contact row at all, OR a contact
+  // row with no resolved email. The bulk button now hides at 0 and
+  // shows dynamic copy ("Enrich" / "Enrich top 2" / "Enrich top 3").
   const unEnrichedCount = candidateRows.filter(
-    (r) => !r.contact || r.contact.enrichment_state === "discovered",
+    (r) => !r.contact || !r.contact.email,
   ).length;
+  const bulkButtonLabel =
+    unEnrichedCount === 1
+      ? "Enrich"
+      : `Enrich top ${Math.min(unEnrichedCount, 3)}`;
 
   return (
     <div className="card p-4 mb-4">
@@ -519,14 +591,21 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
           <ul className="space-y-2">
             {candidateRows.map((row, idx) => {
               const contact = row.contact;
+              const nameKey = row.name.trim().toLowerCase();
+              const candidateEnriching = enrichingNames.has(nameKey);
               const enriching =
-                contact != null &&
-                (enrichingIds.has(contact.id) ||
-                  contact.enrichment_state === "enriching");
+                candidateEnriching ||
+                (contact != null &&
+                  (enrichingIds.has(contact.id) ||
+                    contact.enrichment_state === "enriching"));
+              // Phase 73.1 — "already enriched" means the row has a
+              // non-null email. Rows in `enriched` state without an
+              // email (Apollo unlock burned but missed) still get a
+              // re-enrich shot via the fallback chain.
               const alreadyEnriched =
                 contact != null &&
-                (contact.enrichment_state === "enriched" ||
-                  contact.enrichment_state === "enriching");
+                contact.email != null &&
+                contact.email.length > 0;
               return (
                 <li
                   key={contact?.id ?? `nc:${idx}`}
@@ -544,31 +623,33 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
                         </span>
                       )}
                     </div>
-                    {contact ? (
+                    {alreadyEnriched ? (
+                      <span
+                        className="text-[11px] text-emerald-300"
+                        title="Already enriched"
+                      >
+                        ✓ enriched
+                      </span>
+                    ) : contact ? (
                       <button
                         type="button"
                         className="btn btn-ghost text-[11px]"
-                        disabled={enriching || alreadyEnriched}
-                        title={
-                          alreadyEnriched
-                            ? "Already enriched"
-                            : "Spend an Apollo email credit to unlock this contact's email."
-                        }
+                        disabled={enriching}
+                        title="Run the fallback chain (Apollo → Hunter → 8-pattern → LLM web-search) for this row."
                         onClick={() => void enrichSingle(contact.id)}
                       >
-                        {enriching
-                          ? "Enriching…"
-                          : alreadyEnriched
-                            ? "✓ enriched"
-                            : "Enrich"}
+                        {enriching ? "Enriching…" : "Enrich"}
                       </button>
                     ) : (
-                      <span
-                        className="text-[11px] text-[var(--text-muted)]"
-                        title="Run contact strategy to materialize this candidate."
+                      <button
+                        type="button"
+                        className="btn btn-ghost text-[11px]"
+                        disabled={enriching}
+                        title="Seed this candidate and run the full fallback chain."
+                        onClick={() => void enrichCandidate(row)}
                       >
-                        not seeded
-                      </span>
+                        {enriching ? "Enriching…" : "Enrich"}
+                      </button>
                     )}
                   </div>
                   <div className="mt-1 text-[var(--text-muted)] flex flex-wrap gap-x-2">
@@ -664,20 +745,22 @@ export default function ContactStrategyPanel({ brandId }: { brandId: string }) {
       )}
 
       <div className="flex flex-wrap gap-2 mt-3">
-        <button
-          className="btn"
-          onClick={() => void enrichTop3()}
-          disabled={bulkRunning || unEnrichedCount === 0 || !ready}
-          title={
-            !ready
-              ? "Available only when verdict=ready"
-              : unEnrichedCount === 0
-                ? "All candidates already enriched"
-                : "Enrich up to the first 3 not-yet-enriched candidates"
-          }
-        >
-          {bulkRunning ? "Enriching…" : "Enrich top 3"}
-        </button>
+        {unEnrichedCount > 0 && (
+          <button
+            className="btn"
+            onClick={() => void enrichTop3()}
+            disabled={bulkRunning || !ready}
+            title={
+              !ready
+                ? "Available only when verdict=ready"
+                : unEnrichedCount === 1
+                  ? "Enrich the one not-yet-enriched candidate"
+                  : `Enrich up to the first ${Math.min(unEnrichedCount, 3)} not-yet-enriched candidates`
+            }
+          >
+            {bulkRunning ? "Enriching…" : bulkButtonLabel}
+          </button>
+        )}
         <button className="btn" onClick={() => void run()} disabled={running}>
           {running ? "Retrying…" : "Retry with different titles"}
         </button>

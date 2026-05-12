@@ -499,8 +499,16 @@ export async function enrichSingleContact(
     }
     llm_cost_usd += LLM_WEBSEARCH_COST_USD;
     if (websearch.email) {
+      // Phase 73.1 — MV-verify the LLM-returned email BEFORE writing
+      // it to brand_contacts. We record TWO discovery events: the
+      // llm_websearch hit, and an explicit `millionverifier` event
+      // with the MV verdict. Invariant: no brand_contacts row may
+      // have email_status='verified' from the LLM path without a
+      // passing MV event in brand_contact_discovery_events.
       const v = await verifyEmail(websearch.email).catch(() => null);
       const mvStatus = v?.status ?? "unknown";
+      const mvScore =
+        typeof v?.score === "number" ? clampScore(v.score) : null;
       const isVerified = mvStatus === "verified";
       const isRisky = mvStatus === "risky" || mvStatus === "catch_all";
       await recordDiscoveryEvent({
@@ -522,6 +530,23 @@ export async function enrichSingleContact(
           confidence: websearch.confidence,
         },
       });
+      await recordDiscoveryEvent({
+        brand_id,
+        run_id,
+        contact_id,
+        provider: "millionverifier",
+        outcome:
+          isVerified || isRisky
+            ? "found"
+            : mvStatus === "invalid"
+              ? "not_found"
+              : "skipped",
+        reason: `MillionVerifier gate (llm_websearch): ${mvStatus} for ${websearch.email}`,
+        email_returned: websearch.email,
+        status_returned: mvStatus,
+        score_returned: mvScore,
+        raw_payload: v?.raw ?? null,
+      });
       if (isVerified || isRisky) {
         email = websearch.email;
         email_source = "llm_websearch";
@@ -530,6 +555,10 @@ export async function enrichSingleContact(
         alreadyVerifiedStatus = mvStatus;
         alreadyVerifiedScore = typeof v?.score === "number" ? v.score : null;
       }
+      // mvStatus === 'invalid' (or disposable→risky) is already
+      // handled above: we never set `email`, so the row is not
+      // written. The MV audit event is the spec-required
+      // provider='millionverifier' record of that rejection.
     } else {
       await recordDiscoveryEvent({
         brand_id,

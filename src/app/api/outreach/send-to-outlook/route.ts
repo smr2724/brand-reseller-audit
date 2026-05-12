@@ -126,7 +126,7 @@ export async function POST(req: Request) {
     );
   }
   const contactSelect =
-    "id, brand_id, first_name, last_name, full_name, email, is_primary";
+    "id, brand_id, first_name, last_name, full_name, email, email_status, is_primary";
   let contactRow: {
     id: string;
     brand_id: string;
@@ -134,6 +134,7 @@ export async function POST(req: Request) {
     last_name: string | null;
     full_name: string | null;
     email: string | null;
+    email_status: string | null;
     is_primary: boolean | null;
   } | null = null;
 
@@ -170,6 +171,23 @@ export async function POST(req: Request) {
     return NextResponse.json(
       { error: "contact_missing_email", message: "Contact has no email address." },
       { status: 400 },
+    );
+  }
+
+  // Phase 73.1 — server-side re-validation of email_status. The
+  // OutreachPicker (Phase 70) already filters by email_status='verified',
+  // but we never trust the client: a stale tab, custom POST, or skew
+  // between picker and DB could let an unverified contact through. Reject
+  // anything not in the MillionVerifier-confirmed 'verified' bucket with
+  // 422 before constructing the Graph draft.
+  if (contactRow.email_status !== "verified") {
+    return NextResponse.json(
+      {
+        error: "contact_not_verified",
+        message: `Contact email_status='${contactRow.email_status ?? "null"}' — only MillionVerifier-verified contacts can be drafted to Outlook.`,
+        email_status: contactRow.email_status,
+      },
+      { status: 422 },
     );
   }
 

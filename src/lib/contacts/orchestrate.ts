@@ -290,6 +290,31 @@ export async function runContactDiscovery(
             status_returned: mv_status,
             raw_payload: { email, source_url, confidence, mv_status },
           });
+          // Phase 73.1 — mandatory MV-verify audit on the
+          // llm_websearch path. Whenever the LLM produced an email
+          // AND we ran MillionVerifier on it (mv_status != null), we
+          // emit an explicit provider='millionverifier' event so the
+          // invariant "no email_status='verified' from llm_websearch
+          // without an MV event" holds.
+          if (email && mv_status) {
+            await recordDiscoveryEvent({
+              brand_id: brandId,
+              run_id: runId,
+              provider: "millionverifier",
+              outcome:
+                mv_status === "verified" ||
+                mv_status === "risky" ||
+                mv_status === "catch_all"
+                  ? "found"
+                  : mv_status === "invalid"
+                    ? "not_found"
+                    : "skipped",
+              reason: `MillionVerifier gate (llm_websearch): ${mv_status} for ${email}`,
+              email_returned: email,
+              status_returned: mv_status,
+              raw_payload: { source: "llm_websearch_gate", source_url, confidence },
+            });
+          }
         },
       },
     );
