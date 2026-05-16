@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Settings, LogOut, Menu, X, Zap, Building2, Upload, ClipboardCheck, Database, FileText, Mail, Users } from "lucide-react";
+import { LayoutDashboard, Settings, LogOut, Menu, X, Zap, Building2, Upload, ClipboardCheck, Database, FileText, Mail, Users, Workflow } from "lucide-react";
 
 const NAV = [
   { href: "/app/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -12,6 +12,7 @@ const NAV = [
   { href: "/app/reports", label: "Reports", icon: FileText },
   { href: "/app/contacts", label: "Contacts", icon: Users },
   { href: "/app/outreach", label: "Outreach", icon: Mail },
+  { href: "/bulk", label: "Bulk Pipeline", icon: Workflow },
   { href: "/app/imports", label: "Imports", icon: Upload },
   { href: "/app/settings", label: "Settings", icon: Settings },
 ];
