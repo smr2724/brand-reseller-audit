@@ -88,6 +88,26 @@ async function sendRaw(input: SendInput): Promise<ResendSendResult> {
 }
 
 // =============================================================
+// Generic send (Phase 75)
+// =============================================================
+
+/**
+ * Phase 75 — Send a fully-rendered HTML email through Resend.
+ * Internal-only escape hatch for transactional summaries that already
+ * carry their own inline-styled body (e.g. the bulk-run report). Does
+ * NOT add STEVE_CC — callers control the cc list explicitly.
+ */
+export async function sendTransactionalEmail(input: {
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+  cc?: string[];
+}): Promise<ResendSendResult> {
+  return sendRaw(input);
+}
+
+// =============================================================
 // Templates
 // =============================================================
 
