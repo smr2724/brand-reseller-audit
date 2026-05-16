@@ -7,6 +7,7 @@
  * 250 / 1000 / 4000 ms backoff on 429/5xx; 401/403 fail-closed.
  */
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { trackCost } from "@/lib/cost/track";
 
 const HUNTER_BASE = "https://api.hunter.io/v2";
 
@@ -193,6 +194,13 @@ export async function hunterEmailFinder(input: {
     0.07,
     `domain=${input.domain} ${input.first_name} ${input.last_name}`,
   );
+  const emailFound = !!json?.data?.email;
+  // Phase 81 — Hunter only charges a credit when an email is returned.
+  await trackCost({
+    provider: "hunter",
+    operation: emailFound ? "hunter_email_finder" : "hunter_email_finder_miss",
+    units: emailFound ? 1 : 0,
+  });
   return {
     ok: true,
     email: json?.data?.email ?? null,

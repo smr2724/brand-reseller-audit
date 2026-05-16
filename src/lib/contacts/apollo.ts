@@ -13,6 +13,7 @@
  */
 import { encodeApolloFormBody } from "./apollo-encoding";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { trackCost } from "@/lib/cost/track";
 
 const APOLLO_BASE = "https://api.apollo.io/api/v1";
 
@@ -200,6 +201,16 @@ export async function apolloUnlockPerson(
   const raw = (data as { person?: unknown; matches?: unknown[] })?.person ??
     (data as { matches?: unknown[] })?.matches?.[0] ??
     null;
+  // Phase 81 — log Apollo people-match cost. Apollo only burns the credit
+  // when an email reveal succeeds; we approximate by checking for an
+  // email field on the returned person.
+  const revealedEmail =
+    !!(raw as { email?: string } | null)?.email && String((raw as { email?: string }).email).trim().length > 0;
+  await trackCost({
+    provider: "apollo",
+    operation: "apollo_people_match",
+    units: revealedEmail ? 1 : 0,
+  });
   if (!raw) {
     return { ok: true, person: null, raw: data };
   }
@@ -282,6 +293,12 @@ export async function apolloSearchPeople(input: {
     0,
     `domain=${input.organization_domain} titles=${(input.titles ?? []).join(",")}`,
   );
+  // Phase 81 — log 0-cost Apollo search for auditability.
+  await trackCost({
+    provider: "apollo",
+    operation: "apollo_org_search",
+    units: 0,
+  });
   const people = (data?.people ?? []).map(slimPerson);
   const total =
     data?.pagination?.total_entries ??

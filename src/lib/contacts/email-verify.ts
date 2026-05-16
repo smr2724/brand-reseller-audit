@@ -22,6 +22,7 @@
  * NOT as a definite verdict. Same logic applies symmetrically to ZB.
  */
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { trackCost } from "@/lib/cost/track";
 
 export type VerifyStatus =
   | "verified"
@@ -238,6 +239,12 @@ async function callMillionVerifier(
     0.005,
     `email=${email} result=${(json as { result?: string })?.result ?? "?"}`,
   );
+  // Phase 81 — log MV verification cost (1 unit / verification, regardless of verdict).
+  await trackCost({
+    provider: "million_verifier",
+    operation: "mv_verify",
+    units: 1,
+  });
   const body = json as {
     result?: string;
     resultcode?: number;

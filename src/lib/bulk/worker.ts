@@ -31,6 +31,7 @@ import { runContactDiscovery } from "@/lib/contacts/orchestrate";
 import { createDraft } from "@/lib/microsoft/graph";
 import { persistBrandEconomics } from "@/lib/brand-detail/persist-economics";
 import { buildSteveOutreachEmail } from "@/lib/outreach/steve-template";
+import { withBulkCtx, setBulkCtxBrandId } from "@/lib/cost/track";
 
 // Phase 73.3 / Phase 75: a contact is draft-eligible when its email_status is 'verified'.
 // The legacy MV enum 'valid'|'invalid'|'risky'|'unknown' is documented on the migration
@@ -170,6 +171,33 @@ interface BrandLookupCandidateShape {
  * the row even when something blows up so the run continues.
  */
 export async function processBulkBrand(
+  rowId: string,
+): Promise<{ ok: boolean; status: string; error?: string }> {
+  // Phase 81 — establish AsyncLocalStorage cost context so every
+  // provider call inside this brand's processing tree (Keepa, Apollo,
+  // Hunter, MV, OpenAI, Resend) can log its cost against this run.
+  // brand_id is filled in via setBulkCtxBrandId once Keepa enrichment
+  // resolves it.
+  const adminPre = createSupabaseAdminClient();
+  if (!adminPre) {
+    return { ok: false, status: "error", error: "SUPABASE_SERVICE_ROLE_KEY missing" };
+  }
+  const { data: preRow } = await adminPre
+    .from("bulk_run_brands")
+    .select("id, bulk_run_id")
+    .eq("id", rowId)
+    .maybeSingle<{ id: string; bulk_run_id: string }>();
+  return withBulkCtx(
+    {
+      bulkRunId: preRow?.bulk_run_id ?? null,
+      bulkRunBrandId: rowId,
+      brandId: null,
+    },
+    () => processBulkBrandImpl(rowId),
+  );
+}
+
+async function processBulkBrandImpl(
   rowId: string,
 ): Promise<{ ok: boolean; status: string; error?: string }> {
   const admin = createSupabaseAdminClient();
@@ -325,6 +353,11 @@ export async function processBulkBrand(
     .from("bulk_runs")
     .update({ current_brand_id: brandId, updated_at: new Date().toISOString() })
     .eq("id", row.bulk_run_id);
+
+  // Phase 81 — now that brand_id is known, surface it on the ALS cost
+  // context so subsequent provider calls (qualification LLM, Apollo
+  // unlock, MV verify, Resend draft) annotate api_costs with brand_id.
+  setBulkCtxBrandId(brandId);
 
   // ---- Step 3: Qualify ----
   await patchRow(admin, rowId, {

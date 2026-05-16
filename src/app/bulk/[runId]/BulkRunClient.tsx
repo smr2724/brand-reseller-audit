@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
 interface BrandRow {
@@ -28,6 +28,9 @@ interface BrandRow {
   error_step: string | null;
   started_at: string | null;
   completed_at: string | null;
+  // Phase 81 — cost rollup populated by trackCost().
+  cost_total_usd: number | null;
+  cost_breakdown: Record<string, number> | null;
 }
 
 function economicsBadge(
@@ -52,6 +55,8 @@ interface RunRow {
   error_message: string | null;
   created_at: string;
   updated_at: string;
+  // Phase 81 — run-level cost total.
+  cost_total_usd: number | null;
 }
 
 function fmtTs(s: string | null): string {
@@ -70,6 +75,24 @@ function fmtMoney(n: number | null): string {
   if (Math.abs(v) >= 1_000) return `$${Math.round(v / 1_000).toLocaleString()}K`;
   return `$${Math.round(v).toLocaleString()}`;
 }
+
+// Phase 81 — Cost display: 4dp when under $1, 2dp at $1+. Honest about
+// fractional cents instead of rounding tiny API charges down to $0.00.
+function fmtCost(n: number | null | undefined): string {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "$0.0000";
+  if (Math.abs(v) < 1) return `$${v.toFixed(4)}`;
+  return `$${v.toFixed(2)}`;
+}
+
+const COST_PROVIDERS: { key: string; label: string }[] = [
+  { key: "keepa", label: "Keepa" },
+  { key: "apollo", label: "Apollo" },
+  { key: "hunter", label: "Hunter" },
+  { key: "million_verifier", label: "MillionVerifier" },
+  { key: "openai", label: "OpenAI" },
+  { key: "resend", label: "Resend" },
+];
 
 function statusBadgeForBrand(b: BrandRow): { label: string; bg: string; fg: string } {
   if (b.status === "completed" && b.qualified && b.outlook_draft_id) {
@@ -142,6 +165,7 @@ export default function BulkRunClient({ runId }: { runId: string }) {
   const [run, setRun] = useState<RunRow | null>(null);
   const [brands, setBrands] = useState<BrandRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -238,6 +262,9 @@ export default function BulkRunClient({ runId }: { runId: string }) {
         <span style={{ color: "#666", fontSize: 13 }}>
           {run.brands_completed} / {run.total_brands} completed
         </span>
+        <span style={{ color: "#666", fontSize: 13 }}>
+          Total cost <strong>{fmtCost(run.cost_total_usd ?? 0)}</strong>
+        </span>
       </div>
       <p style={{ color: "#888", fontSize: 12, margin: "0 0 24px" }}>
         Started {fmtTs(run.started_at)} · run id <code>{run.id}</code>
@@ -291,14 +318,41 @@ export default function BulkRunClient({ runId }: { runId: string }) {
               <th style={th}>Draft</th>
               <th style={{ ...th, textAlign: "right" }}>7x Opportunity ($)</th>
               <th style={{ ...th, textAlign: "right" }}>Opportunity</th>
+              <th style={{ ...th, textAlign: "right" }}>Cost</th>
             </tr>
           </thead>
           <tbody>
             {(showReport ? ranked : brands).map((b, idx) => {
               const badge = statusBadgeForBrand(b);
+              const isOpen = expandedId === b.id;
               return (
-                <tr key={b.id} style={{ borderTop: "1px solid #eee" }}>
-                  <td style={td}>{showReport ? idx + 1 : b.position}</td>
+                <Fragment key={b.id}>
+                <tr
+                  style={{
+                    borderTop: "1px solid #eee",
+                    cursor: "pointer",
+                    background: isOpen ? "#fafaf6" : undefined,
+                  }}
+                  onClick={() =>
+                    setExpandedId(isOpen ? null : b.id)
+                  }
+                >
+                  <td style={td}>
+                    <span
+                      aria-hidden
+                      style={{
+                        display: "inline-block",
+                        marginRight: 6,
+                        transform: isOpen ? "rotate(90deg)" : "rotate(0deg)",
+                        transition: "transform 0.15s",
+                        color: "#888",
+                        fontSize: 11,
+                      }}
+                    >
+                      ▶
+                    </span>
+                    {showReport ? idx + 1 : b.position}
+                  </td>
                   <td style={td}>
                     <strong>{b.input_name}</strong>
                     {(() => {
@@ -415,7 +469,82 @@ export default function BulkRunClient({ runId }: { runId: string }) {
                   <td style={{ ...td, textAlign: "right" }}>
                     {fmtMoney(b.legion_opportunity)}
                   </td>
+                  <td style={{ ...td, textAlign: "right" }}>
+                    {fmtCost(b.cost_total_usd ?? 0)}
+                  </td>
                 </tr>
+                {isOpen ? (
+                  <tr style={{ background: "#fafaf6" }}>
+                    <td colSpan={12} style={{ padding: "12px 16px 18px" }}>
+                      {b.cost_breakdown && Object.keys(b.cost_breakdown).length > 0 ? (
+                        <div>
+                          <div style={{ fontSize: 12, color: "#555", marginBottom: 6 }}>
+                            Per-provider cost breakdown
+                          </div>
+                          <table style={{ borderCollapse: "collapse", minWidth: 320 }}>
+                            <tbody>
+                              {COST_PROVIDERS.map((p) => {
+                                const v = Number(b.cost_breakdown?.[p.key] ?? 0) || 0;
+                                return (
+                                  <tr key={p.key}>
+                                    <td
+                                      style={{
+                                        padding: "4px 12px 4px 0",
+                                        fontSize: 13,
+                                        color: "#444",
+                                      }}
+                                    >
+                                      {p.label}
+                                    </td>
+                                    <td
+                                      style={{
+                                        padding: "4px 0",
+                                        fontSize: 13,
+                                        fontFamily: "monospace",
+                                        textAlign: "right",
+                                        color: v > 0 ? "#1a1a1a" : "#999",
+                                      }}
+                                    >
+                                      {fmtCost(v)}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                              <tr style={{ borderTop: "1px solid #ddd" }}>
+                                <td
+                                  style={{
+                                    padding: "6px 12px 4px 0",
+                                    fontSize: 13,
+                                    color: "#1a1a1a",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  Total
+                                </td>
+                                <td
+                                  style={{
+                                    padding: "6px 0 4px",
+                                    fontSize: 13,
+                                    fontFamily: "monospace",
+                                    fontWeight: 600,
+                                    textAlign: "right",
+                                  }}
+                                >
+                                  {fmtCost(b.cost_total_usd ?? 0)}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 12, color: "#888" }}>
+                          No cost data available
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ) : null}
+                </Fragment>
               );
             })}
           </tbody>

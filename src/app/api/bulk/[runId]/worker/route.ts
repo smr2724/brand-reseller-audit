@@ -23,6 +23,7 @@ import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import { claimNextQueuedBrand, processBulkBrand } from "@/lib/bulk/worker";
 import { renderBulkRunReportHtml, type BulkReportBrand } from "@/lib/bulk/report";
 import { sendTransactionalEmail } from "@/lib/email/resend";
+import { withBulkCtx } from "@/lib/cost/track";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -86,7 +87,7 @@ async function finalize(req: Request, runId: string): Promise<NextResponse> {
   const { data: run } = await admin
     .from("bulk_runs")
     .select(
-      "id, user_id, status, total_brands, started_at, completed_at, report_email_sent_at",
+      "id, user_id, status, total_brands, started_at, completed_at, report_email_sent_at, cost_total_usd",
     )
     .eq("id", runId)
     .maybeSingle();
@@ -117,7 +118,7 @@ async function finalize(req: Request, runId: string): Promise<NextResponse> {
   const { data: brandsRaw } = await admin
     .from("bulk_run_brands")
     .select(
-      "position, input_name, brand_id, status, qualified, disqualification_reason, selected_entity_name, resolved_owner_domain, contact_name, contact_email, email_verifier, email_status, outlook_draft_id, outlook_draft_web_link, brand_seven_x_value, legion_opportunity, economics_status, error_message, error_step",
+      "position, input_name, brand_id, status, qualified, disqualification_reason, selected_entity_name, resolved_owner_domain, contact_name, contact_email, email_verifier, email_status, outlook_draft_id, outlook_draft_web_link, brand_seven_x_value, legion_opportunity, economics_status, error_message, error_step, cost_total_usd, cost_breakdown",
     )
     .eq("bulk_run_id", runId)
     .order("position", { ascending: true });
@@ -132,17 +133,28 @@ async function finalize(req: Request, runId: string): Promise<NextResponse> {
     completedAt: (run.completed_at as string | null) ?? nowIso,
     appBaseUrl: origin,
     brands,
+    runCostTotalUsd:
+      typeof (run as { cost_total_usd?: unknown }).cost_total_usd === "number"
+        ? Number((run as { cost_total_usd: number }).cost_total_usd)
+        : Number((run as { cost_total_usd?: unknown }).cost_total_usd ?? 0) || null,
   });
 
   let emailOk = false;
   let emailError: string | null = null;
   try {
-    const sendRes = await sendTransactionalEmail({
-      to: STEVE_TO,
-      subject: report.subject,
-      html: report.html,
-      text: report.text,
-    });
+    // Phase 81 — establish ALS cost context so the Resend summary-send
+    // attributes its $0.0004 to the run total (but NOT to any per-brand
+    // breakdown — bulkRunBrandId is null).
+    const sendRes = await withBulkCtx(
+      { bulkRunId: runId, bulkRunBrandId: null, brandId: null },
+      () =>
+        sendTransactionalEmail({
+          to: STEVE_TO,
+          subject: report.subject,
+          html: report.html,
+          text: report.text,
+        }),
+    );
     emailOk = sendRes.ok;
     if (!emailOk) emailError = sendRes.error ?? "send failed";
   } catch (e) {
