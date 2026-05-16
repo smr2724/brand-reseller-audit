@@ -4,6 +4,7 @@
  * before calling Keepa.
  */
 import { fetchWithTimeout } from "@/lib/util/timing";
+import { trackCost } from "@/lib/cost/track";
 
 const BASE = "https://api.keepa.com";
 
@@ -752,6 +753,12 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
         tokens_left: Number(json?.tokensLeft ?? 0),
       }),
     );
+    // Phase 81 — log /product token consumption (1 token per ASIN in chunk).
+    await trackCost({
+      provider: "keepa",
+      operation: "keepa_product",
+      units: chunk.length,
+    });
     const products = Array.isArray(json?.products) ? json.products : [];
     const tokensLeft = Number(json?.tokensLeft ?? 0);
     TOKEN_CACHE = { t: Date.now(), v: { tokens_left: tokensLeft, refill_in_ms: Number(json?.refillIn ?? 0), refill_rate: Number(json?.refillRate ?? 0) } };

@@ -6,6 +6,8 @@
  * follow-up still happens out of his Outlook (Phase 6.5 helpers).
  */
 
+import { trackCost } from "@/lib/cost/track";
+
 const RESEND_API = "https://api.resend.com/emails";
 
 const FROM_DEFAULT =
@@ -73,12 +75,25 @@ async function sendRaw(input: SendInput): Promise<ResendSendResult> {
   }
   const text = await resp.text();
   if (!resp.ok) {
+    // Phase 81 — failed send: log 0 cost so the row appears in the audit
+    // trail but doesn't roll up.
+    await trackCost({
+      provider: "resend",
+      operation: "resend_send",
+      units: 0,
+    });
     return {
       ok: false,
       status: resp.status,
       error: `Resend ${resp.status}: ${text.slice(0, 300)}`,
     };
   }
+  // Phase 81 — count a successful send as 1 unit.
+  await trackCost({
+    provider: "resend",
+    operation: "resend_send",
+    units: 1,
+  });
   try {
     const data = JSON.parse(text) as { id?: string };
     return { ok: true, id: data.id };

@@ -16,6 +16,7 @@
  * adds an "injectable" client for tests.
  */
 import OpenAI from "openai";
+import { trackCost } from "@/lib/cost/track";
 
 export const QUALIFICATION_SMALL_MODEL = "gpt-4o-mini";
 export const QUALIFICATION_MAIN_MODEL = "gpt-4.1";
@@ -93,6 +94,15 @@ export async function callQualificationLlm(
     | undefined;
   const tokens_in = usage?.prompt_tokens ?? 0;
   const tokens_out = usage?.completion_tokens ?? 0;
+  // Phase 81 — log dollar cost from real token usage. Pricing in the
+  // central cost module is gpt-4o-mini; non-mini callers (gpt-4.1) will
+  // still log under "openai" so the rollup includes them.
+  await trackCost({
+    provider: "openai",
+    operation: "openai_qualification",
+    inputTokens: tokens_in,
+    outputTokens: tokens_out,
+  });
   return {
     parsed,
     raw_text: text,

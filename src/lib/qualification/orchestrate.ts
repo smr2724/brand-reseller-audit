@@ -9,6 +9,7 @@
  */
 import OpenAI from "openai";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { trackCost } from "@/lib/cost/track";
 import { searchTrademark, summarizeUspto } from "./uspto";
 import {
   disambiguationPrompt,
@@ -984,10 +985,19 @@ async function callJsonLLM(args: {
   const usage = resp.usage as
     | { prompt_tokens?: number; completion_tokens?: number }
     | undefined;
+  const tokens_in = usage?.prompt_tokens ?? 0;
+  const tokens_out = usage?.completion_tokens ?? 0;
+  // Phase 81 — log dollar cost from real token usage.
+  await trackCost({
+    provider: "openai",
+    operation: "openai_qualification",
+    inputTokens: tokens_in,
+    outputTokens: tokens_out,
+  });
   return {
     parsed,
-    tokens_in: usage?.prompt_tokens ?? 0,
-    tokens_out: usage?.completion_tokens ?? 0,
+    tokens_in,
+    tokens_out,
   };
 }
 

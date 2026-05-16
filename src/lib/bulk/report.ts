@@ -1,3 +1,5 @@
+import { COST_BASIS_LINES } from "@/lib/cost/constants";
+
 /**
  * Phase 75 — Ranked bulk-run report.
  *
@@ -30,6 +32,10 @@ export interface BulkReportBrand {
   economics_status: "healthy" | "low_revenue" | "tight_channel" | null;
   error_step: string | null;
   error_message: string | null;
+  // Phase 81 — per-brand cost rollup populated by trackCost(). Optional
+  // for back-compat with legacy rows / unit tests that don't set it.
+  cost_total_usd?: number | null;
+  cost_breakdown?: Record<string, number> | null;
 }
 
 function economicsBadge(
@@ -47,6 +53,9 @@ export interface BulkReportInput {
   completedAt: string | null;
   appBaseUrl: string;
   brands: BulkReportBrand[];
+  // Phase 81 — run-level total cost. Optional so legacy callers keep
+  // working; renderer defaults to summing per-brand costs when absent.
+  runCostTotalUsd?: number | null;
 }
 
 function escapeHtml(s: string | null | undefined): string {
@@ -75,6 +84,28 @@ function fmtScore(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   return fmtMoney(Number(n));
 }
+
+// Phase 81 — dollar formatter for tracked API costs. Per spec:
+// 4 decimal places under $1, 2 decimals at $1+ — the typical per-brand
+// cost is a few cents and `$0.0014` reads more honestly than `$0.00`.
+function fmtCost(n: number | null | undefined): string {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "$0.0000";
+  if (Math.abs(v) < 1) return `$${v.toFixed(4)}`;
+  return `$${v.toFixed(2)}`;
+}
+
+// Providers we render columns for, in display order. Per-brand outreach
+// drafts use Microsoft Graph (free under M365), not Resend — so Resend
+// is omitted here. It still appears in the run total via the summary
+// email send (bulkRunBrandId=null).
+const COST_PROVIDER_COLUMNS: { key: string; label: string }[] = [
+  { key: "keepa", label: "Keepa" },
+  { key: "apollo", label: "Apollo" },
+  { key: "hunter", label: "Hunter" },
+  { key: "million_verifier", label: "MV" },
+  { key: "openai", label: "OpenAI" },
+];
 
 export function statusBadge(b: BulkReportBrand): {
   label: string;
@@ -184,6 +215,59 @@ export function renderBulkRunReportHtml(input: BulkReportInput): {
     })
     .join("");
 
+  // Phase 81 — cost breakdown rows + run total. The aggregate falls back
+  // to summing per-brand costs when `runCostTotalUsd` isn't supplied
+  // (e.g. legacy callers / tests).
+  const perBrandTotals = ranked.map((b) => Number(b.cost_total_usd ?? 0) || 0);
+  const summedBrandTotal = perBrandTotals.reduce((s, v) => s + v, 0);
+  const runCostTotal =
+    typeof input.runCostTotalUsd === "number" &&
+    Number.isFinite(input.runCostTotalUsd)
+      ? input.runCostTotalUsd
+      : summedBrandTotal;
+
+  const costRowsHtml = ranked
+    .map((b) => {
+      const breakdown = (b.cost_breakdown ?? {}) as Record<string, number>;
+      const cells = COST_PROVIDER_COLUMNS.map(
+        (p) =>
+          `<td style="${cellStyle};text-align:right;">${fmtCost(Number(breakdown[p.key] ?? 0) || 0)}</td>`,
+      ).join("");
+      return `<tr>
+        <td style="${cellStyle}">${escapeHtml(b.input_name)}</td>
+        ${cells}
+        <td style="${cellStyle};text-align:right;"><strong>${fmtCost(Number(b.cost_total_usd ?? 0) || 0)}</strong></td>
+      </tr>`;
+    })
+    .join("");
+
+  const costBasisHtml = COST_BASIS_LINES
+    .map((line) => `<li>${escapeHtml(line)}</li>`)
+    .join("");
+
+  const costSectionHtml = `
+      <h2 style="font-size:16px;margin:32px 0 6px;font-weight:500;letter-spacing:-0.005em;">Run cost breakdown</h2>
+      <p style="margin:0 0 12px;color:#555;font-size:12px;">All values in USD. Per-brand costs are observed at call time using the unit prices in the legend below.</p>
+      <table cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:8px;">
+        <thead>
+          <tr>
+            <th style="${headerCellStyle}">Brand</th>
+            ${COST_PROVIDER_COLUMNS.map((p) => `<th style="${headerCellStyle};text-align:right;">${escapeHtml(p.label)}</th>`).join("")}
+            <th style="${headerCellStyle};text-align:right;">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${costRowsHtml}
+          <tr>
+            <td style="${cellStyle};text-align:right;font-weight:600;" colspan="${COST_PROVIDER_COLUMNS.length + 1}">Run total:</td>
+            <td style="${cellStyle};text-align:right;font-weight:600;">${fmtCost(runCostTotal)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p style="margin:8px 0 4px;color:#555;font-size:12px;font-weight:600;">Cost basis (per call, USD):</p>
+      <ul style="margin:0;padding:0 0 0 20px;color:#555;font-size:12px;line-height:1.6;">${costBasisHtml}</ul>
+  `;
+
   const subject = `Bulk Brand Run Complete — ${total} brand${total === 1 ? "" : "s"} processed`;
 
   const html = `<!doctype html>
@@ -225,6 +309,8 @@ export function renderBulkRunReportHtml(input: BulkReportInput): {
         </tbody>
       </table>
 
+      ${costSectionHtml}
+
       <p style="margin:24px 0 0;color:#888;font-size:11px;">
         Run id: ${escapeHtml(input.runId)} · started ${escapeHtml(input.startedAt ?? "")} · completed ${escapeHtml(input.completedAt ?? "")}
       </p>
@@ -248,6 +334,22 @@ export function renderBulkRunReportHtml(input: BulkReportInput): {
         (b.legion_opportunity != null ? ` — opp ${fmtMoney(b.legion_opportunity)}` : ""),
     );
   }
+  // Phase 81 — cost summary in the plain-text body so terminal clients
+  // still see the breakdown legend.
+  textLines.push("");
+  textLines.push(`RUN COST BREAKDOWN (run total: ${fmtCost(runCostTotal)})`);
+  for (const b of ranked) {
+    const breakdown = (b.cost_breakdown ?? {}) as Record<string, number>;
+    const parts = COST_PROVIDER_COLUMNS.map(
+      (p) => `${p.label} ${fmtCost(Number(breakdown[p.key] ?? 0) || 0)}`,
+    );
+    textLines.push(
+      `${b.input_name}: ${parts.join(", ")} — Total ${fmtCost(Number(b.cost_total_usd ?? 0) || 0)}`,
+    );
+  }
+  textLines.push("");
+  textLines.push("Cost basis (per call, USD):");
+  for (const line of COST_BASIS_LINES) textLines.push(`- ${line}`);
 
   return { subject, html, text: textLines.join("\n") };
 }
