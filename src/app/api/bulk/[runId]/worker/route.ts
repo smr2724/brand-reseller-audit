@@ -100,9 +100,20 @@ async function finalize(req: Request, runId: string): Promise<NextResponse> {
     return NextResponse.json({ done: true, already_finalized: true });
   }
 
+  // Phase 82 review fix #2: a run that the janitor (or any other path)
+  // has flipped to `error` / `cancelled` must NOT be overwritten back to
+  // `completed`, and we must NOT send a report email for an officially-
+  // failed run. The terminal-status guard at the top of POST() already
+  // bails before claimNextQueuedBrand, but defend in depth: any UPDATE
+  // that lands `completed` is guarded by `status='running'` so a stray
+  // late finalize cannot resurrect an abandoned run.
+  if (run.status === "error" || run.status === "cancelled") {
+    return NextResponse.json({ done: true, run_status: run.status, skipped: "terminal_run" });
+  }
+
   const nowIso = new Date().toISOString();
   if (run.status !== "completed") {
-    await admin
+    const { data: flipped } = await admin
       .from("bulk_runs")
       .update({
         status: "completed",
@@ -111,7 +122,15 @@ async function finalize(req: Request, runId: string): Promise<NextResponse> {
         current_brand_name: null,
         updated_at: nowIso,
       })
-      .eq("id", runId);
+      .eq("id", runId)
+      .eq("status", "running")
+      .select("id");
+    // If the conditional UPDATE flipped 0 rows, the run is no longer
+    // `running` (it's been errored/cancelled by the janitor or a peer).
+    // Skip the report email — there's nothing to celebrate.
+    if (!flipped || flipped.length === 0) {
+      return NextResponse.json({ done: true, skipped: "run_not_running" });
+    }
   }
 
   // Build + send the email.
@@ -205,6 +224,24 @@ export async function POST(
     .maybeSingle<{ id: string; status: string }>();
   if (!existingRun) {
     return NextResponse.json({ error: "run not found" }, { status: 404 });
+  }
+
+  // Phase 82 review fix #2: refuse to process a run that has already
+  // been moved to a terminal state. Without this guard, an in-flight
+  // worker self-kick can resurrect an officially-abandoned run after
+  // the janitor's 10-kick ceiling fired, sending a `completed` report
+  // email for a failed run and re-processing queued brands on top of
+  // a dead pipeline.
+  if (
+    existingRun.status === "error" ||
+    existingRun.status === "completed" ||
+    existingRun.status === "cancelled"
+  ) {
+    return NextResponse.json({
+      skipped: true,
+      reason: "run_terminal",
+      run_status: existingRun.status,
+    });
   }
 
   if (existingRun.status === "pending") {

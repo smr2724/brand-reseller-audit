@@ -14,6 +14,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   searchProductsByBrand,
   getProductDetails,
+  KEEPA_PRODUCT_BATCH_MAX,
   resolveSellerInfo,
   isAmazonSellerId,
   expandVariationAsins,
@@ -79,6 +80,15 @@ export interface EnrichInput {
   brand_name: string;
   user_id: string;
   existing_disqualifier_tags?: string[];
+  /**
+   * Phase 82 review fix #1 — optional async heartbeat invoked at each
+   * major step boundary inside enrichBrandWithKeepa. The bulk pipeline
+   * passes this to bump `bulk_runs.updated_at` so the janitor's stuck
+   * filter (90s on run-level updated_at) does not flag a healthy but
+   * legitimately slow enrich as stale. Best-effort — caller swallows
+   * errors.
+   */
+  heartbeat?: () => Promise<void>;
 }
 
 export async function enrichBrandWithKeepa(
@@ -88,6 +98,17 @@ export async function enrichBrandWithKeepa(
   const { brand_id, brand_name, user_id } = input;
   const existingTags = new Set<string>(input.existing_disqualifier_tags ?? []);
   const runStartedAtMs = Date.now();
+  // Phase 82 review fix #1 — heartbeat helper. Wraps the optional
+  // caller-supplied callback in a try/catch so a heartbeat failure
+  // never derails enrichment.
+  const heartbeat = async (): Promise<void> => {
+    if (!input.heartbeat) return;
+    try {
+      await input.heartbeat();
+    } catch {
+      // best-effort; ignore
+    }
+  };
 
   // Phase 66 — Before starting a new run, mark any prior `running` row
   // for the same brand as `error` if it has been wedged past the stale
@@ -143,6 +164,7 @@ export async function enrichBrandWithKeepa(
       elapsed_ms: Date.now() - runStartedAtMs,
       extra: { tokens_used: tokensUsed, tokens_left: search.tokens_left },
     });
+    await heartbeat();
     if (shouldAbortForWallClock(runStartedAtMs)) {
       throw new Error(
         `[phase66] wall-clock budget (${KEEPA_ENRICHMENT_WALL_CLOCK_MS}ms) exceeded after brand_search; aborting before product fetch`,
@@ -164,17 +186,22 @@ export async function enrichBrandWithKeepa(
     // Keepa's brand search returns parents only. Expand child variations
     // so Beauty/Health/Grocery brands (where 1 parent listing maps to
     // 5–20 child SKUs each with its own BSR + price) get fully measured.
-    // Cap at 200 to bound Keepa token cost.
+    // Phase 82 review fix #5 — raise the variation-expansion cap from
+    // 200 to PHASE82_ASIN_CAP (500) so the downstream Phase 82 cap is
+    // meaningful. Seeds come from `searchProductsByBrand` already sorted
+    // by current_SALES asc (best-rank-first), and we prepend seeds
+    // before children, so a 500-cap truncation drops the long tail
+    // contributing essentially zero revenue.
     let asins = search.asins;
     let expansion: { children: string[]; hit_cap: boolean } = { children: [], hit_cap: false };
     if (asins.length) {
       try {
-        const exp = await expandVariationAsins(asins, 200);
+        const exp = await expandVariationAsins(asins, 500);
         asins = exp.combined;
         expansion = { children: exp.children, hit_cap: exp.hit_cap };
         if (exp.hit_cap) {
           console.warn(
-            `[keepa-brand] variation cap hit for "${brand_name}" — capped at 200 ASINs`,
+            `[keepa-brand] variation cap hit for "${brand_name}" — capped at 500 ASINs`,
           );
         }
         console.log(
@@ -240,6 +267,83 @@ export async function enrichBrandWithKeepa(
         `[phase66] wall-clock budget (${KEEPA_ENRICHMENT_WALL_CLOCK_MS}ms) exceeded after variation_expansion; aborting before product fetch`,
       );
     }
+
+    // Phase 82 — Hard cap at the top 500 ASINs by sales signal.
+    //
+    // Sort order strategy (review fix #6): the only sales-rank signal
+    // we have BEFORE the /product fetch is the brand-search ordering.
+    // `searchProductsByBrand` requests `sort: current_SALES asc`, so the
+    // seed parents arrive best-rank-first. `expandVariationAsins`
+    // preserves that order by prepending all seeds before child
+    // variations. We do NOT re-sort here because (a) we have no
+    // per-ASIN BSR yet (that's what /product is for), and (b) issuing
+    // a light pre-call would burn the same token budget we're trying
+    // to bound. The "seeds first, by current_SALES asc; then variation
+    // children" order is the cheapest stable proxy and keeps the long
+    // tail at the end of the list — exactly what we want to truncate.
+    //
+    // Even when a brand has thousands of listings, the long tail
+    // contributes essentially zero TTM revenue but burns Keepa tokens
+    // and wall clock (Phase 79 saw 6 brands die in keepa_enriching
+    // between 3.5–5 min on sequential 7s calls). Truncating here keeps
+    // bulk runs predictable.
+    const PHASE82_ASIN_CAP = 500;
+    const preCapCount = asins.length;
+    if (asins.length > PHASE82_ASIN_CAP) {
+      console.warn(
+        `[phase82] "${brand_name}" exceeded ${PHASE82_ASIN_CAP}-ASIN cap (had ${asins.length}); truncating long tail before product fetch`,
+      );
+      asins = asins.slice(0, PHASE82_ASIN_CAP);
+      // Persist truncation marker so downstream consumers can see the
+      // brand's coverage is partial. Best-effort — a write failure
+      // never blocks enrichment.
+      //
+      // Phase 82 review fix #7: merge into `enrichment_metadata`
+      // instead of replacing it wholesale. Uses the
+      // `jsonb_merge_brand_enrichment_metadata` RPC if available;
+      // falls back to read-merge-write on older environments.
+      try {
+        const mergePatch = {
+          enrichment_truncated_at: PHASE82_ASIN_CAP,
+          total_asins_seen: preCapCount,
+        };
+        let merged = false;
+        try {
+          const { error: rpcErr } = await supabase.rpc(
+            "merge_brand_enrichment_metadata",
+            { p_brand_id: brand_id, p_patch: mergePatch },
+          );
+          if (!rpcErr) merged = true;
+        } catch {
+          // RPC missing — fall back to read-merge-write
+        }
+        if (!merged) {
+          const { data: cur } = await supabase
+            .from("brands")
+            .select("enrichment_metadata")
+            .eq("id", brand_id)
+            .eq("user_id", user_id)
+            .maybeSingle<{ enrichment_metadata: Record<string, unknown> | null }>();
+          const next = { ...(cur?.enrichment_metadata ?? {}), ...mergePatch };
+          const { error: metaErr } = await supabase
+            .from("brands")
+            .update({
+              enrichment_metadata: next,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", brand_id)
+            .eq("user_id", user_id);
+          if (metaErr) {
+            console.warn(
+              `[phase82] enrichment_metadata write failed for ${brand_id}: ${metaErr.message}`,
+            );
+          }
+        }
+      } catch (e) {
+        console.warn(`[phase82] enrichment_metadata write threw:`, e);
+      }
+    }
+
     logKeepaProgress({
       brand_id,
       brand_name,
@@ -257,10 +361,25 @@ export async function enrichBrandWithKeepa(
       10_000,
       KEEPA_ENRICHMENT_WALL_CLOCK_MS - (Date.now() - runStartedAtMs) - 20_000,
     );
+    // Phase 82 — Switch from 5-ASIN sequential chunks to 100-ASIN
+    // batched calls. 500 ASINs → 5 batched calls (≈30s) instead of 100
+    // sequential calls (≈11+ min). `getProductDetailsBatch` writes each
+    // result into the same 24h PRODUCT_CACHE that `getProductDetails`
+    // reads, so cached parents from variation expansion are still
+    // skipped via the explicit pre-filter below.
+    await heartbeat();
+    // Phase 82 R2 review fix N2 — fire a heartbeat after every batched
+    // /product call inside `getProductDetails`. For a 500-ASIN brand
+    // (5 sequential 100-ASIN batches at ~30s each + Phase 79's retry-on-
+    // timeout doubling that ceiling), no intra-loop heartbeat means the
+    // brand row can sit untouched for 150s–300s+ — well past the
+    // janitor's 240s `keepa_enriching` soft cap. The heartbeat (passed
+    // by the bulk worker) refreshes both run-level and brand-row
+    // `updated_at` so the janitor sees a healthy in-flight enrich.
     const products = await withDeadline(
-      getProductDetails(asins, 5),
+      getProductDetails(asins, KEEPA_PRODUCT_BATCH_MAX, heartbeat),
       remainingBudget,
-      `getProductDetails(brand="${brand_name}", n=${asins.length})`,
+      `getProductDetailsBatch(brand="${brand_name}", n=${asins.length})`,
     );
     tokensUsed += products.length * 5; // rough estimate (cache hits don't count perfectly)
     logKeepaProgress({
@@ -271,6 +390,7 @@ export async function enrichBrandWithKeepa(
       elapsed_ms: Date.now() - runStartedAtMs,
       extra: { tokens_used: tokensUsed },
     });
+    await heartbeat();
 
     // Aggregate brand_sellers: count asins won (buy-box winner) per seller
     const sellerMap = new Map<string, {
