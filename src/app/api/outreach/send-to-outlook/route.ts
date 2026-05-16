@@ -27,6 +27,7 @@ import {
   createSupabaseServerClient,
 } from "@/lib/supabase/server";
 import { createDraft } from "@/lib/microsoft/graph";
+import { buildSteveOutreachEmail } from "@/lib/outreach/steve-template";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,51 +37,6 @@ interface Body {
   contact_id?: string;
   brandId?: string;
   brand_id?: string;
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-interface BuildArgs {
-  brandName: string;
-  firstName: string | null;
-}
-
-/**
- * Phase 70 — Steve's verbatim outreach copy. Do NOT alter punctuation,
- * capitalization, or wording — including the typo "profiting" and the
- * trailing "?" on the second sentence. Steve wrote it this way.
- */
-function buildEmail({ brandName, firstName }: BuildArgs): { subject: string; html: string; text: string } {
-  const safeFirst =
-    typeof firstName === "string" && firstName.trim().length > 0
-      ? firstName.trim()
-      : "there";
-  const brand = brandName;
-
-  const subject = `Quick question about ${brand}`;
-
-  const html =
-    `<p>${escapeHtml(safeFirst)}</p>` +
-    `<p>${escapeHtml(brand)} is killing it on Amazon but you're not the one selling on most of the listings.</p>` +
-    `<p>I made a quick report to show you exactly how much more you could profiting without any extra effort?</p>` +
-    `<p>Are you the right person to send it to?</p>` +
-    `<p>Steve Rolle</p>`;
-
-  const text =
-    `${safeFirst}\n\n` +
-    `${brand} is killing it on Amazon but you're not the one selling on most of the listings.\n\n` +
-    `I made a quick report to show you exactly how much more you could profiting without any extra effort?\n\n` +
-    `Are you the right person to send it to?\n\n` +
-    `Steve Rolle`;
-
-  return { subject, html, text };
 }
 
 async function createDraftWith429Retry(input: Parameters<typeof createDraft>[0]) {
@@ -108,7 +64,7 @@ export async function POST(req: Request) {
   // 1. Load brand + verify ownership.
   const { data: brandRow, error: brandErr } = await supabase
     .from("brands")
-    .select("id, name")
+    .select("id, name, additional_profit")
     .eq("id", brandId)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -192,9 +148,10 @@ export async function POST(req: Request) {
   }
 
   // 3. Build the email server-side. Never trust client-supplied subject/body.
-  const { subject, html, text } = buildEmail({
+  const { subject, html, text } = buildSteveOutreachEmail({
     brandName: brandRow.name,
     firstName: contactRow.first_name,
+    additionalProfit: (brandRow as { additional_profit?: number | string | null }).additional_profit ?? null,
   });
 
   // 4. Create the Outlook draft. 429 retries once after 2s.
