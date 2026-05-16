@@ -979,7 +979,20 @@ function parseKeepaProduct(
  * list — `parseKeepaProduct` (called inside `getProductDetailsBatch`)
  * keys each entry by its own `asin` field.
  */
-export async function getProductDetails(asins: string[], batchSize = 5): Promise<KeepaProductDetails[]> {
+export async function getProductDetails(
+  asins: string[],
+  batchSize = 5,
+  /**
+   * Phase 82 R2 review fix N2 — optional async heartbeat invoked after
+   * every successfully-completed batched `/product` call. The bulk
+   * worker plumbs this through so a 500-ASIN brand's 5 sequential
+   * 100-ASIN batches each refresh both `bulk_runs.updated_at` and
+   * `bulk_run_brands.updated_at`, preventing the janitor's
+   * `keepa_enriching` 240s soft cap from false-killing a healthy
+   * long-running enrich.
+   */
+  onBatchComplete?: () => Promise<void>,
+): Promise<KeepaProductDetails[]> {
   const clean = Array.from(new Set(asins.filter((a) => a && /^[A-Z0-9]{10}$/i.test(a))));
   if (!clean.length) return [];
   const now = Date.now();
@@ -1020,6 +1033,13 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
       }),
     );
     out.push(...fetched);
+    if (onBatchComplete) {
+      try {
+        await onBatchComplete();
+      } catch {
+        // best-effort heartbeat — never derail the enrich on its failure
+      }
+    }
   }
   return out;
 }

@@ -368,8 +368,16 @@ export async function enrichBrandWithKeepa(
     // reads, so cached parents from variation expansion are still
     // skipped via the explicit pre-filter below.
     await heartbeat();
+    // Phase 82 R2 review fix N2 — fire a heartbeat after every batched
+    // /product call inside `getProductDetails`. For a 500-ASIN brand
+    // (5 sequential 100-ASIN batches at ~30s each + Phase 79's retry-on-
+    // timeout doubling that ceiling), no intra-loop heartbeat means the
+    // brand row can sit untouched for 150s–300s+ — well past the
+    // janitor's 240s `keepa_enriching` soft cap. The heartbeat (passed
+    // by the bulk worker) refreshes both run-level and brand-row
+    // `updated_at` so the janitor sees a healthy in-flight enrich.
     const products = await withDeadline(
-      getProductDetails(asins, KEEPA_PRODUCT_BATCH_MAX),
+      getProductDetails(asins, KEEPA_PRODUCT_BATCH_MAX, heartbeat),
       remainingBudget,
       `getProductDetailsBatch(brand="${brand_name}", n=${asins.length})`,
     );

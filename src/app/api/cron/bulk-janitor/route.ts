@@ -12,9 +12,14 @@
  * younger than that.
  *
  * Soft caps (per-step), keyed off the stuck brand's `updated_at`:
- *   qualifying        60s
- *   keepa_enriching  240s   (covers Phase 79 90s timeout + 2s retry + slack)
- *   everything else   90s
+ *   keepa_searching        90s
+ *   keepa_enriching       240s   (covers Phase 79 90s timeout + 2s retry + slack)
+ *   qualifying             60s
+ *   resolving_owner        90s
+ *   discovering_contacts  120s   (Apollo + Hunter cascade)
+ *   verifying_email        60s   (MV is fast)
+ *   drafting               60s
+ *   everything else        90s
  *
  * After 10 consecutive kicks on the same run we mark the run itself
  * `error` and stop — prevents an infinite-kick loop on a broken row.
@@ -48,22 +53,32 @@ const KICK_ABANDON_THRESHOLD = 10;
 
 // Per-step soft caps on `bulk_run_brands.updated_at`. If the brand row
 // hasn't been touched for longer than this, mark it `error` and move on.
+//
+// Phase 82 R2 review fix B1 — aligned with the actual worker statuses
+// written by `src/lib/bulk/worker.ts`. The prior list watched two names
+// that the worker never writes (`enriching`, `contact_discovery`) and
+// missed the real-world stall points (Apollo / Hunter / MillionVerifier
+// hangs in `discovering_contacts` / `verifying_email`).
 const STEP_SOFT_CAP_MS: Record<string, number> = {
-  qualifying: 60_000,
+  keepa_searching: 90_000,
   keepa_enriching: 240_000,
-  enriching: 90_000,
-  contact_discovery: 90_000,
-  drafting: 90_000,
+  qualifying: 60_000,
+  resolving_owner: 90_000,
+  discovering_contacts: 120_000,
+  verifying_email: 60_000,
+  drafting: 60_000,
 };
 const DEFAULT_STEP_SOFT_CAP_MS = 90_000;
 
 const STUCK_BRAND_STATUSES = [
+  "keepa_searching",
   "keepa_enriching",
   "qualifying",
-  "enriching",
-  "contact_discovery",
+  "resolving_owner",
+  "discovering_contacts",
+  "verifying_email",
   "drafting",
-];
+] as const;
 
 function authorize(req: Request): boolean {
   // Phase 82 safety belt: CRON_SECRET auth is MANDATORY. Unlike some
@@ -197,7 +212,7 @@ export async function GET(req: Request) {
       .from("bulk_run_brands")
       .select("id, bulk_run_id, status, updated_at")
       .eq("bulk_run_id", run.id)
-      .in("status", STUCK_BRAND_STATUSES);
+      .in("status", [...STUCK_BRAND_STATUSES]);
 
     const brands = (brandsRaw ?? []) as StuckBrand[];
 

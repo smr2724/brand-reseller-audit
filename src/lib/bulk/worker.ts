@@ -163,26 +163,69 @@ async function patchRow(
 }
 
 /**
- * Heartbeat helper — bumps `bulk_runs.updated_at` so the janitor's
- * primary "stuck > 90s" filter does not pick up a run whose CURRENT
- * brand is healthy but legitimately slow (Keepa enrich can run up to
- * 240s). Without this, every long brand step accumulates noop janitor
- * kicks toward the 10-kick abandon ceiling. Best-effort — never blocks
- * the pipeline.
+ * Heartbeat helper — bumps `bulk_runs.updated_at` AND
+ * `bulk_run_brands.updated_at` for the in-flight brand row.
+ *
+ * Phase 82 R2 review fix N2: the per-step soft cap inside the janitor
+ * keys off `bulk_run_brands.updated_at` (not the run-level field), so a
+ * heartbeat that only refreshes the run row leaves a long-running brand
+ * (e.g. a 500-ASIN Keepa fetch ~150s+) exposed to the 240s
+ * keepa_enriching soft-cap once Phase 79's retry is in play. Bump both.
+ *
+ * Best-effort — never blocks the pipeline.
  */
 async function heartbeatRun(
   admin: SupabaseClient<any, any, any>,
   runId: string,
+  brandRowId: string,
 ): Promise<void> {
+  const nowIso = new Date().toISOString();
   try {
     await admin
       .from("bulk_runs")
-      .update({ updated_at: new Date().toISOString() })
+      .update({ updated_at: nowIso })
       .eq("id", runId)
       .eq("status", "running");
   } catch {
     // intentionally ignored — heartbeat is best-effort
   }
+  try {
+    // Don't resurrect a row the janitor has already terminated — the
+    // `.not(status, in, terminal)` guard is the same one patchRow uses.
+    await admin
+      .from("bulk_run_brands")
+      .update({ updated_at: nowIso })
+      .eq("id", brandRowId)
+      .not("status", "in", `(${TERMINAL_BRAND_STATUSES.join(",")})`);
+  } catch {
+    // intentionally ignored — heartbeat is best-effort
+  }
+}
+
+/**
+ * Phase 82 R2 review fix N1 — log + early-bail helper. When a `patchRow`
+ * status-transition returns `updated: false` we know the janitor (or
+ * another concurrent actor) has already moved this row into a terminal
+ * state. Continuing into the next billable step (Keepa, Apollo, Hunter,
+ * MV, OpenAI, Graph) would burn provider tokens against a row that will
+ * never be drafted. This helper logs the externally-terminated event,
+ * bumps the run-level completion count so the run doesn't stall waiting
+ * for our orphaned slot, and signals the caller to return immediately
+ * before the costly downstream call.
+ */
+async function bailIfTerminated(
+  admin: SupabaseClient<any, any, any>,
+  rowId: string,
+  runId: string,
+  step: string,
+  result: { updated: boolean },
+): Promise<boolean> {
+  if (result.updated) return false;
+  console.warn(
+    `[bulk-worker] brand row ${rowId} was terminated externally before ${step} — bailing`,
+  );
+  await bumpRunCompleted(admin, runId);
+  return true;
 }
 
 async function bumpRunCompleted(
@@ -330,11 +373,22 @@ async function processBulkBrandImpl(
   const resolvedBrandName = topCandidate.brand;
 
   // ---- Step 2: Keepa enrich ----
-  await patchRow(admin, rowId, {
+  const keepaTransition = await patchRow(admin, rowId, {
     status: "keepa_enriching",
     progress_percent: 15,
     current_step_label: `Enriching ${resolvedBrandName} from Keepa`,
   });
+  if (
+    await bailIfTerminated(
+      admin,
+      rowId,
+      row.bulk_run_id,
+      "runKeepaEnrichment",
+      keepaTransition,
+    )
+  ) {
+    return { ok: false, status: "error", error: "row terminated externally" };
+  }
 
   let brandId: string;
   try {
@@ -375,7 +429,7 @@ async function processBulkBrandImpl(
       brand_id: brandId,
       brand_name: resolvedBrandName,
       user_id: userId,
-      heartbeat: () => heartbeatRun(admin, row.bulk_run_id),
+      heartbeat: () => heartbeatRun(admin, row.bulk_run_id, rowId),
     });
 
     // Phase 79 — surface Keepa /product timeout retries on bulk_run_brands
@@ -431,11 +485,22 @@ async function processBulkBrandImpl(
   setBulkCtxBrandId(brandId);
 
   // ---- Step 3: Qualify ----
-  await patchRow(admin, rowId, {
+  const qualifyTransition = await patchRow(admin, rowId, {
     status: "qualifying",
     progress_percent: 30,
     current_step_label: "Running Gate A + Gate B qualification",
   });
+  if (
+    await bailIfTerminated(
+      admin,
+      rowId,
+      row.bulk_run_id,
+      "runQualification",
+      qualifyTransition,
+    )
+  ) {
+    return { ok: false, status: "error", error: "row terminated externally" };
+  }
 
   let qualifiedFlag = false;
   let disqualReason: string | null = null;
@@ -523,11 +588,22 @@ async function processBulkBrandImpl(
   }
 
   // ---- Step 5: Contact discovery (Apollo → Hunter → MV) ----
-  await patchRow(admin, rowId, {
+  const contactsTransition = await patchRow(admin, rowId, {
     status: "discovering_contacts",
     progress_percent: 65,
     current_step_label: "Apollo + Hunter contact discovery",
   });
+  if (
+    await bailIfTerminated(
+      admin,
+      rowId,
+      row.bulk_run_id,
+      "runContactDiscovery",
+      contactsTransition,
+    )
+  ) {
+    return { ok: false, status: "error", error: "row terminated externally" };
+  }
 
   let primaryContact: {
     id: string;
@@ -646,11 +722,22 @@ async function processBulkBrandImpl(
     return { ok: true, status: "completed" };
   }
 
-  await patchRow(admin, rowId, {
+  const draftingTransition = await patchRow(admin, rowId, {
     status: "drafting",
     progress_percent: 90,
     current_step_label: "Creating Outlook draft",
   });
+  if (
+    await bailIfTerminated(
+      admin,
+      rowId,
+      row.bulk_run_id,
+      "createDraft",
+      draftingTransition,
+    )
+  ) {
+    return { ok: false, status: "error", error: "row terminated externally" };
+  }
 
   try {
     const { subject, html, text } = buildSteveOutreachEmail({
