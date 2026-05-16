@@ -122,6 +122,25 @@ export async function POST(
     );
   }
 
+  // Phase 74 — domain fallback chain mirrors src/lib/contacts/orchestrate.ts:
+  // brand.resolved_owner_domain → Gate A controlling_entity.domain →
+  // selected_entity.evidence_url. Phase 49 removed the owner-resolution
+  // auto-trigger, so post-Phase-49 brands sit with resolved_owner_domain
+  // NULL; without this fallback every per-row Enrich on them 400s.
+  const { data: qual } = await admin
+    .from("brand_qualifications")
+    .select("id, selected_entity, gate_a_corporate_hierarchy")
+    .eq("brand_id", params.id)
+    .maybeSingle<{
+      id: string;
+      selected_entity: { evidence_url?: string } | null;
+      gate_a_corporate_hierarchy: {
+        controlling_entity?: { domain?: string | null } | null;
+      } | null;
+    }>();
+  const gateADomain =
+    qual?.gate_a_corporate_hierarchy?.controlling_entity?.domain ?? null;
+
   const body = (await req.json().catch(() => ({}))) as Body;
   const rawName = typeof body.name === "string" ? body.name.trim() : "";
   if (!rawName) {
@@ -136,7 +155,10 @@ export async function POST(
       ? body.linkedin_url.trim()
       : null;
 
-  const domain = extractDomain(brand.resolved_owner_domain);
+  const domain =
+    extractDomain(brand.resolved_owner_domain) ||
+    extractDomain(gateADomain) ||
+    extractDomain(qual?.selected_entity?.evidence_url ?? null);
   if (!domain) {
     return NextResponse.json(
       {
