@@ -14,6 +14,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   searchProductsByBrand,
   getProductDetails,
+  KEEPA_PRODUCT_BATCH_MAX,
   resolveSellerInfo,
   isAmazonSellerId,
   expandVariationAsins,
@@ -240,6 +241,47 @@ export async function enrichBrandWithKeepa(
         `[phase66] wall-clock budget (${KEEPA_ENRICHMENT_WALL_CLOCK_MS}ms) exceeded after variation_expansion; aborting before product fetch`,
       );
     }
+
+    // Phase 82 — Hard cap at the top 500 ASINs by sales signal. The
+    // brand-search step already requests `sort: current_SALES asc` so
+    // the seed parents are best-rank-first; variation children follow.
+    // Even when a brand has thousands of listings, the long tail
+    // contributes essentially zero TTM revenue but burns Keepa tokens
+    // and wall clock (Phase 79 saw 6 brands die in keepa_enriching
+    // between 3.5–5 min on sequential 7s calls). Truncating here keeps
+    // bulk runs predictable.
+    const PHASE82_ASIN_CAP = 500;
+    const preCapCount = asins.length;
+    if (asins.length > PHASE82_ASIN_CAP) {
+      console.warn(
+        `[phase82] "${brand_name}" exceeded ${PHASE82_ASIN_CAP}-ASIN cap (had ${asins.length}); truncating long tail before product fetch`,
+      );
+      asins = asins.slice(0, PHASE82_ASIN_CAP);
+      // Persist truncation marker so downstream consumers can see the
+      // brand's coverage is partial. Best-effort — a write failure
+      // never blocks enrichment.
+      try {
+        const { error: metaErr } = await supabase
+          .from("brands")
+          .update({
+            enrichment_metadata: {
+              enrichment_truncated_at: PHASE82_ASIN_CAP,
+              total_asins_seen: preCapCount,
+            },
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", brand_id)
+          .eq("user_id", user_id);
+        if (metaErr) {
+          console.warn(
+            `[phase82] enrichment_metadata write failed for ${brand_id}: ${metaErr.message}`,
+          );
+        }
+      } catch (e) {
+        console.warn(`[phase82] enrichment_metadata write threw:`, e);
+      }
+    }
+
     logKeepaProgress({
       brand_id,
       brand_name,
@@ -257,10 +299,16 @@ export async function enrichBrandWithKeepa(
       10_000,
       KEEPA_ENRICHMENT_WALL_CLOCK_MS - (Date.now() - runStartedAtMs) - 20_000,
     );
+    // Phase 82 — Switch from 5-ASIN sequential chunks to 100-ASIN
+    // batched calls. 500 ASINs → 5 batched calls (≈30s) instead of 100
+    // sequential calls (≈11+ min). `getProductDetailsBatch` writes each
+    // result into the same 24h PRODUCT_CACHE that `getProductDetails`
+    // reads, so cached parents from variation expansion are still
+    // skipped via the explicit pre-filter below.
     const products = await withDeadline(
-      getProductDetails(asins, 5),
+      getProductDetails(asins, KEEPA_PRODUCT_BATCH_MAX),
       remainingBudget,
-      `getProductDetails(brand="${brand_name}", n=${asins.length})`,
+      `getProductDetailsBatch(brand="${brand_name}", n=${asins.length})`,
     );
     tokensUsed += products.length * 5; // rough estimate (cache hits don't count perfectly)
     logKeepaProgress({

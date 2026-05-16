@@ -20,6 +20,21 @@ const KEEPA_HTTP_TIMEOUT_MS = 30_000;
 const KEEPA_PRODUCT_HTTP_TIMEOUT_MS = 90_000;
 const KEEPA_PRODUCT_RETRY_DELAY_MS = 2_000;
 
+// Phase 82 — Keepa `/product` accepts up to 100 comma-separated ASINs in a
+// single call. A 100-ASIN bulk-enrich legitimately takes longer than the
+// Phase 79 90s ceiling for a 5-ASIN chunk, so timeouts scale with batch
+// size: 30s base + 1s per ASIN. 100-ASIN batch ≈ 130s, well under the
+// 300s function budget while leaving headroom for the rest of the worker.
+export const KEEPA_PRODUCT_BATCH_MAX = 100;
+const KEEPA_PRODUCT_TIMEOUT_BASE_MS = 30_000;
+const KEEPA_PRODUCT_TIMEOUT_PER_ASIN_MS = 1_000;
+function keepaProductBatchTimeoutMs(batchSize: number): number {
+  return (
+    KEEPA_PRODUCT_TIMEOUT_BASE_MS +
+    Math.max(1, batchSize) * KEEPA_PRODUCT_TIMEOUT_PER_ASIN_MS
+  );
+}
+
 // Phase 79 — Module-level counter incremented every time the /product call
 // retries after a fetchWithTimeout abort. The bulk worker drains this with
 // consumeKeepaProductRetryCount() right after enrichment so it can bump
@@ -693,9 +708,276 @@ export function getBuyBoxSeller(productJson: any): { name?: string; sellerId?: s
 }
 
 /**
+ * Phase 82 — Fetch product details for up to 100 ASINs in a SINGLE Keepa
+ * `/product` call. Returns the parsed `KeepaProductDetails[]` and writes
+ * each result into the 24h in-memory cache.
+ *
+ * Caller is responsible for chunking inputs to <= KEEPA_PRODUCT_BATCH_MAX
+ * (100). `getProductDetails` handles cache + chunking and is the right
+ * entrypoint for everything except the bulk worker, which uses this
+ * function directly with chunks of 100.
+ *
+ * Phase 79 retry-on-timeout behavior is preserved. Cost tracking records
+ * `units = batch.length` per call so the total stays accurate.
+ *
+ * Keepa's response `products` array may NOT be ordered by the input ASIN
+ * list — we key by the `p.asin` field when stitching.
+ */
+export async function getProductDetailsBatch(
+  asins: string[],
+): Promise<KeepaProductDetails[]> {
+  const clean = Array.from(
+    new Set(asins.filter((a) => a && /^[A-Z0-9]{10}$/i.test(a))),
+  );
+  if (!clean.length) return [];
+  if (clean.length > KEEPA_PRODUCT_BATCH_MAX) {
+    throw new Error(
+      `getProductDetailsBatch: ${clean.length} ASINs exceeds Keepa /product cap (${KEEPA_PRODUCT_BATCH_MAX}); caller must chunk`,
+    );
+  }
+  await ensureTokens(clean.length * 5 + 2);
+  const batchStartedAt = Date.now();
+  const timeoutMs = keepaProductBatchTimeoutMs(clean.length);
+  const { json } = await keepaFetch(
+    "/product",
+    {
+      asin: clean.join(","),
+      offers: 20,
+      stats: 365,
+      buybox: 1,
+      aplus: 1,
+      videos: 1,
+    },
+    {
+      // Phase 82 — scaled timeout so a 100-ASIN batch gets 130s while a
+      // smaller chunk still trips faster on a stuck Keepa response.
+      timeoutMs,
+      retryOnTimeout: true,
+    },
+  );
+  console.log(
+    JSON.stringify({
+      event: "keepa_product_batch",
+      batch_size: clean.length,
+      elapsed_ms: Date.now() - batchStartedAt,
+      timeout_ms: timeoutMs,
+      tokens_left: Number(json?.tokensLeft ?? 0),
+    }),
+  );
+  // Phase 81/82 — record one row per Keepa call with units=batch_size
+  // so the per-unit cost × units math still produces the correct total.
+  await trackCost({
+    provider: "keepa",
+    operation: "keepa_product",
+    units: clean.length,
+  });
+  const tokensLeft = Number(json?.tokensLeft ?? 0);
+  TOKEN_CACHE = {
+    t: Date.now(),
+    v: {
+      tokens_left: tokensLeft,
+      refill_in_ms: Number(json?.refillIn ?? 0),
+      refill_rate: Number(json?.refillRate ?? 0),
+    },
+  };
+  const products = Array.isArray(json?.products) ? json.products : [];
+  const out: KeepaProductDetails[] = [];
+  for (const p of products) {
+    const parsed = parseKeepaProduct(p, tokensLeft);
+    if (parsed) {
+      PRODUCT_CACHE.set(parsed.asin, { t: Date.now(), v: parsed });
+      out.push(parsed);
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse a single Keepa `/product` response entry into our
+ * `KeepaProductDetails` shape. Returns null on malformed input — the
+ * caller logs a `keepa_parser_warning` so other ASINs in the batch
+ * still land.
+ */
+function parseKeepaProduct(
+  p: any,
+  tokensLeft: number,
+): KeepaProductDetails | null {
+  const asin = String(p?.asin ?? "");
+  if (!asin) return null;
+  try {
+    const { offers } = extractOffers(p);
+    const bb = getBuyBoxSeller(p);
+    const stats = p?.stats ?? {};
+    const total = Number(stats?.offerCountNew ?? offers.length ?? 0);
+    const fba = offers.filter((o) => o.is_fba).length;
+
+    const cur: any[] = Array.isArray(stats?.current) ? stats.current : [];
+    const avg365: any[] = Array.isArray(stats?.avg365) ? stats.avg365 : [];
+    const salesRankCurrent =
+      typeof cur[3] === "number" && cur[3] > 0 ? cur[3] : null;
+    const salesRankAvg365 =
+      typeof avg365[3] === "number" && avg365[3] > 0 ? avg365[3] : null;
+    const bbCurrentCents =
+      typeof cur[18] === "number" && cur[18] > 0 ? cur[18] : null;
+    const bbAvg365Cents =
+      typeof avg365[18] === "number" && avg365[18] > 0 ? avg365[18] : null;
+    const ratingRaw =
+      typeof cur[16] === "number" && cur[16] > 0 ? cur[16] : null;
+    const reviewsRaw =
+      typeof cur[17] === "number" && cur[17] > 0 ? cur[17] : null;
+
+    let imagesCount: number | null = null;
+    if (typeof p?.imagesCount === "number") imagesCount = p.imagesCount;
+    else if (Array.isArray(p?.images)) imagesCount = p.images.length;
+    else if (typeof p?.imagesCSV === "string" && p.imagesCSV.length) {
+      imagesCount = p.imagesCSV.split(",").filter(Boolean).length;
+    }
+
+    let featuresCount: number | null = null;
+    if (Array.isArray(p?.features)) featuresCount = p.features.length;
+    else if (typeof p?.featuresCSV === "string" && p.featuresCSV.length) {
+      featuresCount = p.featuresCSV.split(",").filter(Boolean).length;
+    }
+
+    const videosArr = Array.isArray(p?.videos) ? p.videos : null;
+    const hasVideoCount =
+      typeof p?.videoCount === "number" ? p.videoCount > 0 : null;
+    const hasVideo: boolean =
+      videosArr !== null
+        ? videosArr.length > 0
+        : hasVideoCount === true
+        ? true
+        : false;
+
+    const aPlusRaw = (p as any)?.aPlus ?? (p as any)?.aPlusContent;
+    let hasAPlus: boolean = false;
+    if (typeof aPlusRaw === "boolean") hasAPlus = aPlusRaw;
+    else if (typeof aPlusRaw === "number") hasAPlus = aPlusRaw > 0;
+    else if (Array.isArray(aPlusRaw)) hasAPlus = aPlusRaw.length > 0;
+    else if (aPlusRaw && typeof aPlusRaw === "object")
+      hasAPlus = Object.keys(aPlusRaw).length > 0;
+
+    const variationAsins: string[] = (() => {
+      const set = new Set<string>();
+      const asArr = Array.isArray((p as any)?.variations)
+        ? (p as any).variations
+        : null;
+      if (asArr) {
+        for (const v of asArr) {
+          const a = (v?.asin ?? "").toString().toUpperCase();
+          if (/^[A-Z0-9]{10}$/.test(a) && a !== asin) set.add(a);
+        }
+      }
+      const csv = (p as any)?.variationCSV;
+      if (typeof csv === "string" && csv.length) {
+        for (const tok of csv.split(/[, ]+/)) {
+          const a = tok.trim().toUpperCase();
+          if (/^[A-Z0-9]{10}$/.test(a) && a !== asin) set.add(a);
+        }
+      }
+      return Array.from(set);
+    })();
+    const parentAsinRaw =
+      (p as any)?.parentAsin ?? (p as any)?.parentASIN ?? null;
+    const parentAsin =
+      typeof parentAsinRaw === "string" &&
+      /^[A-Z0-9]{10}$/i.test(parentAsinRaw.trim())
+        ? parentAsinRaw.trim().toUpperCase()
+        : null;
+
+    const buyBoxChangeCount90d = buyBoxChangeCount90d_(p);
+
+    const monthlySoldRaw = (p as any)?.monthlySold;
+    const monthlySold: number | null =
+      typeof monthlySoldRaw === "number" &&
+      Number.isFinite(monthlySoldRaw) &&
+      monthlySoldRaw > 0
+        ? Math.trunc(monthlySoldRaw)
+        : null;
+
+    const categoryTree = Array.isArray(p?.categoryTree)
+      ? p.categoryTree
+          .map((c: any) =>
+            c && typeof c.catId === "number"
+              ? { catId: c.catId, name: c?.name ?? "" }
+              : null,
+          )
+          .filter((c: any): c is { catId: number; name: string } => !!c)
+      : null;
+
+    return {
+      asin,
+      title: p?.title,
+      brand: p?.brand,
+      buy_box_seller: bb.name,
+      buy_box_seller_id: bb.sellerId,
+      buy_box_price: bb.price,
+      buy_box_is_fba: bb.isFBA,
+      buy_box_is_amazon: bb.isAmazon,
+      total_offers_count: total,
+      fba_offers_count: fba,
+      offers,
+      last_updated:
+        safeKeepaMinuteToIso(p?.lastUpdate) ?? new Date().toISOString(),
+      sales_rank_avg365: salesRankAvg365,
+      sales_rank_current: salesRankCurrent,
+      buy_box_avg365: bbAvg365Cents != null ? bbAvg365Cents / 100 : null,
+      buy_box_current: bbCurrentCents != null ? bbCurrentCents / 100 : null,
+      category_tree: categoryTree,
+      product_group:
+        typeof p?.productGroup === "string" ? p.productGroup : null,
+      root_category:
+        typeof p?.rootCategory === "number" ? p.rootCategory : null,
+      images_count: imagesCount,
+      rating: ratingRaw != null ? ratingRaw / 10 : null,
+      review_count: reviewsRaw,
+      features_count: featuresCount,
+      has_video: hasVideo,
+      has_a_plus: hasAPlus,
+      parent_asin: parentAsin,
+      variation_asins: variationAsins,
+      buy_box_change_count_90d: buyBoxChangeCount90d,
+      monthly_sold: monthlySold,
+      raw: { tokensLeft, lastPriceChange: p?.lastPriceChange },
+    };
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : String(err);
+    const errName = err instanceof Error ? err.name : "Error";
+    console.error(
+      JSON.stringify({
+        event: "keepa_parser_warning",
+        asin,
+        field_name: "product_record",
+        error_name: errName,
+        error_message: message,
+        raw_value: {
+          title_len: typeof p?.title === "string" ? p.title.length : null,
+          monthly_sold_type: typeof (p as any)?.monthlySold,
+          last_update_type: typeof (p as any)?.lastUpdate,
+          variations_count: Array.isArray((p as any)?.variations)
+            ? (p as any).variations.length
+            : null,
+          variation_csv_type: typeof (p as any)?.variationCSV,
+        },
+      }),
+    );
+    return null;
+  }
+}
+
+/**
  * Batch-fetch product details with offer information.
- * Splits into chunks of `batchSize` and respects rate limits.
- * Honors a 24h in-memory cache keyed by ASIN.
+ *
+ * Phase 82 — thin wrapper around `getProductDetailsBatch` that handles
+ * the 24h in-memory cache and chunking when the caller passes more
+ * ASINs than `batchSize`. Default `batchSize=5` preserves the historical
+ * fan-out for single-brand /scan paths where 5×5 tokens/call is the
+ * sweet spot; the bulk worker calls `getProductDetailsBatch` directly
+ * with chunks of 100.
+ *
+ * Keepa's response `products` array may NOT be ordered by the input ASIN
+ * list — `parseKeepaProduct` (called inside `getProductDetailsBatch`)
+ * keys each entry by its own `asin` field.
  */
 export async function getProductDetails(asins: string[], batchSize = 5): Promise<KeepaProductDetails[]> {
   const clean = Array.from(new Set(asins.filter((a) => a && /^[A-Z0-9]{10}$/i.test(a))));
@@ -709,255 +991,30 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
     else need.push(a);
   }
 
+  const safeBatch = Math.min(
+    Math.max(1, Math.floor(batchSize)),
+    KEEPA_PRODUCT_BATCH_MAX,
+  );
   const productFetchStartedAt = Date.now();
-  for (let i = 0; i < need.length; i += batchSize) {
-    const chunk = need.slice(i, i + batchSize);
+  for (let i = 0; i < need.length; i += safeBatch) {
+    const chunk = need.slice(i, i + safeBatch);
     const chunkStartedAt = Date.now();
-    await ensureTokens(chunk.length * 5 + 2);
-    const { json } = await keepaFetch(
-      "/product",
-      {
-        asin: chunk.join(","),
-        offers: 20,
-        // 365-day stats power both the buy-box price avg used by the
-        // revenue estimator and the listing-health snapshot.
-        stats: 365,
-        "buybox": 1,
-        // aplus=1 / videos=1 are free add-ons (same 5-token cost as the
-        // base product call). Without them Keepa omits the `aPlus` and
-        // `videos` arrays entirely, so has_a_plus / has_video map to null
-        // even on listings that do have A+ content and product video.
-        aplus: 1,
-        videos: 1,
-      },
-      {
-        // Phase 79 — first bulk run had Q Power error in keepa_enrich at
-        // the default 30s ceiling on this exact call. 90s covers the
-        // observed tail and one retry handles transient Keepa slowness.
-        timeoutMs: KEEPA_PRODUCT_HTTP_TIMEOUT_MS,
-        retryOnTimeout: true,
-      },
-    );
+    const fetched = await getProductDetailsBatch(chunk);
     // Phase 66 — per-chunk progress log so a stuck /product batch is
     // visible in real time instead of being a silent gap in the run
     // timeline. Greppable via `event:"keepa_product_chunk"`.
     console.log(
       JSON.stringify({
         event: "keepa_product_chunk",
-        chunk_index: Math.floor(i / batchSize),
+        chunk_index: Math.floor(i / safeBatch),
         chunk_size: chunk.length,
         cumulative_fetched: i + chunk.length,
         total_to_fetch: need.length,
         chunk_elapsed_ms: Date.now() - chunkStartedAt,
         total_elapsed_ms: Date.now() - productFetchStartedAt,
-        tokens_left: Number(json?.tokensLeft ?? 0),
       }),
     );
-    // Phase 81 — log /product token consumption (1 token per ASIN in chunk).
-    await trackCost({
-      provider: "keepa",
-      operation: "keepa_product",
-      units: chunk.length,
-    });
-    const products = Array.isArray(json?.products) ? json.products : [];
-    const tokensLeft = Number(json?.tokensLeft ?? 0);
-    TOKEN_CACHE = { t: Date.now(), v: { tokens_left: tokensLeft, refill_in_ms: Number(json?.refillIn ?? 0), refill_rate: Number(json?.refillRate ?? 0) } };
-    for (const p of products) {
-      const asin = String(p?.asin ?? "");
-      if (!asin) continue;
-      try {
-      const { offers } = extractOffers(p);
-      const bb = getBuyBoxSeller(p);
-      const stats = p?.stats ?? {};
-      const total = Number(stats?.offerCountNew ?? offers.length ?? 0);
-      const fba = offers.filter((o) => o.is_fba).length;
-
-      // Keepa stats CSV indices we use:
-      //   3  = SALES_RANK
-      //   16 = RATING (× 10, so divide by 10 for display)
-      //   17 = COUNT_REVIEWS
-      //   18 = BUY_BOX_SHIPPING (price in cents, includes shipping)
-      const cur: any[] = Array.isArray(stats?.current) ? stats.current : [];
-      const avg365: any[] = Array.isArray(stats?.avg365) ? stats.avg365 : [];
-      const salesRankCurrent =
-        typeof cur[3] === "number" && cur[3] > 0 ? cur[3] : null;
-      const salesRankAvg365 =
-        typeof avg365[3] === "number" && avg365[3] > 0 ? avg365[3] : null;
-      const bbCurrentCents =
-        typeof cur[18] === "number" && cur[18] > 0 ? cur[18] : null;
-      const bbAvg365Cents =
-        typeof avg365[18] === "number" && avg365[18] > 0 ? avg365[18] : null;
-      const ratingRaw = typeof cur[16] === "number" && cur[16] > 0 ? cur[16] : null;
-      const reviewsRaw = typeof cur[17] === "number" && cur[17] > 0 ? cur[17] : null;
-
-      // Image count: Keepa returns `imagesCSV` as comma-separated relative
-      // paths; sometimes also `images` (already an array of ids), or
-      // `imagesCount`. Use whichever shape we get back.
-      let imagesCount: number | null = null;
-      if (typeof p?.imagesCount === "number") imagesCount = p.imagesCount;
-      else if (Array.isArray(p?.images)) imagesCount = p.images.length;
-      else if (typeof p?.imagesCSV === "string" && p.imagesCSV.length) {
-        imagesCount = p.imagesCSV.split(",").filter(Boolean).length;
-      }
-
-      let featuresCount: number | null = null;
-      if (Array.isArray(p?.features)) featuresCount = p.features.length;
-      else if (typeof p?.featuresCSV === "string" && p.featuresCSV.length) {
-        featuresCount = p.featuresCSV.split(",").filter(Boolean).length;
-      }
-
-      // Video flag: with videos=1 in the request, Keepa returns `videos`
-      // as an array (sometimes also `videoCount` historically). Absent
-      // field with the request flag set means "no product video on this
-      // listing" — i.e. false, not null/unknown.
-      const videosArr = Array.isArray(p?.videos) ? p.videos : null;
-      const hasVideoCount =
-        typeof p?.videoCount === "number" ? p.videoCount > 0 : null;
-      const hasVideo: boolean =
-        videosArr !== null
-          ? videosArr.length > 0
-          : hasVideoCount === true
-          ? true
-          : false;
-
-      // A+ content: with aplus=1 in the request, Keepa returns `aPlus`
-      // as an array of modules (length > 0 means A+ is published).
-      // Absent field with the request flag set = no A+, i.e. false.
-      const aPlusRaw = (p as any)?.aPlus ?? (p as any)?.aPlusContent;
-      let hasAPlus: boolean = false;
-      if (typeof aPlusRaw === "boolean") hasAPlus = aPlusRaw;
-      else if (typeof aPlusRaw === "number") hasAPlus = aPlusRaw > 0;
-      else if (Array.isArray(aPlusRaw)) hasAPlus = aPlusRaw.length > 0;
-      else if (aPlusRaw && typeof aPlusRaw === "object")
-        hasAPlus = Object.keys(aPlusRaw).length > 0;
-
-      // Variation children. Keepa returns these in two shapes; we prefer
-      // the richer `variations[]` (each entry has `.asin` + attribute set)
-      // and fall back to the comma-separated `variationCSV` string. The
-      // parent ASIN can also point to itself if Keepa flagged it as the
-      // parent of a variation family.
-      const variationAsins: string[] = (() => {
-        const set = new Set<string>();
-        const asArr = Array.isArray((p as any)?.variations) ? (p as any).variations : null;
-        if (asArr) {
-          for (const v of asArr) {
-            const a = (v?.asin ?? "").toString().toUpperCase();
-            if (/^[A-Z0-9]{10}$/.test(a) && a !== asin) set.add(a);
-          }
-        }
-        const csv = (p as any)?.variationCSV;
-        if (typeof csv === "string" && csv.length) {
-          for (const tok of csv.split(/[, ]+/)) {
-            const a = tok.trim().toUpperCase();
-            if (/^[A-Z0-9]{10}$/.test(a) && a !== asin) set.add(a);
-          }
-        }
-        return Array.from(set);
-      })();
-      const parentAsinRaw = (p as any)?.parentAsin ?? (p as any)?.parentASIN ?? null;
-      const parentAsin =
-        typeof parentAsinRaw === "string" && /^[A-Z0-9]{10}$/i.test(parentAsinRaw.trim())
-          ? parentAsinRaw.trim().toUpperCase()
-          : null;
-
-      // Phase 32 — Buy Box win frequency over the last 90 days. Sharper
-      // attribution signal than review velocity for variation siblings:
-      // dormant pallet listings register 0 changes, active 4-packs many.
-      const buyBoxChangeCount90d = buyBoxChangeCount90d_(p);
-
-      // Phase 34 — Amazon-published "X+ bought in past month" badge.
-      // Tiered floor (50/100/200/500/1000/2000/5000+); 0 means Amazon
-      // hides the badge so we treat it as null.
-      const monthlySoldRaw = (p as any)?.monthlySold;
-      const monthlySold: number | null =
-        typeof monthlySoldRaw === "number" &&
-        Number.isFinite(monthlySoldRaw) &&
-        monthlySoldRaw > 0
-          ? Math.trunc(monthlySoldRaw)
-          : null;
-
-      const categoryTree = Array.isArray(p?.categoryTree)
-        ? p.categoryTree
-            .map((c: any) =>
-              c && typeof c.catId === "number"
-                ? { catId: c.catId, name: c?.name ?? "" }
-                : null,
-            )
-            .filter((c: any): c is { catId: number; name: string } => !!c)
-        : null;
-
-      const details: KeepaProductDetails = {
-        asin,
-        title: p?.title,
-        brand: p?.brand,
-        buy_box_seller: bb.name,
-        buy_box_seller_id: bb.sellerId,
-        buy_box_price: bb.price,
-        buy_box_is_fba: bb.isFBA,
-        buy_box_is_amazon: bb.isAmazon,
-        total_offers_count: total,
-        fba_offers_count: fba,
-        offers,
-        last_updated: safeKeepaMinuteToIso(p?.lastUpdate) ?? new Date().toISOString(),
-        sales_rank_avg365: salesRankAvg365,
-        sales_rank_current: salesRankCurrent,
-        buy_box_avg365: bbAvg365Cents != null ? bbAvg365Cents / 100 : null,
-        buy_box_current: bbCurrentCents != null ? bbCurrentCents / 100 : null,
-        category_tree: categoryTree,
-        product_group:
-          typeof p?.productGroup === "string" ? p.productGroup : null,
-        root_category:
-          typeof p?.rootCategory === "number" ? p.rootCategory : null,
-        images_count: imagesCount,
-        rating: ratingRaw != null ? ratingRaw / 10 : null,
-        review_count: reviewsRaw,
-        features_count: featuresCount,
-        has_video: hasVideo,
-        has_a_plus: hasAPlus,
-        parent_asin: parentAsin,
-        variation_asins: variationAsins,
-        buy_box_change_count_90d: buyBoxChangeCount90d,
-        monthly_sold: monthlySold,
-        raw: { tokensLeft, lastPriceChange: p?.lastPriceChange },
-      };
-      PRODUCT_CACHE.set(asin, { t: Date.now(), v: details });
-      out.push(details);
-      } catch (err: any) {
-        // Phase 37 — defensive boundary around per-product Keepa parsing.
-        // Historically a single malformed field (e.g. an unparseable
-        // `lastUpdate` minute fed to `new Date(...).toISOString()`, or
-        // a percentage formatter that mishandled the raw float Keepa
-        // returned for top-seller share) would throw mid-loop and abort
-        // the whole brand enrichment. The "string did not match the
-        // expected pattern" SyntaxError variant is the platform's
-        // canonical message for that family of throws. We log a
-        // structured `keepa_parser_warning` line (greppable in Vercel
-        // logs to pinpoint which Keepa field is unparseable) and skip
-        // this product so the rest of the batch still lands.
-        const message = err instanceof Error ? err.message : String(err);
-        const errName = err instanceof Error ? err.name : "Error";
-        console.error(
-          JSON.stringify({
-            event: "keepa_parser_warning",
-            asin,
-            field_name: "product_record",
-            error_name: errName,
-            error_message: message,
-            // Compact peek at the inputs that most commonly trip parsers
-            // (URL constructors, percentage formatters, date parsers).
-            raw_value: {
-              title_len: typeof p?.title === "string" ? p.title.length : null,
-              monthly_sold_type: typeof (p as any)?.monthlySold,
-              last_update_type: typeof (p as any)?.lastUpdate,
-              variations_count: Array.isArray((p as any)?.variations)
-                ? (p as any).variations.length
-                : null,
-              variation_csv_type: typeof (p as any)?.variationCSV,
-            },
-          }),
-        );
-      }
-    }
+    out.push(...fetched);
   }
   return out;
 }

@@ -57,6 +57,10 @@ interface RunRow {
   updated_at: string;
   // Phase 81 — run-level cost total.
   cost_total_usd: number | null;
+  // Phase 82 — janitor re-kick telemetry. Surfaces a subtle badge when
+  // the bulk-janitor cron recovered one or more stalls in this run.
+  janitor_kick_count?: number | null;
+  last_janitor_kick_at?: string | null;
 }
 
 function fmtTs(s: string | null): string {
@@ -267,6 +271,23 @@ export default function BulkRunClient({ runId }: { runId: string }) {
         <span style={{ color: "#666", fontSize: 13 }}>
           Total cost <strong>{fmtCost(run.cost_total_usd ?? 0)}</strong>
         </span>
+        {Number(run.janitor_kick_count ?? 0) > 0 ? (
+          <span
+            title="Phase 82 — bulk-janitor cron detected and recovered a stalled worker self-kick."
+            style={{
+              display: "inline-block",
+              background: "#f0ede5",
+              color: "#7a6a3a",
+              padding: "2px 8px",
+              borderRadius: 3,
+              fontSize: 11,
+              letterSpacing: 0.04,
+            }}
+          >
+            Janitor recovered {Number(run.janitor_kick_count)} stall
+            {Number(run.janitor_kick_count) === 1 ? "" : "s"}
+          </span>
+        ) : null}
       </div>
       <p style={{ color: "#888", fontSize: 12, margin: "0 0 24px" }}>
         Started {fmtTs(run.started_at)} · run id <code>{run.id}</code>

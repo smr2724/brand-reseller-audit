@@ -26,7 +26,7 @@ export async function GET(
   const { data: run, error: runErr } = await supabase
     .from("bulk_runs")
     .select(
-      "id, user_id, status, total_brands, brands_completed, current_brand_id, current_brand_name, started_at, completed_at, report_email_sent_at, error_message, created_at, updated_at, cost_total_usd",
+      "id, user_id, status, total_brands, brands_completed, current_brand_id, current_brand_name, started_at, completed_at, report_email_sent_at, error_message, created_at, updated_at, cost_total_usd, janitor_kick_count, last_janitor_kick_at",
     )
     .eq("id", params.runId)
     .maybeSingle();
