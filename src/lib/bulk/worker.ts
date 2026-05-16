@@ -114,15 +114,75 @@ export async function claimNextQueuedBrand(
   return claimed;
 }
 
+/**
+ * Phase 82 review fix #3: every write to bulk_run_brands must refuse to
+ * overwrite a row that the janitor has already terminated. If the row
+ * is already `error` (or any other terminal state), an in-flight worker
+ * returning from a slow Keepa call must NOT erase the janitor's mark
+ * and continue — that's the race that produced duplicate processing,
+ * duplicate drafts, and double-incremented run counts.
+ *
+ * The guard runs as `.not("status", "in", terminalStatuses)`. Writes
+ * that intentionally land a terminal state (markError) pass
+ * `allowTerminal: true` to bypass the guard.
+ */
+const TERMINAL_BRAND_STATUSES = ["error", "completed", "disqualified", "keepa_not_found"];
+
 async function patchRow(
   admin: SupabaseClient<any, any, any>,
   id: string,
   patch: Record<string, unknown>,
-): Promise<void> {
-  await admin
+  opts: { allowTerminal?: boolean } = {},
+): Promise<{ updated: boolean }> {
+  let q = admin
     .from("bulk_run_brands")
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq("id", id);
+  if (!opts.allowTerminal) {
+    // Refuse to update a brand row that's already in a terminal state.
+    // Filter expression: status NOT IN (error, completed, disqualified, keepa_not_found).
+    q = q.not("status", "in", `(${TERMINAL_BRAND_STATUSES.join(",")})`);
+  }
+  const { data } = await q.select("id, bulk_run_id");
+  const updated = !!data && data.length > 0;
+  // Phase 82 review fix #1 — heartbeat the parent run so the janitor's
+  // "stuck > 90s" filter does NOT pick up a healthy long-running brand.
+  // Best-effort; never blocks the worker.
+  if (updated && data && data[0]?.bulk_run_id) {
+    try {
+      await admin
+        .from("bulk_runs")
+        .update({ updated_at: new Date().toISOString() })
+        .eq("id", data[0].bulk_run_id)
+        .eq("status", "running");
+    } catch {
+      // intentionally ignored — heartbeat is best-effort
+    }
+  }
+  return { updated };
+}
+
+/**
+ * Heartbeat helper — bumps `bulk_runs.updated_at` so the janitor's
+ * primary "stuck > 90s" filter does not pick up a run whose CURRENT
+ * brand is healthy but legitimately slow (Keepa enrich can run up to
+ * 240s). Without this, every long brand step accumulates noop janitor
+ * kicks toward the 10-kick abandon ceiling. Best-effort — never blocks
+ * the pipeline.
+ */
+async function heartbeatRun(
+  admin: SupabaseClient<any, any, any>,
+  runId: string,
+): Promise<void> {
+  try {
+    await admin
+      .from("bulk_runs")
+      .update({ updated_at: new Date().toISOString() })
+      .eq("id", runId)
+      .eq("status", "running");
+  } catch {
+    // intentionally ignored — heartbeat is best-effort
+  }
 }
 
 async function bumpRunCompleted(
@@ -151,13 +211,23 @@ async function markError(
   err: unknown,
 ): Promise<void> {
   const message = err instanceof Error ? err.message : String(err);
-  await patchRow(admin, rowId, {
-    status: "error",
-    error_step: step,
-    error_message: message.slice(0, 500),
-    progress_percent: 100,
-    completed_at: new Date().toISOString(),
-  });
+  // markError intentionally lands a terminal state — bypass the
+  // "no overwriting terminal" guard. If the row is already terminal
+  // (janitor beat us to it), this update will overwrite with the
+  // worker's own diagnostic — acceptable and arguably preferred since
+  // it carries the originating step name.
+  await patchRow(
+    admin,
+    rowId,
+    {
+      status: "error",
+      error_step: step,
+      error_message: message.slice(0, 500),
+      progress_percent: 100,
+      completed_at: new Date().toISOString(),
+    },
+    { allowTerminal: true },
+  );
 }
 
 interface BrandLookupCandidateShape {
@@ -305,6 +375,7 @@ async function processBulkBrandImpl(
       brand_id: brandId,
       brand_name: resolvedBrandName,
       user_id: userId,
+      heartbeat: () => heartbeatRun(admin, row.bulk_run_id),
     });
 
     // Phase 79 — surface Keepa /product timeout retries on bulk_run_brands

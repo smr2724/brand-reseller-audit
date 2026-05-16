@@ -1003,6 +1003,10 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
     // Phase 66 — per-chunk progress log so a stuck /product batch is
     // visible in real time instead of being a silent gap in the run
     // timeline. Greppable via `event:"keepa_product_chunk"`.
+    // Phase 82 review fix #8 — restore `tokens_left` on the chunk log
+    // (it was previously dropped when the batch wrapper landed).
+    // getProductDetailsBatch refreshes TOKEN_CACHE on each call, so
+    // the cached value is the most recent /product `tokensLeft`.
     console.log(
       JSON.stringify({
         event: "keepa_product_chunk",
@@ -1012,6 +1016,7 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
         total_to_fetch: need.length,
         chunk_elapsed_ms: Date.now() - chunkStartedAt,
         total_elapsed_ms: Date.now() - productFetchStartedAt,
+        tokens_left: TOKEN_CACHE?.v?.tokens_left ?? null,
       }),
     );
     out.push(...fetched);

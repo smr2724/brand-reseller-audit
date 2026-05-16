@@ -19,6 +19,13 @@
  * After 10 consecutive kicks on the same run we mark the run itself
  * `error` and stop — prevents an infinite-kick loop on a broken row.
  *
+ * Phase 82 review fix: the run-level `updated_at < now() - 90s` filter
+ * is only a candidate gate — the kick/increment decision depends on
+ * whether the CURRENT in-flight brand row has actually exceeded its
+ * per-step soft cap. A long-running but healthy brand (e.g. 240s in
+ * keepa_enriching) no longer accumulates noop kicks toward the 10-kick
+ * abandon ceiling.
+ *
  * Safety belts (NEVER remove):
  *   • Authorization: Bearer ${CRON_SECRET} header — mandatory per project rule
  *   • runtime = nodejs
@@ -118,8 +125,8 @@ interface StuckBrand {
 interface ActionResult {
   run_id: string;
   action: "kicked" | "abandoned" | "noop";
-  brand_marked_error?: string;
-  error_step?: string;
+  brands_marked_error?: string[];
+  error_steps?: string[];
   kick_count?: number;
 }
 
@@ -175,7 +182,8 @@ export async function GET(req: Request) {
           completed_at: nowIso,
           updated_at: nowIso,
         })
-        .eq("id", run.id);
+        .eq("id", run.id)
+        .eq("status", "running");
       results.push({
         run_id: run.id,
         action: "abandoned",
@@ -184,7 +192,7 @@ export async function GET(req: Request) {
       continue;
     }
 
-    // Identify the currently-processing brand for this run.
+    // Identify the currently-processing brand(s) for this run.
     const { data: brandsRaw } = await admin
       .from("bulk_run_brands")
       .select("id, bulk_run_id, status, updated_at")
@@ -193,8 +201,13 @@ export async function GET(req: Request) {
 
     const brands = (brandsRaw ?? []) as StuckBrand[];
 
-    let markedErrorBrand: string | undefined;
-    let markedErrorStep: string | undefined;
+    // Phase 82 review fix #1: only ACT on a candidate run when an
+    // in-flight brand row has actually exceeded its per-step soft cap.
+    // Iterate all such rows (review fix #9 — drop the single-brand
+    // `break;` so multiple orphans in the same run are cleaned up in
+    // one pass).
+    const markedErrorBrands: string[] = [];
+    const markedErrorSteps: string[] = [];
 
     for (const brand of brands) {
       const stepCap =
@@ -207,7 +220,11 @@ export async function GET(req: Request) {
 
       const stuckSeconds = Math.round(stuckMs / 1000);
       const nowIso = new Date().toISOString();
-      await admin
+      // Phase 82 review fix #3: status-conditional update so we don't
+      // overwrite a row that has already been moved on by the worker
+      // (the row may still appear stuck in our SELECT snapshot but a
+      // late patchRow could have just landed it in qualifying/etc.).
+      const { data: updatedRows } = await admin
         .from("bulk_run_brands")
         .update({
           status: "error",
@@ -216,36 +233,66 @@ export async function GET(req: Request) {
           completed_at: nowIso,
           updated_at: nowIso,
         })
-        .eq("id", brand.id);
-      markedErrorBrand = brand.id;
-      markedErrorStep = brand.status;
-      // Only mark one brand per janitor pass — the worker self-kick
-      // will pick up the next queued row.
-      break;
+        .eq("id", brand.id)
+        .eq("status", brand.status)
+        .select("id");
+      if (updatedRows && updatedRows.length > 0) {
+        markedErrorBrands.push(brand.id);
+        markedErrorSteps.push(brand.status);
+      }
     }
 
-    // Increment kick counter + stamp last_janitor_kick_at, then kick
-    // the worker so the run advances. We do this even if we did not
-    // find a brand to mark as error (run row might be stuck on its
-    // own update path while worker is processing fine).
-    const nowIso = new Date().toISOString();
-    const nextKickCount = kickCount + 1;
-    await admin
-      .from("bulk_runs")
-      .update({
-        janitor_kick_count: nextKickCount,
-        last_janitor_kick_at: nowIso,
-        updated_at: nowIso,
-      })
-      .eq("id", run.id);
+    // Phase 82 review fix #1: if no brand exceeded its per-step soft
+    // cap, the run is healthy (just hasn't bumped run-level updated_at
+    // recently). Record a noop — do NOT increment kick_count, do NOT
+    // re-kick. Healthy long-running brands no longer push the run
+    // toward the 10-kick abandon ceiling.
+    if (markedErrorBrands.length === 0) {
+      results.push({
+        run_id: run.id,
+        action: "noop",
+        kick_count: kickCount,
+      });
+      continue;
+    }
+
+    // We actually marked at least one brand as `error`. Atomically
+    // bump the kick counter (review fix #4) so concurrent janitor
+    // invocations can't lose an increment, then re-kick the worker
+    // chain so the run advances.
+    let nextKickCount = kickCount + 1;
+    try {
+      const { data: rpcCount } = await admin.rpc("increment_janitor_kick", {
+        p_run_id: run.id,
+      });
+      if (typeof rpcCount === "number") {
+        nextKickCount = rpcCount;
+      }
+    } catch (e) {
+      // Fallback to non-atomic write so the janitor still functions
+      // pre-migration. Logged so the discrepancy is visible.
+      console.warn(
+        `[bulk-janitor] increment_janitor_kick RPC failed for ${run.id}:`,
+        String((e as Error)?.message ?? e),
+      );
+      const nowIso = new Date().toISOString();
+      await admin
+        .from("bulk_runs")
+        .update({
+          janitor_kick_count: nextKickCount,
+          last_janitor_kick_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq("id", run.id);
+    }
 
     await kickWorker(req, run.id);
 
     results.push({
       run_id: run.id,
       action: "kicked",
-      brand_marked_error: markedErrorBrand,
-      error_step: markedErrorStep,
+      brands_marked_error: markedErrorBrands,
+      error_steps: markedErrorSteps,
       kick_count: nextKickCount,
     });
   }

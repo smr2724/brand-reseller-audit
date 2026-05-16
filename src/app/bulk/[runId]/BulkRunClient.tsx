@@ -273,7 +273,11 @@ export default function BulkRunClient({ runId }: { runId: string }) {
         </span>
         {Number(run.janitor_kick_count ?? 0) > 0 ? (
           <span
-            title="Phase 82 — bulk-janitor cron detected and recovered a stalled worker self-kick."
+            title={
+              run.last_janitor_kick_at
+                ? `Phase 82 — bulk-janitor cron detected and recovered a stalled worker self-kick. Last kick: ${fmtTs(run.last_janitor_kick_at)}.`
+                : "Phase 82 — bulk-janitor cron detected and recovered a stalled worker self-kick."
+            }
             style={{
               display: "inline-block",
               background: "#f0ede5",
@@ -286,6 +290,7 @@ export default function BulkRunClient({ runId }: { runId: string }) {
           >
             Janitor recovered {Number(run.janitor_kick_count)} stall
             {Number(run.janitor_kick_count) === 1 ? "" : "s"}
+            {run.last_janitor_kick_at ? ` — last at ${fmtTs(run.last_janitor_kick_at)}` : ""}
           </span>
         ) : null}
       </div>
