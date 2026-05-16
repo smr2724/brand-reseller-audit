@@ -117,7 +117,7 @@ async function finalize(req: Request, runId: string): Promise<NextResponse> {
   const { data: brandsRaw } = await admin
     .from("bulk_run_brands")
     .select(
-      "position, input_name, brand_id, status, qualified, disqualification_reason, selected_entity_name, resolved_owner_domain, contact_name, contact_email, email_verifier, email_status, outlook_draft_id, outlook_draft_web_link, brand_seven_x_value, legion_opportunity, error_message, error_step",
+      "position, input_name, brand_id, status, qualified, disqualification_reason, selected_entity_name, resolved_owner_domain, contact_name, contact_email, email_verifier, email_status, outlook_draft_id, outlook_draft_web_link, brand_seven_x_value, legion_opportunity, economics_status, error_message, error_step",
     )
     .eq("bulk_run_id", runId)
     .order("position", { ascending: true });

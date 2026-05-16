@@ -33,6 +33,7 @@ import {
   type RevenueEstimate,
 } from "@/lib/enrichment/revenue-estimator";
 import { resolveBrandRevenue } from "@/lib/math/resolve-brand-revenue";
+import { clampAndClassifyEconomics } from "@/lib/math/economics-status";
 import { aggregateClassificationShares } from "./seller-classification-shares";
 
 export interface PersistEconomicsResult {
@@ -57,6 +58,7 @@ const ECONOMICS_NULLS = {
   additional_profit: null as number | null,
   new_profit: null as number | null,
   seven_x_multiple_value: null as number | null,
+  economics_status: null as string | null,
 };
 
 /**
@@ -188,15 +190,28 @@ export async function persistBrandEconomics(
     brand_controlled_pct: brandControlledPct,
   });
 
+  // Phase 80 — clamp negative outputs to 0 and surface the underlying reason
+  // via economics_status. When the math returns delta_profit ≤ 0 we persist
+  // additional_profit=0, seven_x_multiple_value=0, and new_profit=current_profit
+  // (no improvement) so reports stop showing nonsense like "$-178K opportunity".
+  const clamped = clampAndClassifyEconomics({
+    delta_profit: out.delta_profit,
+    revenue,
+    brand_controlled_pct: brandControlledPct,
+    exit_lift: out.exit_lift,
+  });
+  const isHealthy = clamped.status === "healthy";
+
   update.trailing_12_months = revenue;
   update.est_monthly_revenue = Math.round((revenue / 12) * 100) / 100;
   update.current_profit = out.current_profit;
   update.resellers_margin = out.reseller_margin_captured;
   update.recouped_shipping = out.recouped_shipping;
   update.labor_cost = out.labor_cost;
-  update.additional_profit = out.delta_profit;
-  update.new_profit = out.new_profit;
-  update.seven_x_multiple_value = out.exit_lift;
+  update.additional_profit = clamped.additional_profit;
+  update.new_profit = isHealthy ? out.new_profit : out.current_profit;
+  update.seven_x_multiple_value = clamped.seven_x_multiple_value;
+  update.economics_status = clamped.status;
 
   const { error: updErr } = await admin
     .from("brands")
@@ -206,7 +221,7 @@ export async function persistBrandEconomics(
     return { ok: false, reason: "update_failed", error: updErr.message };
   }
   console.log(
-    `[persist-economics] brand=${brandId} revenue=${revenue} source=${revenueSource} bc_pct=${brandControlledPct ?? "null"} bc_source=${bcSource}`,
+    `[persist-economics] brand=${brandId} revenue=${revenue} source=${revenueSource} bc_pct=${brandControlledPct ?? "null"} bc_source=${bcSource} status=${clamped.status} delta_raw=${out.delta_profit.toFixed(0)}`,
   );
   return { ok: true, wrote: true, revenue, revenueSource };
 }

@@ -27,8 +27,17 @@ export interface BulkReportBrand {
   outlook_draft_web_link: string | null;
   brand_seven_x_value: number | null;
   legion_opportunity: number | null;
+  economics_status: "healthy" | "low_revenue" | "tight_channel" | null;
   error_step: string | null;
   error_message: string | null;
+}
+
+function economicsBadge(
+  status: BulkReportBrand["economics_status"],
+): { label: string; bg: string; color: string } | null {
+  if (status === "low_revenue") return { label: "Low Revenue", bg: "#eaeaea", color: "#555" };
+  if (status === "tight_channel") return { label: "Tight Channel", bg: "#eaeaea", color: "#555" };
+  return null;
 }
 
 export interface BulkReportInput {
@@ -151,9 +160,13 @@ export function renderBulkRunReportHtml(input: BulkReportInput): {
           ? `<a href="${escapeHtml(b.outlook_draft_web_link)}" style="color:#1a55a3;text-decoration:underline;">Open</a>`
           : "Created"
         : "—";
+      const eb = economicsBadge(b.economics_status);
+      const economicsBadgeHtml = eb
+        ? ` <span style="display:inline-block;background:${eb.bg};color:${eb.color};padding:1px 6px;font-size:10px;border-radius:3px;vertical-align:middle;margin-left:4px;">${escapeHtml(eb.label)}</span>`
+        : "";
       return `<tr>
         <td style="${cellStyle}">${idx + 1}</td>
-        <td style="${cellStyle}"><strong>${escapeHtml(b.input_name)}</strong>${
+        <td style="${cellStyle}"><strong>${escapeHtml(b.input_name)}</strong>${economicsBadgeHtml}${
           b.selected_entity_name && b.selected_entity_name !== b.input_name
             ? `<br/><span style="color:#888;font-size:11px;">${escapeHtml(b.selected_entity_name)}</span>`
             : ""

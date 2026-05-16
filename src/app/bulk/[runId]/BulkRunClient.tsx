@@ -23,10 +23,19 @@ interface BrandRow {
   outlook_draft_web_link: string | null;
   brand_seven_x_value: number | null;
   legion_opportunity: number | null;
+  economics_status: "healthy" | "low_revenue" | "tight_channel" | null;
   error_message: string | null;
   error_step: string | null;
   started_at: string | null;
   completed_at: string | null;
+}
+
+function economicsBadge(
+  status: BrandRow["economics_status"],
+): { label: string; bg: string; fg: string } | null {
+  if (status === "low_revenue") return { label: "Low Revenue", bg: "#eaeaea", fg: "#555" };
+  if (status === "tight_channel") return { label: "Tight Channel", bg: "#eaeaea", fg: "#555" };
+  return null;
 }
 
 interface RunRow {
@@ -292,6 +301,26 @@ export default function BulkRunClient({ runId }: { runId: string }) {
                   <td style={td}>{showReport ? idx + 1 : b.position}</td>
                   <td style={td}>
                     <strong>{b.input_name}</strong>
+                    {(() => {
+                      const eb = economicsBadge(b.economics_status);
+                      if (!eb) return null;
+                      return (
+                        <span
+                          style={{
+                            display: "inline-block",
+                            background: eb.bg,
+                            color: eb.fg,
+                            padding: "1px 6px",
+                            borderRadius: 3,
+                            fontSize: 10,
+                            marginLeft: 6,
+                            verticalAlign: "middle",
+                          }}
+                        >
+                          {eb.label}
+                        </span>
+                      );
+                    })()}
                     {b.selected_entity_name && b.selected_entity_name !== b.input_name ? (
                       <div style={{ color: "#888", fontSize: 11 }}>
                         {b.selected_entity_name}

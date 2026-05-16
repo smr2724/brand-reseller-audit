@@ -495,24 +495,28 @@ export async function processBulkBrand(
   // codebase is unrelated.
   let brandSevenXValue: number | null = null;
   let legionOpportunity: number | null = null;
+  let economicsStatus: string | null = null;
   try {
     await persistBrandEconomics(admin, brandId);
     const { data: brandEcon } = await admin
       .from("brands")
-      .select("additional_profit, seven_x_multiple_value")
+      .select("additional_profit, seven_x_multiple_value, economics_status")
       .eq("id", brandId)
       .maybeSingle<{
         additional_profit: number | null;
         seven_x_multiple_value: number | null;
+        economics_status: string | null;
       }>();
     legionOpportunity = brandEcon?.additional_profit ?? null;
     brandSevenXValue = brandEcon?.seven_x_multiple_value ?? null;
+    economicsStatus = brandEcon?.economics_status ?? null;
   } catch (e) {
     console.warn(`[bulk-worker] economics persist failed for ${brandId}:`, e);
   }
   await patchRow(admin, rowId, {
     brand_seven_x_value: brandSevenXValue,
     legion_opportunity: legionOpportunity,
+    economics_status: economicsStatus,
   });
 
   // ---- Step 7: Draft if email is MV-verified ----
