@@ -66,61 +66,35 @@ export async function trackCost(args: TrackCostArgs): Promise<number> {
     console.warn(`[cost] api_costs insert threw:`, e);
   }
 
-  // Roll up onto bulk_run_brands (per-brand) and bulk_runs (run total).
-  // Use read-modify-write since PostgREST doesn't expose atomic add and
-  // the pipeline is sequential per-brand. Race risk is negligible.
-  if (bulkRunBrandId) {
+  // Roll up onto bulk_run_brands (per-brand) and bulk_runs (run total)
+  // via SECURITY DEFINER RPCs (migration 0063) — single atomic UPDATE,
+  // no lost-update race.
+  if (bulkRunBrandId && cost > 0) {
     try {
-      const { data: row } = await admin
-        .from("bulk_run_brands")
-        .select("cost_total_usd, cost_breakdown")
-        .eq("id", bulkRunBrandId)
-        .maybeSingle<{
-          cost_total_usd: number | string | null;
-          cost_breakdown: Record<string, number> | null;
-        }>();
-      const prevTotal = Number(row?.cost_total_usd ?? 0) || 0;
-      const prevBreakdown: Record<string, number> = { ...(row?.cost_breakdown ?? {}) };
-      const prevProvider = Number(prevBreakdown[args.provider] ?? 0) || 0;
-      prevBreakdown[args.provider] = Math.round((prevProvider + cost) * 10_000) / 10_000;
-      const newTotal = Math.round((prevTotal + cost) * 10_000) / 10_000;
-      const { error: updErr } = await admin
-        .from("bulk_run_brands")
-        .update({
-          cost_total_usd: newTotal,
-          cost_breakdown: prevBreakdown,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", bulkRunBrandId);
-      if (updErr) {
-        console.warn(`[cost] bulk_run_brands rollup failed:`, updErr.message);
+      const { error: rpcErr } = await admin.rpc("add_brand_cost", {
+        p_brand_run_id: bulkRunBrandId,
+        p_provider: args.provider,
+        p_delta: cost,
+      });
+      if (rpcErr) {
+        console.warn(`[cost] add_brand_cost rpc failed:`, rpcErr.message);
       }
     } catch (e) {
-      console.warn(`[cost] bulk_run_brands rollup threw:`, e);
+      console.warn(`[cost] add_brand_cost rpc threw:`, e);
     }
   }
 
-  if (bulkRunId) {
+  if (bulkRunId && cost > 0) {
     try {
-      const { data: runRow } = await admin
-        .from("bulk_runs")
-        .select("cost_total_usd")
-        .eq("id", bulkRunId)
-        .maybeSingle<{ cost_total_usd: number | string | null }>();
-      const prevTotal = Number(runRow?.cost_total_usd ?? 0) || 0;
-      const newTotal = Math.round((prevTotal + cost) * 10_000) / 10_000;
-      const { error: updErr } = await admin
-        .from("bulk_runs")
-        .update({
-          cost_total_usd: newTotal,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", bulkRunId);
-      if (updErr) {
-        console.warn(`[cost] bulk_runs rollup failed:`, updErr.message);
+      const { error: rpcErr } = await admin.rpc("add_run_cost", {
+        p_run_id: bulkRunId,
+        p_delta: cost,
+      });
+      if (rpcErr) {
+        console.warn(`[cost] add_run_cost rpc failed:`, rpcErr.message);
       }
     } catch (e) {
-      console.warn(`[cost] bulk_runs rollup threw:`, e);
+      console.warn(`[cost] add_run_cost rpc threw:`, e);
     }
   }
 

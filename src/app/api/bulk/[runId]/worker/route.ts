@@ -134,9 +134,7 @@ async function finalize(req: Request, runId: string): Promise<NextResponse> {
     appBaseUrl: origin,
     brands,
     runCostTotalUsd:
-      typeof (run as { cost_total_usd?: unknown }).cost_total_usd === "number"
-        ? Number((run as { cost_total_usd: number }).cost_total_usd)
-        : Number((run as { cost_total_usd?: unknown }).cost_total_usd ?? 0) || null,
+      Number((run as { cost_total_usd?: number | string | null }).cost_total_usd ?? 0) || 0,
   });
 
   let emailOk = false;

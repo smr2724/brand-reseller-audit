@@ -85,13 +85,15 @@ function fmtCost(n: number | null | undefined): string {
   return `$${v.toFixed(2)}`;
 }
 
+// Phase 81 — per-brand outreach drafts use Microsoft Graph (free under
+// M365), not Resend. Resend appears only as a run-level cost (summary
+// email), so it's omitted from the per-brand breakdown columns.
 const COST_PROVIDERS: { key: string; label: string }[] = [
   { key: "keepa", label: "Keepa" },
   { key: "apollo", label: "Apollo" },
   { key: "hunter", label: "Hunter" },
   { key: "million_verifier", label: "MillionVerifier" },
   { key: "openai", label: "OpenAI" },
-  { key: "resend", label: "Resend" },
 ];
 
 function statusBadgeForBrand(b: BrandRow): { label: string; bg: string; fg: string } {

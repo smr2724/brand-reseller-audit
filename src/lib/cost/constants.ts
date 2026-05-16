@@ -40,6 +40,11 @@ export const OPENAI_GPT4O_MINI_OUTPUT_USD_PER_TOKEN = 0.6 / 1_000_000;
 // Resend Pro: $20/mo + 50k emails = $0.0004/send blended.
 export const RESEND_COST_PER_SEND_USD = 0.0004;
 
+// NOTE: Microsoft Graph createDraft is not metered — covered by the
+// user's Microsoft 365 license — so no constant or trackCost call.
+// Per-brand outreach drafts use Graph (not Resend), which is why the
+// per-brand Resend column is omitted from the email/UI breakdown.
+
 /**
  * Human-readable cost basis lines for the email summary legend.
  * Kept in sync with constants above (manual — these are documentation
@@ -52,4 +57,5 @@ export const COST_BASIS_LINES: string[] = [
   "MillionVerifier: $0.0004 / verification",
   "OpenAI gpt-4o-mini: $0.15 / 1M input tokens, $0.60 / 1M output tokens",
   "Resend send: $0.0004 / email",
+  "Resend cost reflects only the summary email below; per-brand outreach drafts are created in Outlook via Microsoft Graph at no API cost.",
 ];

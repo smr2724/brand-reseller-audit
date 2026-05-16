@@ -1,7 +1,5 @@
 import { COST_BASIS_LINES } from "@/lib/cost/constants";
 
-const COST_BASIS_LINES_FOR_EMAIL = COST_BASIS_LINES;
-
 /**
  * Phase 75 — Ranked bulk-run report.
  *
@@ -97,14 +95,16 @@ function fmtCost(n: number | null | undefined): string {
   return `$${v.toFixed(2)}`;
 }
 
-// Providers we render columns for, in display order.
+// Providers we render columns for, in display order. Per-brand outreach
+// drafts use Microsoft Graph (free under M365), not Resend — so Resend
+// is omitted here. It still appears in the run total via the summary
+// email send (bulkRunBrandId=null).
 const COST_PROVIDER_COLUMNS: { key: string; label: string }[] = [
   { key: "keepa", label: "Keepa" },
   { key: "apollo", label: "Apollo" },
   { key: "hunter", label: "Hunter" },
   { key: "million_verifier", label: "MV" },
   { key: "openai", label: "OpenAI" },
-  { key: "resend", label: "Resend" },
 ];
 
 export function statusBadge(b: BulkReportBrand): {
@@ -241,7 +241,7 @@ export function renderBulkRunReportHtml(input: BulkReportInput): {
     })
     .join("");
 
-  const costBasisHtml = COST_BASIS_LINES_FOR_EMAIL
+  const costBasisHtml = COST_BASIS_LINES
     .map((line) => `<li>${escapeHtml(line)}</li>`)
     .join("");
 
@@ -349,7 +349,7 @@ export function renderBulkRunReportHtml(input: BulkReportInput): {
   }
   textLines.push("");
   textLines.push("Cost basis (per call, USD):");
-  for (const line of COST_BASIS_LINES_FOR_EMAIL) textLines.push(`- ${line}`);
+  for (const line of COST_BASIS_LINES) textLines.push(`- ${line}`);
 
   return { subject, html, text: textLines.join("\n") };
 }
