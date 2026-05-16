@@ -43,7 +43,7 @@ export async function GET(
   const { data: brands, error: brandsErr } = await supabase
     .from("bulk_run_brands")
     .select(
-      "id, bulk_run_id, position, input_name, brand_id, status, progress_percent, current_step_label, qualified, disqualification_reason, selected_entity_name, resolved_owner_domain, contact_name, contact_email, email_verifier, email_status, outlook_draft_id, outlook_draft_web_link, brand_seven_x_value, legion_opportunity, error_message, error_step, started_at, completed_at",
+      "id, bulk_run_id, position, input_name, brand_id, status, progress_percent, current_step_label, qualified, disqualification_reason, selected_entity_name, resolved_owner_domain, contact_name, contact_email, email_verifier, email_status, outlook_draft_id, outlook_draft_web_link, brand_seven_x_value, legion_opportunity, economics_status, error_message, error_step, started_at, completed_at",
     )
     .eq("bulk_run_id", params.runId)
     .order("position", { ascending: true });
