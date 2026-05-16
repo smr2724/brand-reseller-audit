@@ -11,6 +11,37 @@ const BASE = "https://api.keepa.com";
 // silently consuming the entire 300s function budget; cap each call at 30s.
 const KEEPA_HTTP_TIMEOUT_MS = 30_000;
 
+// Phase 79 — The /product bulk-enrich call (5 ASINs × offers=20 × stats=365)
+// regularly takes 30–60s under load and was throwing fetchWithTimeout errors
+// inside the bulk worker (run 6a308a72: Q Power, keepa_enrich step). Bump the
+// product-call ceiling to 90s and add one retry on timeout (the search/query
+// timeouts stay at 30s — those endpoints aren't the slow one).
+const KEEPA_PRODUCT_HTTP_TIMEOUT_MS = 90_000;
+const KEEPA_PRODUCT_RETRY_DELAY_MS = 2_000;
+
+// Phase 79 — Module-level counter incremented every time the /product call
+// retries after a fetchWithTimeout abort. The bulk worker drains this with
+// consumeKeepaProductRetryCount() right after enrichment so it can bump
+// bulk_run_brands.retry_count. Keeping it module-local avoids threading a
+// retry signal through getProductDetails → expandVariationAsins → enrichBrandWithKeepa.
+let KEEPA_PRODUCT_RETRY_COUNTER = 0;
+
+function isFetchTimeoutError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return msg.startsWith("fetchWithTimeout timed out");
+}
+
+/**
+ * Atomically read and reset the /product retry counter. Returns the number
+ * of retries that fired since the last call. Safe to call from anywhere —
+ * meant for the bulk worker to plumb into `bulk_run_brands.retry_count`.
+ */
+export function consumeKeepaProductRetryCount(): number {
+  const n = KEEPA_PRODUCT_RETRY_COUNTER;
+  KEEPA_PRODUCT_RETRY_COUNTER = 0;
+  return n;
+}
+
 export function isKeepaConfigured() {
   return !!process.env.KEEPA_API_KEY;
 }
@@ -231,18 +262,55 @@ function normalizeBrandQuery(name: string) {
     .trim();
 }
 
-async function keepaFetch(path: string, params: Record<string, string | number>): Promise<{ json: any; status: number }> {
+interface KeepaFetchOptions {
+  /** Per-call HTTP timeout override. Defaults to KEEPA_HTTP_TIMEOUT_MS (30s). */
+  timeoutMs?: number;
+  /**
+   * Phase 79 — retry the request once on fetchWithTimeout abort. Used by
+   * the /product call where a 5-ASIN bulk enrich can legitimately exceed
+   * 30s under load. Increments KEEPA_PRODUCT_RETRY_COUNTER on every retry
+   * fire so the bulk worker can surface it on bulk_run_brands.retry_count.
+   */
+  retryOnTimeout?: boolean;
+}
+
+async function keepaFetch(
+  path: string,
+  params: Record<string, string | number>,
+  options: KeepaFetchOptions = {},
+): Promise<{ json: any; status: number }> {
   const key = process.env.KEEPA_API_KEY;
   if (!key) throw new Error("KEEPA_API_KEY missing");
   const qs = new URLSearchParams({ key, domain: String(DOMAIN_ID), ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])) });
   const url = `${BASE}${path}?${qs.toString()}`;
+  const timeoutMs = options.timeoutMs ?? KEEPA_HTTP_TIMEOUT_MS;
   let lastErr = "";
+  let timeoutRetried = false;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetchWithTimeout(url, {
-      cache: "no-store",
-      timeoutMs: KEEPA_HTTP_TIMEOUT_MS,
-      label: `keepa${path}`,
-    });
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(url, {
+        cache: "no-store",
+        timeoutMs,
+        label: `keepa${path}`,
+      });
+    } catch (err) {
+      // Phase 79 — fetchWithTimeout aborts surface as a thrown Error whose
+      // message starts with "fetchWithTimeout timed out". When the caller
+      // opts in to retryOnTimeout, swallow the first abort, wait briefly
+      // (let Keepa breathe), and retry once. A second timeout rethrows so
+      // the bulk worker still catches it and marks the brand `error`.
+      if (options.retryOnTimeout && !timeoutRetried && isFetchTimeoutError(err)) {
+        timeoutRetried = true;
+        KEEPA_PRODUCT_RETRY_COUNTER += 1;
+        console.warn(
+          `[phase79] keepa${path} timed out after ${timeoutMs}ms — retrying once after ${KEEPA_PRODUCT_RETRY_DELAY_MS}ms`,
+        );
+        await sleep(KEEPA_PRODUCT_RETRY_DELAY_MS);
+        continue;
+      }
+      throw err;
+    }
     if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
       // Phase 22 — was up to 60s of backoff between retries; that alone
       // could blow the budget. Cap at 5s and only retry once on 5xx/429.
@@ -645,20 +713,30 @@ export async function getProductDetails(asins: string[], batchSize = 5): Promise
     const chunk = need.slice(i, i + batchSize);
     const chunkStartedAt = Date.now();
     await ensureTokens(chunk.length * 5 + 2);
-    const { json } = await keepaFetch("/product", {
-      asin: chunk.join(","),
-      offers: 20,
-      // 365-day stats power both the buy-box price avg used by the
-      // revenue estimator and the listing-health snapshot.
-      stats: 365,
-      "buybox": 1,
-      // aplus=1 / videos=1 are free add-ons (same 5-token cost as the
-      // base product call). Without them Keepa omits the `aPlus` and
-      // `videos` arrays entirely, so has_a_plus / has_video map to null
-      // even on listings that do have A+ content and product video.
-      aplus: 1,
-      videos: 1,
-    });
+    const { json } = await keepaFetch(
+      "/product",
+      {
+        asin: chunk.join(","),
+        offers: 20,
+        // 365-day stats power both the buy-box price avg used by the
+        // revenue estimator and the listing-health snapshot.
+        stats: 365,
+        "buybox": 1,
+        // aplus=1 / videos=1 are free add-ons (same 5-token cost as the
+        // base product call). Without them Keepa omits the `aPlus` and
+        // `videos` arrays entirely, so has_a_plus / has_video map to null
+        // even on listings that do have A+ content and product video.
+        aplus: 1,
+        videos: 1,
+      },
+      {
+        // Phase 79 — first bulk run had Q Power error in keepa_enrich at
+        // the default 30s ceiling on this exact call. 90s covers the
+        // observed tail and one retry handles transient Keepa slowness.
+        timeoutMs: KEEPA_PRODUCT_HTTP_TIMEOUT_MS,
+        retryOnTimeout: true,
+      },
+    );
     // Phase 66 — per-chunk progress log so a stuck /product batch is
     // visible in real time instead of being a silent gap in the run
     // timeline. Greppable via `event:"keepa_product_chunk"`.
