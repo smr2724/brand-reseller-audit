@@ -10,11 +10,14 @@
 -- Skip rules:
 --   * Skip rows where evidence_url is missing, 'unknown', or doesn't start with http(s)://
 --   * Skip OpenCorporates URLs (user-mandated: never use opencorporates as a source)
---   * Skip if parsed domain has no dot (defensive guard against malformed URLs)
+--   * Skip if parsed domain has no dot or fails length sanity check
 --   * Only touch rows where resolved_owner_domain IS NULL (idempotent — never overwrite)
 --
--- Also sets owner_resolution_state='selected' on the same rows to clear the cosmetic
--- 'pending' tombstone left over from Phase 49's removal of maybeTriggerOwnerResolution.
+-- Reviewer 2 (PR #87) flagged that also flipping owner_resolution_state from 'pending'
+-- to 'selected' moves these brands into <SelectedView> which renders as "— / domain /
+-- unknown" because resolved_owner_company_name is blank. We deliberately leave
+-- owner_resolution_state alone here. Cleanup of the 'pending' tombstones is deferred
+-- to a follow-up phase that either populates the company name or drops the column.
 
 BEGIN;
 
@@ -41,7 +44,6 @@ WITH backfill AS (
 UPDATE brands b
 SET
   resolved_owner_domain = bf.parsed_domain,
-  owner_resolution_state = 'selected',
   updated_at = now()
 FROM backfill bf
 WHERE b.id = bf.brand_id
