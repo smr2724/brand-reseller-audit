@@ -30,57 +30,13 @@ import { runQualification } from "@/lib/qualification/orchestrate";
 import { runContactDiscovery } from "@/lib/contacts/orchestrate";
 import { createDraft } from "@/lib/microsoft/graph";
 import { persistBrandEconomics } from "@/lib/brand-detail/persist-economics";
+import { buildSteveOutreachEmail } from "@/lib/outreach/steve-template";
 
 // Phase 73.3 / Phase 75: a contact is draft-eligible when its email_status is 'verified'.
 // The legacy MV enum 'valid'|'invalid'|'risky'|'unknown' is documented on the migration
 // but Phase 73 normalized writes to 'verified'. Keep this constant in sync with
 // /api/brands/[id]/contacts/verified/route.ts.
 const DRAFT_ELIGIBLE_EMAIL_STATUSES = new Set(['verified']);
-
-const STEVE_SIGNATURE_HTML =
-  `<p>__FIRST_NAME__</p>` +
-  `<p>__BRAND__ is killing it on Amazon but you're not the one selling on most of the listings.</p>` +
-  `<p>I made a quick report to show you exactly how much more you could profiting without any extra effort?</p>` +
-  `<p>Are you the right person to send it to?</p>` +
-  `<p>Steve Rolle</p>`;
-
-const STEVE_SIGNATURE_TEXT =
-  `__FIRST_NAME__\n\n` +
-  `__BRAND__ is killing it on Amazon but you're not the one selling on most of the listings.\n\n` +
-  `I made a quick report to show you exactly how much more you could profiting without any extra effort?\n\n` +
-  `Are you the right person to send it to?\n\n` +
-  `Steve Rolle`;
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function buildSteveEmail(brand: string, firstName: string | null): {
-  subject: string;
-  html: string;
-  text: string;
-} {
-  const safeFirst =
-    typeof firstName === "string" && firstName.trim().length > 0
-      ? firstName.trim()
-      : "there";
-  return {
-    subject: `Quick question about ${brand}`,
-    html: STEVE_SIGNATURE_HTML.replace("__FIRST_NAME__", escapeHtml(safeFirst)).replace(
-      "__BRAND__",
-      escapeHtml(brand),
-    ),
-    text: STEVE_SIGNATURE_TEXT.replace("__FIRST_NAME__", safeFirst).replace(
-      "__BRAND__",
-      brand,
-    ),
-  };
-}
 
 function extractDomain(input: string | null): string | null {
   if (!input) return null;
@@ -581,10 +537,11 @@ export async function processBulkBrand(
   });
 
   try {
-    const { subject, html, text } = buildSteveEmail(
-      resolvedBrandName,
-      primaryContact.first_name,
-    );
+    const { subject, html, text } = buildSteveOutreachEmail({
+      brandName: resolvedBrandName,
+      firstName: primaryContact.first_name,
+      additionalProfit: legionOpportunity,
+    });
     const draft = await createDraft({
       userId,
       to: {
