@@ -80,5 +80,23 @@ function deepEqual<T>(a: T, b: T): boolean {
   );
 }
 
+// 7. Non-breaking space (NBSP, U+00A0) acts as a delimiter.
+{
+  const out = parseBrandList("Yeti OXO");
+  assert(
+    "NBSP between brands splits them",
+    deepEqual(out, ["Yeti", "OXO"]),
+  );
+}
+
+// 8. Smart quotes are stripped alongside straight quotes.
+{
+  const out = parseBrandList('"Carna4"\n“Sofia by Ode”');
+  assert(
+    "mixed straight and smart quotes stripped",
+    deepEqual(out, ["Carna4", "Sofia by Ode"]),
+  );
+}
+
 console.log(`parseBrandList: ${passes} passed, ${failures} failed`);
 if (failures > 0) process.exit(1);

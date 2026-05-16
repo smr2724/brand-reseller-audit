@@ -21,7 +21,7 @@ interface BrandRow {
   email_status: string | null;
   outlook_draft_id: string | null;
   outlook_draft_web_link: string | null;
-  legion_score: number | null;
+  brand_seven_x_value: number | null;
   legion_opportunity: number | null;
   error_message: string | null;
   error_step: string | null;
@@ -122,8 +122,8 @@ function rankedBrands(brands: BrandRow[]): BrandRow[] {
     const ta = tier(a);
     const tb = tier(b);
     if (ta !== tb) return ta - tb;
-    const sa = a.legion_score == null ? -Infinity : Number(a.legion_score);
-    const sb = b.legion_score == null ? -Infinity : Number(b.legion_score);
+    const sa = a.brand_seven_x_value == null ? -Infinity : Number(a.brand_seven_x_value);
+    const sb = b.brand_seven_x_value == null ? -Infinity : Number(b.brand_seven_x_value);
     if (sb !== sa) return sb - sa;
     return a.position - b.position;
   });
@@ -280,7 +280,7 @@ export default function BulkRunClient({ runId }: { runId: string }) {
               <th style={th}>Email</th>
               <th style={th}>Verifier</th>
               <th style={th}>Draft</th>
-              <th style={{ ...th, textAlign: "right" }}>Legion Score</th>
+              <th style={{ ...th, textAlign: "right" }}>7x Opportunity ($)</th>
               <th style={{ ...th, textAlign: "right" }}>Opportunity</th>
             </tr>
           </thead>
@@ -381,7 +381,7 @@ export default function BulkRunClient({ runId }: { runId: string }) {
                     )}
                   </td>
                   <td style={{ ...td, textAlign: "right" }}>
-                    {fmtMoney(b.legion_score)}
+                    {fmtMoney(b.brand_seven_x_value)}
                   </td>
                   <td style={{ ...td, textAlign: "right" }}>
                     {fmtMoney(b.legion_opportunity)}

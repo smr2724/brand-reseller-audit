@@ -31,6 +31,12 @@ import { runContactDiscovery } from "@/lib/contacts/orchestrate";
 import { createDraft } from "@/lib/microsoft/graph";
 import { persistBrandEconomics } from "@/lib/brand-detail/persist-economics";
 
+// Phase 73.3 / Phase 75: a contact is draft-eligible when its email_status is 'verified'.
+// The legacy MV enum 'valid'|'invalid'|'risky'|'unknown' is documented on the migration
+// but Phase 73 normalized writes to 'verified'. Keep this constant in sync with
+// /api/brands/[id]/contacts/verified/route.ts.
+const DRAFT_ELIGIBLE_EMAIL_STATUSES = new Set(['verified']);
+
 const STEVE_SIGNATURE_HTML =
   `<p>__FIRST_NAME__</p>` +
   `<p>__BRAND__ is killing it on Amazon but you're not the one selling on most of the listings.</p>` +
@@ -468,10 +474,12 @@ export async function processBulkBrand(
   try {
     await runContactDiscovery(brandId);
   } catch (e) {
-    // Orchestrator itself shouldn't throw — but if it does, we record
-    // it and continue: a brand without contacts still appears in the
-    // ranked report.
-    console.warn(`[bulk-worker] contact orchestrator threw for ${brandId}:`, e);
+    // Apollo/Hunter API failure: surface it so Steve has visibility into outages.
+    // The legitimate "no contact found" branch is when runContactDiscovery returns
+    // successfully but no contact row gets written — that's handled below.
+    await markError(admin, rowId, "discovering_contacts", e);
+    await bumpRunCompleted(admin, row.bulk_run_id);
+    return { ok: false, status: "error", error: String(e) };
   }
 
   // ---- Step 6: Read back primary contact + verify ----
@@ -517,8 +525,11 @@ export async function processBulkBrand(
     email_status: primaryContact?.email_status ?? null,
   });
 
-  // Compute and persist legion economics now that revenue is known.
-  let legionScore: number | null = null;
+  // Compute and persist economics now that revenue is known.
+  // Note: brand_seven_x_value stores the 7x exit-multiple dollar amount, NOT a
+  // 0-100 Legion Score. The protected `legion_score` symbol elsewhere in the
+  // codebase is unrelated.
+  let brandSevenXValue: number | null = null;
   let legionOpportunity: number | null = null;
   try {
     await persistBrandEconomics(admin, brandId);
@@ -531,12 +542,12 @@ export async function processBulkBrand(
         seven_x_multiple_value: number | null;
       }>();
     legionOpportunity = brandEcon?.additional_profit ?? null;
-    legionScore = brandEcon?.seven_x_multiple_value ?? null;
+    brandSevenXValue = brandEcon?.seven_x_multiple_value ?? null;
   } catch (e) {
     console.warn(`[bulk-worker] economics persist failed for ${brandId}:`, e);
   }
   await patchRow(admin, rowId, {
-    legion_score: legionScore,
+    brand_seven_x_value: brandSevenXValue,
     legion_opportunity: legionOpportunity,
   });
 
@@ -552,7 +563,7 @@ export async function processBulkBrand(
     return { ok: true, status: "completed" };
   }
 
-  if (primaryContact.email_status !== "verified") {
+  if (!DRAFT_ELIGIBLE_EMAIL_STATUSES.has(primaryContact.email_status ?? "")) {
     await patchRow(admin, rowId, {
       status: "completed",
       progress_percent: 100,

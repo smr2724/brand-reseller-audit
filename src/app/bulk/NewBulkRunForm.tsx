@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -7,6 +8,7 @@ export default function NewBulkRunForm() {
   const [raw, setRaw] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [existingRunId, setExistingRunId] = useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -17,6 +19,7 @@ export default function NewBulkRunForm() {
     }
     setBusy(true);
     setError(null);
+    setExistingRunId(null);
     try {
       const res = await fetch("/api/bulk/start", {
         method: "POST",
@@ -24,6 +27,12 @@ export default function NewBulkRunForm() {
         body: JSON.stringify({ raw_input: raw }),
       });
       const data = await res.json().catch(() => ({}));
+      if (res.status === 409 && data?.error === "run_in_progress") {
+        setExistingRunId(data.existing_run_id ?? null);
+        setError("A run is already in progress.");
+        setBusy(false);
+        return;
+      }
       if (!res.ok) {
         setError(data?.error ?? `Start failed (HTTP ${res.status})`);
         setBusy(false);
@@ -82,7 +91,21 @@ World Amenities, Carna4; Sport-Tek`}
         disabled={busy}
       />
       {error ? (
-        <p style={{ color: "#a02020", fontSize: 13, margin: "10px 0 0" }}>{error}</p>
+        <p style={{ color: "#a02020", fontSize: 13, margin: "10px 0 0" }}>
+          {error}
+          {existingRunId ? (
+            <>
+              {" "}
+              <Link
+                href={`/bulk/${existingRunId}`}
+                style={{ color: "#1a55a3", textDecoration: "underline" }}
+              >
+                View it
+              </Link>
+              .
+            </>
+          ) : null}
+        </p>
       ) : null}
       <div
         style={{

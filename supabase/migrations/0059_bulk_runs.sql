@@ -77,6 +77,11 @@ create table if not exists public.bulk_run_brands (
   contact_name text,
   contact_email text,
   email_verifier text,
+  -- email_status: contact email verification result. Upstream values are
+  -- normalized to 'verified' by the Phase 73 contact orchestrator. The legacy
+  -- MV enum is 'valid' | 'invalid' | 'risky' | 'unknown'. See
+  -- DRAFT_ELIGIBLE_EMAIL_STATUSES in src/lib/bulk/worker.ts for which values
+  -- trigger a draft.
   email_status text,
   outlook_draft_id text,
   outlook_draft_web_link text,

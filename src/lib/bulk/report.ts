@@ -25,7 +25,7 @@ export interface BulkReportBrand {
   email_status: string | null;
   outlook_draft_id: string | null;
   outlook_draft_web_link: string | null;
-  legion_score: number | null;
+  brand_seven_x_value: number | null;
   legion_opportunity: number | null;
   error_step: string | null;
   error_message: string | null;
@@ -101,7 +101,7 @@ export function statusBadge(b: BulkReportBrand): {
 /**
  * Sort: qualified-with-draft first, qualified-no-contact next,
  * disqualified/not-found/error last. Within each tier, descending by
- * legion_score (nulls last).
+ * brand_seven_x_value (nulls last).
  */
 export function rankBrands(brands: BulkReportBrand[]): BulkReportBrand[] {
   function tier(b: BulkReportBrand): number {
@@ -116,8 +116,8 @@ export function rankBrands(brands: BulkReportBrand[]): BulkReportBrand[] {
     const ta = tier(a);
     const tb = tier(b);
     if (ta !== tb) return ta - tb;
-    const sa = a.legion_score == null ? -Infinity : Number(a.legion_score);
-    const sb = b.legion_score == null ? -Infinity : Number(b.legion_score);
+    const sa = a.brand_seven_x_value == null ? -Infinity : Number(a.brand_seven_x_value);
+    const sb = b.brand_seven_x_value == null ? -Infinity : Number(b.brand_seven_x_value);
     if (sb !== sa) return sb - sa;
     return a.position - b.position;
   });
@@ -165,7 +165,7 @@ export function renderBulkRunReportHtml(input: BulkReportInput): {
         <td style="${cellStyle}">${escapeHtml(b.contact_email ?? "—")}</td>
         <td style="${cellStyle}">${escapeHtml(b.email_verifier ?? "—")}</td>
         <td style="${cellStyle}">${draftCell}</td>
-        <td style="${cellStyle};text-align:right;">${fmtScore(b.legion_score)}</td>
+        <td style="${cellStyle};text-align:right;">${fmtScore(b.brand_seven_x_value)}</td>
         <td style="${cellStyle};text-align:right;">${fmtMoney(b.legion_opportunity)}</td>
       </tr>`;
     })
@@ -203,7 +203,7 @@ export function renderBulkRunReportHtml(input: BulkReportInput): {
             <th style="${headerCellStyle}">Email</th>
             <th style="${headerCellStyle}">Verifier</th>
             <th style="${headerCellStyle}">Draft</th>
-            <th style="${headerCellStyle};text-align:right;">Legion Score</th>
+            <th style="${headerCellStyle};text-align:right;">7x Opportunity ($)</th>
             <th style="${headerCellStyle};text-align:right;">Opportunity ($)</th>
           </tr>
         </thead>

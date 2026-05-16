@@ -75,6 +75,22 @@ export async function POST(req: Request) {
     );
   }
 
+  // Single-run gate: only one in-flight bulk run per user. Prevents
+  // Apollo/Hunter rate-limit contention and duplicate Outlook drafts.
+  const { data: existingInFlight } = await admin
+    .from("bulk_runs")
+    .select("id")
+    .eq("user_id", user.id)
+    .in("status", ["pending", "running"])
+    .limit(1)
+    .maybeSingle<{ id: string }>();
+  if (existingInFlight?.id) {
+    return NextResponse.json(
+      { error: "run_in_progress", existing_run_id: existingInFlight.id },
+      { status: 409 },
+    );
+  }
+
   const { data: run, error: runErr } = await admin
     .from("bulk_runs")
     .insert({
