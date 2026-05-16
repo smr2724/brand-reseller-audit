@@ -17,6 +17,7 @@ import {
   resolveSellerInfo,
   isAmazonSellerId,
   expandVariationAsins,
+  consumeKeepaProductRetryCount,
   type KeepaProductDetails,
 } from "@/lib/keepa";
 import { makeSellerCache } from "./keepa-seller-cache";
@@ -65,6 +66,12 @@ export interface EnrichmentSummary {
    * shape upstream. */
   amazon_1p_disqualified: boolean;
   enrichment_error: string | null;
+  /**
+   * Phase 79 — number of times the Keepa /product call retried after a
+   * fetchWithTimeout abort during this enrichment. The bulk worker reads
+   * this to increment `bulk_run_brands.retry_count`. 0 on a clean run.
+   */
+  keepa_product_retry_count: number;
 }
 
 export interface EnrichInput {
@@ -193,6 +200,7 @@ export async function enrichBrandWithKeepa(
         amazon_1p_share: 0,
         amazon_1p_disqualified: false,
         enrichment_error: "No ASINs found",
+        keepa_product_retry_count: consumeKeepaProductRetryCount(),
       };
 
       await supabase
@@ -707,6 +715,7 @@ export async function enrichBrandWithKeepa(
       amazon_1p_share: amazon1pShare,
       amazon_1p_disqualified: amazon1pDisqualified,
       enrichment_error: null,
+      keepa_product_retry_count: consumeKeepaProductRetryCount(),
     };
   } catch (err: any) {
     const msg = String(err?.message ?? err).slice(0, 500);

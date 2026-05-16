@@ -279,6 +279,14 @@ export async function processBulkBrand(
       user_id: userId,
     });
 
+    // Phase 79 — surface Keepa /product timeout retries on bulk_run_brands
+    // so the dashboard can flag brands that needed an extra attempt to land.
+    if (summary.keepa_product_retry_count > 0) {
+      await patchRow(admin, rowId, {
+        retry_count: summary.keepa_product_retry_count,
+      });
+    }
+
     const keepaError = summary.enrichment_error;
     const asinCount = summary.asin_count;
     const enrichedNow = !(keepaError != null || asinCount === 0);
