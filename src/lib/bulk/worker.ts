@@ -24,6 +24,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import { lookupBrand } from "@/lib/brand-lookup";
 import { enrichBrandWithKeepa } from "@/lib/enrichment/keepa-brand";
+import { getKeepaCooldownMs } from "@/lib/keepa";
 import { enrichBrandWithDataForSeo } from "@/lib/enrichment/dataforseo";
 import { normalizeName } from "@/lib/importer/merge";
 import { runQualification } from "@/lib/qualification/orchestrate";
@@ -424,6 +425,18 @@ async function processBulkBrandImpl(
       .from("brands")
       .update({ enrichment_state: "enriching", updated_at: new Date().toISOString() })
       .eq("id", brandId);
+
+    // Phase 83 — inter-brand cooldown. If the previous brand's last
+    // /product call left the Keepa bucket below 200 tokens, sleep 5s
+    // before we start hammering it again. Run b6341dd2 saw 6 of 11
+    // brands fail with HTTP 429 because the bucket carried over.
+    const cooldownMs = getKeepaCooldownMs();
+    if (cooldownMs > 0) {
+      console.log(
+        `[phase83] inter-brand Keepa cooldown — sleeping ${cooldownMs}ms before "${resolvedBrandName}"`,
+      );
+      await new Promise((r) => setTimeout(r, cooldownMs));
+    }
 
     const summary = await enrichBrandWithKeepa(admin, {
       brand_id: brandId,

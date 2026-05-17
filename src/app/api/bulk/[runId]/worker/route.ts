@@ -59,20 +59,45 @@ function resolveOrigin(req: Request): string {
   return `${url.protocol}//${url.host}`;
 }
 
-function kickSelf(req: Request, runId: string): void {
+/**
+ * Phase 83 — Bug #3 worker robustness. The previous implementation
+ * fired a bare `fetch().catch(…)` with no AbortController and no
+ * try/catch around the call site. On Vercel, the function shutdown
+ * after returning the response sometimes dropped the in-flight fetch
+ * before the destination route accepted it — leaving the next queued
+ * brand untouched until the janitor's 2-min cron noticed. The fix:
+ *   • Bound the wait at 3s with an AbortController so we don't block
+ *     the response while still giving Vercel time to hand off the
+ *     request.
+ *   • Wrap the fetch in try/catch so a synchronous throw (DNS, etc.)
+ *     cannot escape and crash the response path.
+ *   • Move the kick BEFORE the response is returned (caller in POST
+ *     handler) so the function isn't already torn down when we fire.
+ */
+async function kickSelf(req: Request, runId: string): Promise<void> {
   const origin = resolveOrigin(req);
   const url = `${origin}/api/bulk/${runId}/worker`;
   const secret = process.env.CRON_SECRET;
-  fetch(url, {
-    method: "POST",
-    headers: secret ? { "x-cron-secret": secret } : {},
-    cache: "no-store",
-  }).catch((e) => {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 3_000);
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: secret ? { "x-cron-secret": secret } : {},
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch (e) {
+    // Expected on abort or transient failure — the destination has
+    // already accepted the request in the success case. Log but
+    // never rethrow so the calling response path is unaffected.
     console.warn(
       `[bulk-worker] self-kick failed for run ${runId}:`,
-      String(e?.message ?? e),
+      String((e as { message?: string })?.message ?? e),
     );
-  });
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function finalize(req: Request, runId: string): Promise<NextResponse> {
@@ -276,8 +301,21 @@ export async function POST(
     );
   }
 
-  // Fire-and-forget kick the next iteration.
-  kickSelf(req, runId);
+  // Phase 83 — Bug #3: await the self-kick BEFORE returning so Vercel's
+  // function shutdown doesn't drop the in-flight request. The 3s
+  // AbortController inside kickSelf bounds the wait so the response
+  // still lands quickly; the destination handshake is the thing we
+  // care about, not the body.
+  try {
+    await kickSelf(req, runId);
+  } catch (e) {
+    // kickSelf already swallows + logs internally, but defend-in-depth
+    // so a bug in the helper can't crash the response.
+    console.warn(
+      `[bulk-worker] kickSelf threw unexpectedly for run ${runId}:`,
+      String((e as { message?: string })?.message ?? e),
+    );
+  }
 
   return NextResponse.json({
     processed: claimed.id,

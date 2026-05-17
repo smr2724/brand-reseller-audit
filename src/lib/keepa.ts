@@ -42,6 +42,20 @@ function keepaProductBatchTimeoutMs(batchSize: number): number {
 // retry signal through getProductDetails → expandVariationAsins → enrichBrandWithKeepa.
 let KEEPA_PRODUCT_RETRY_COUNTER = 0;
 
+// Phase 83 — Module-level Keepa rate-limit state. Updated on every
+// /product response so `getProductDetailsBatch` can sleep proactively
+// before low-token calls (Layer B: tokensLeft < 50) and the bulk worker
+// can apply an inter-brand cooldown when the bucket is running thin
+// (tokensLeft < 200 → 5s sleep via getKeepaCooldownMs).
+let LAST_PRODUCT_TOKENS_LEFT: number | null = null;
+let LAST_PRODUCT_REFILL_IN_MS = 0;
+const KEEPA_LOW_TOKEN_THRESHOLD = 50;
+const KEEPA_LOW_TOKEN_SLEEP_CAP_MS = 60_000;
+const KEEPA_INTER_BATCH_DELAY_MS = 250;
+const KEEPA_INTER_BRAND_COOLDOWN_THRESHOLD = 200;
+const KEEPA_INTER_BRAND_COOLDOWN_MS = 5_000;
+const KEEPA_429_DEFAULT_RETRY_AFTER_S = 30;
+
 function isFetchTimeoutError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
   return msg.startsWith("fetchWithTimeout timed out");
@@ -56,6 +70,22 @@ export function consumeKeepaProductRetryCount(): number {
   const n = KEEPA_PRODUCT_RETRY_COUNTER;
   KEEPA_PRODUCT_RETRY_COUNTER = 0;
   return n;
+}
+
+/**
+ * Phase 83 — Inter-brand cooldown helper. The bulk worker calls this
+ * before `enrichBrandWithKeepa` so a brand that just consumed a chunk
+ * of Keepa's token bucket cannot immediately stack the next brand's
+ * /product calls on top — that's how run b6341dd2 saw 6 of 11 brands
+ * hit HTTP 429 in a row. Returns 5000ms when the last observed
+ * `tokensLeft` from /product was below 200, else 0.
+ */
+export function getKeepaCooldownMs(): number {
+  if (LAST_PRODUCT_TOKENS_LEFT === null) return 0;
+  if (LAST_PRODUCT_TOKENS_LEFT < KEEPA_INTER_BRAND_COOLDOWN_THRESHOLD) {
+    return KEEPA_INTER_BRAND_COOLDOWN_MS;
+  }
+  return 0;
 }
 
 export function isKeepaConfigured() {
@@ -288,6 +318,23 @@ interface KeepaFetchOptions {
    * fire so the bulk worker can surface it on bulk_run_brands.retry_count.
    */
   retryOnTimeout?: boolean;
+  /**
+   * Phase 83 — when true, parse the Retry-After header on a 429 response
+   * and sleep that long (capped) before the next attempt. Used by the
+   * /product call so a saturated Keepa bucket gets a real cool-off
+   * instead of the legacy fixed-1s-2s-3s exponential backoff that
+   * caused 6 of 11 brands to fail in run b6341dd2.
+   */
+  respectRetryAfterOn429?: boolean;
+}
+
+function parseRetryAfterSeconds(res: Response): number {
+  const raw = res.headers.get("retry-after");
+  if (!raw) return KEEPA_429_DEFAULT_RETRY_AFTER_S;
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed > 0) return Math.min(parsed, 60);
+  // RFC also permits HTTP-date; ignore that edge case — fall back to default.
+  return KEEPA_429_DEFAULT_RETRY_AFTER_S;
 }
 
 async function keepaFetch(
@@ -328,10 +375,27 @@ async function keepaFetch(
       throw err;
     }
     if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
-      // Phase 22 — was up to 60s of backoff between retries; that alone
-      // could blow the budget. Cap at 5s and only retry once on 5xx/429.
-      const backoff = Math.min(5_000, 1000 * (attempt + 1));
       lastErr = `HTTP ${res.status}`;
+      // Phase 83 — when the caller opts in (the /product path) and the
+      // status is 429, honour Keepa's Retry-After. Otherwise keep the
+      // legacy capped-5s exponential backoff for /search and /query.
+      if (res.status === 429 && options.respectRetryAfterOn429) {
+        const waitSec = parseRetryAfterSeconds(res);
+        const waitMs = Math.min(waitSec * 1000, KEEPA_LOW_TOKEN_SLEEP_CAP_MS);
+        console.warn(
+          `[keepa] HTTP 429 on ${path} — sleeping ${waitMs}ms per Retry-After (attempt ${attempt + 1}/3)`,
+        );
+        await sleep(waitMs);
+        // Only allow ONE 429 retry on this opt-in path. If we've already
+        // burned a retry, bail out so the caller sees the existing
+        // "Keepa repeated failure: HTTP 429" error string and the brand
+        // is marked error instead of looping.
+        if (attempt >= 1) {
+          throw new Error(`Keepa repeated failure: HTTP 429`);
+        }
+        continue;
+      }
+      const backoff = Math.min(5_000, 1000 * (attempt + 1));
       await sleep(backoff);
       continue;
     }
@@ -708,17 +772,21 @@ export function getBuyBoxSeller(productJson: any): { name?: string; sellerId?: s
 }
 
 /**
- * Phase 82 — Fetch product details for up to 100 ASINs in a SINGLE Keepa
+ * Phase 82 — Fetch product details for up to 100 ASINs per Keepa
  * `/product` call. Returns the parsed `KeepaProductDetails[]` and writes
  * each result into the 24h in-memory cache.
  *
- * Caller is responsible for chunking inputs to <= KEEPA_PRODUCT_BATCH_MAX
- * (100). `getProductDetails` handles cache + chunking and is the right
- * entrypoint for everything except the bulk worker, which uses this
- * function directly with chunks of 100.
+ * Phase 83 — `getProductDetailsBatch` now slices inputs longer than
+ * KEEPA_PRODUCT_BATCH_MAX (100) into exact 100-ASIN chunks internally
+ * and loops, so callers do not have to pre-chunk. Run b6341dd2 showed
+ * the upstream caller was inadvertently passing 3–5 ASIN slices instead
+ * of 100, saturating Keepa's bucket at ~4 req/sec. Between chunks we
+ * sleep KEEPA_INTER_BATCH_DELAY_MS (250ms) so a single brand stays
+ * under 4 req/sec by construction; before each call we also honour the
+ * module-level `tokensLeft` state and sleep `refillIn` when below 50.
  *
  * Phase 79 retry-on-timeout behavior is preserved. Cost tracking records
- * `units = batch.length` per call so the total stays accurate.
+ * one row per HTTP call with `units = batch.length`.
  *
  * Keepa's response `products` array may NOT be ordered by the input ASIN
  * list — we key by the `p.asin` field when stitching.
@@ -730,18 +798,67 @@ export async function getProductDetailsBatch(
     new Set(asins.filter((a) => a && /^[A-Z0-9]{10}$/i.test(a))),
   );
   if (!clean.length) return [];
-  if (clean.length > KEEPA_PRODUCT_BATCH_MAX) {
+  const out: KeepaProductDetails[] = [];
+  // Phase 83 — slice into chunks of exactly KEEPA_PRODUCT_BATCH_MAX so a
+  // caller that hands us 250 ASINs produces 3 HTTP calls (100+100+50),
+  // not 50+ tiny ones. Unit-tested in __tests__/keepa-batch-size.test.ts.
+  for (let i = 0; i < clean.length; i += KEEPA_PRODUCT_BATCH_MAX) {
+    const batch = clean.slice(i, i + KEEPA_PRODUCT_BATCH_MAX);
+    if (i > 0) {
+      // Inter-call delay so a single brand's batches don't exceed
+      // ~4 req/sec, well under Keepa's documented 5 req/sec ceiling.
+      await sleep(KEEPA_INTER_BATCH_DELAY_MS);
+    }
+    // Phase 83 — Layer B rate-limit awareness. If the last observed
+    // tokensLeft from /product is below the floor, sleep refillIn (cap
+    // 60s) BEFORE the next call so we don't tip the bucket over.
+    if (
+      LAST_PRODUCT_TOKENS_LEFT !== null &&
+      LAST_PRODUCT_TOKENS_LEFT < KEEPA_LOW_TOKEN_THRESHOLD &&
+      LAST_PRODUCT_REFILL_IN_MS > 0
+    ) {
+      const napMs = Math.min(LAST_PRODUCT_REFILL_IN_MS, KEEPA_LOW_TOKEN_SLEEP_CAP_MS);
+      console.log(
+        `[keepa] sleeping ${napMs}ms — tokensLeft=${LAST_PRODUCT_TOKENS_LEFT}`,
+      );
+      await sleep(napMs);
+    }
+    const fetched = await fetchOneProductBatch(batch);
+    out.push(...fetched);
+  }
+  return out;
+}
+
+/**
+ * Phase 83 — Internal helper. Issues ONE Keepa /product call for a
+ * batch of <=100 ASINs. The public `getProductDetailsBatch` chunks +
+ * sleeps + retries; this function is the per-call leaf.
+ */
+async function fetchOneProductBatch(
+  batch: string[],
+): Promise<KeepaProductDetails[]> {
+  if (batch.length > KEEPA_PRODUCT_BATCH_MAX) {
     throw new Error(
-      `getProductDetailsBatch: ${clean.length} ASINs exceeds Keepa /product cap (${KEEPA_PRODUCT_BATCH_MAX}); caller must chunk`,
+      `fetchOneProductBatch: ${batch.length} ASINs exceeds Keepa /product cap (${KEEPA_PRODUCT_BATCH_MAX})`,
     );
   }
-  await ensureTokens(clean.length * 5 + 2);
+  await ensureTokens(batch.length * 5 + 2);
   const batchStartedAt = Date.now();
-  const timeoutMs = keepaProductBatchTimeoutMs(clean.length);
+  const timeoutMs = keepaProductBatchTimeoutMs(batch.length);
+  // Phase 83 — log actual batch.length per call so future investigations
+  // can confirm 100 not 5. Greppable via event:"keepa_product_call".
+  console.log(
+    JSON.stringify({
+      event: "keepa_product_call",
+      batch_size: batch.length,
+      timeout_ms: timeoutMs,
+      tokens_left_before: LAST_PRODUCT_TOKENS_LEFT,
+    }),
+  );
   const { json } = await keepaFetch(
     "/product",
     {
-      asin: clean.join(","),
+      asin: batch.join(","),
       offers: 20,
       stats: 365,
       buybox: 1,
@@ -753,12 +870,16 @@ export async function getProductDetailsBatch(
       // smaller chunk still trips faster on a stuck Keepa response.
       timeoutMs,
       retryOnTimeout: true,
+      // Phase 83 — honour Retry-After on the /product path; the bucket
+      // is shared across brands and a single 429 burst should pause
+      // rather than blast 3 retries 1s apart.
+      respectRetryAfterOn429: true,
     },
   );
   console.log(
     JSON.stringify({
       event: "keepa_product_batch",
-      batch_size: clean.length,
+      batch_size: batch.length,
       elapsed_ms: Date.now() - batchStartedAt,
       timeout_ms: timeoutMs,
       tokens_left: Number(json?.tokensLeft ?? 0),
@@ -769,14 +890,17 @@ export async function getProductDetailsBatch(
   await trackCost({
     provider: "keepa",
     operation: "keepa_product",
-    units: clean.length,
+    units: batch.length,
   });
   const tokensLeft = Number(json?.tokensLeft ?? 0);
+  const refillIn = Number(json?.refillIn ?? 0);
+  LAST_PRODUCT_TOKENS_LEFT = tokensLeft;
+  LAST_PRODUCT_REFILL_IN_MS = Number.isFinite(refillIn) ? refillIn : 0;
   TOKEN_CACHE = {
     t: Date.now(),
     v: {
       tokens_left: tokensLeft,
-      refill_in_ms: Number(json?.refillIn ?? 0),
+      refill_in_ms: LAST_PRODUCT_REFILL_IN_MS,
       refill_rate: Number(json?.refillRate ?? 0),
     },
   };
@@ -1078,7 +1202,11 @@ export interface ExpandVariationsResult {
 
 export async function expandVariationAsins(
   seedAsins: string[],
-  maxTotal = 200,
+  // Phase 83 — default raised from 200 → 500 to match the Phase 82 cap
+  // that keepa-brand.ts has been explicitly passing. The old default
+  // silently capped at 200, making the downstream 500 cap unreachable
+  // for any caller relying on the default arg.
+  maxTotal = 500,
 ): Promise<ExpandVariationsResult> {
   const seeds = Array.from(
     new Set(

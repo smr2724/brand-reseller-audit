@@ -246,11 +246,23 @@ export function mapApolloEmailStatus(
 /**
  * Search people at an org by domain, filtered by titles. Free of enrich
  * credits.
+ *
+ * Phase 83 — `costOperation` distinguishes the two cascade callers in
+ * `api_costs`:
+ *   • "apollo_people_match_org" — first attempt, strict decision-maker
+ *     title list (founder/ceo/president/owner).
+ *   • "apollo_people_match_domain" — fallback attempt with broader
+ *     decision-maker titles. Same endpoint, same form encoding, just a
+ *     different op label so the bug-triage trail in api_costs shows
+ *     which path produced the hit.
+ * Legacy callers that don't pass an override keep the historical
+ * "apollo_org_search" label so the cost rollup stays stable.
  */
 export async function apolloSearchPeople(input: {
   organization_domain: string;
   titles?: string[];
   page?: number;
+  costOperation?: string;
 }): Promise<ApolloSearchResult> {
   const key = process.env.APOLLO_API_KEY;
   if (!key) return { ok: false, error: "APOLLO_API_KEY missing" };
@@ -293,10 +305,11 @@ export async function apolloSearchPeople(input: {
     0,
     `domain=${input.organization_domain} titles=${(input.titles ?? []).join(",")}`,
   );
-  // Phase 81 — log 0-cost Apollo search for auditability.
+  // Phase 81/83 — log 0-cost Apollo search for auditability. The
+  // operation label distinguishes the two cascade steps.
   await trackCost({
     provider: "apollo",
-    operation: "apollo_org_search",
+    operation: input.costOperation ?? "apollo_org_search",
     units: 0,
   });
   const people = (data?.people ?? []).map(slimPerson);
