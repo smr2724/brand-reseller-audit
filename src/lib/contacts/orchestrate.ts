@@ -43,6 +43,21 @@ import { verifyEmail } from "./email-verify";
 
 const SEARCH_TITLES = ["founder", "ceo", "president", "owner"];
 
+// Phase 83 — Bug #1 fallback. When the strict-title Apollo search
+// returns 0 results, retry with a broader decision-maker title set
+// before falling through to Hunter. Run b6341dd2 showed Kojie San
+// + 2 other brands aborting the cascade after a 0-result strict
+// search, while Mud Mixer's pipeline correctly proceeded with a
+// broader people-match and produced seth@mudmixer.com.
+const FALLBACK_SEARCH_TITLES = [
+  "founder",
+  "ceo",
+  "owner",
+  "head of",
+  "director",
+  "president",
+];
+
 interface GateCJson {
   passed?: boolean;
   person?: {
@@ -644,11 +659,19 @@ export async function runContactDiscovery(
     };
   }
 
-  // 2. Apollo search.
+  // 2. Apollo search — Phase 83 two-step cascade. Step A is the strict
+  //    decision-maker title list (org-based); step B falls back to a
+  //    broader title list (domain-based) when step A returns zero. Both
+  //    hit `/mixed_people/api_search` with the same domain filter; the
+  //    `costOperation` label distinguishes them in api_costs and we
+  //    bump `current_step_label` between the two so the run UI shows
+  //    which step is in flight.
+  await updateBulkRunStepLabel(brandId, "Apollo org-based people search");
   const search = await apolloSearchPeople({
     organization_domain: domain,
     titles: SEARCH_TITLES,
     page: 1,
+    costOperation: "apollo_people_match_org",
   });
   if (!search.ok) {
     await recordDiscoveryEvent({
@@ -677,11 +700,73 @@ export async function runContactDiscovery(
     });
   }
 
+  // Phase 83 — Bug #1 fallback. Org-based search returned zero (or
+  // errored). Retry with a broader decision-maker title list before
+  // declaring the cascade dead. Mud Mixer hit this path successfully
+  // in run b6341dd2 (0 strict-title results → broader search →
+  // contact); Kojie San never got the broader search and produced
+  // null. The fallback uses a distinct op label so the bug-triage
+  // trail in api_costs records which step landed the hit.
+  let workingSearch = search;
+  let usedDomainFallback = false;
+  if (
+    !search.ok ||
+    (search.ok && search.people.length === 0)
+  ) {
+    await updateBulkRunStepLabel(brandId, "Apollo domain-based people search");
+    const fallback = await apolloSearchPeople({
+      organization_domain: domain,
+      titles: FALLBACK_SEARCH_TITLES,
+      page: 1,
+      costOperation: "apollo_people_match_domain",
+    });
+    usedDomainFallback = true;
+    if (!fallback.ok) {
+      await recordDiscoveryEvent({
+        brand_id: brandId,
+        run_id: runId,
+        provider: "apollo_search",
+        outcome:
+          fallback.error === "apollo_retry_exhausted"
+            ? "retry_exhausted"
+            : "error",
+        reason: `Apollo domain-based search failed for ${domain}: ${fallback.error}`,
+        http_status: fallback.status ?? null,
+        raw_payload: { error: fallback.error, status: fallback.status ?? null, step: "domain_fallback" },
+      });
+    } else {
+      await recordDiscoveryEvent({
+        brand_id: brandId,
+        run_id: runId,
+        provider: "apollo_search",
+        outcome: fallback.people.length > 0 ? "found" : "not_found",
+        reason:
+          fallback.people.length > 0
+            ? `Apollo domain-based: ${fallback.people.length} candidate(s) at ${domain} for titles ${FALLBACK_SEARCH_TITLES.join("/")}.`
+            : `Apollo domain-based: search returned 0 candidates for titles ${FALLBACK_SEARCH_TITLES.join("/")} at ${domain}.`,
+        raw_payload: { raw: fallback.raw, step: "domain_fallback" },
+      });
+      if (fallback.people.length > 0) {
+        workingSearch = fallback;
+      }
+    }
+  }
+
   // 3. Rank + take top 5.
-  const ranked = search.ok ? rankCandidates(search) : [];
+  const ranked = workingSearch.ok ? rankCandidates(workingSearch) : [];
   const candidates: CandidateRecord[] = ranked.map((r) =>
     candidateFromApolloPerson(r.person),
   );
+
+  // Phase 83 — Bug #1 final cascade step. If both Apollo paths missed,
+  // surface the Hunter step in the UI before the run ends. The actual
+  // Hunter domain pattern lookup happens below at step 4 (run-level
+  // cache lookup) and inside `enrichSingleContact` for the primary
+  // candidate; the label here makes the cascade visible even when we
+  // produce zero candidates and have no primary to enrich.
+  if (candidates.length === 0 && usedDomainFallback) {
+    await updateBulkRunStepLabel(brandId, "Hunter domain search");
+  }
 
   // 4. Hunter domain-pattern (cache lookup OR fresh lookup) for the
   //    primary enrichment pipeline to use later. We do this once at the
@@ -1018,6 +1103,51 @@ async function markError(
       .eq("id", brandId);
   }
   return { ok: false, state: "error", error: message, run_id: runId };
+}
+
+/**
+ * Phase 83 — Best-effort `current_step_label` write on the bulk_run_brands
+ * row for this brand. The orchestrator runs in both bulk and non-bulk
+ * contexts; the bulk run UI reads `current_step_label` to show which
+ * cascade step is currently in flight. We update the most recent
+ * non-terminal row for this brand_id; if there is no such row (single
+ * brand /scan path), the helper is a silent no-op.
+ */
+async function updateBulkRunStepLabel(
+  brandId: string,
+  label: string,
+): Promise<void> {
+  try {
+    const admin = createSupabaseAdminClient();
+    if (!admin) return;
+    const { data } = await admin
+      .from("bulk_run_brands")
+      .select("id, status")
+      .eq("brand_id", brandId)
+      .in("status", [
+        "queued",
+        "keepa_searching",
+        "keepa_enriching",
+        "qualifying",
+        "resolving_owner",
+        "discovering_contacts",
+        "verifying_email",
+        "drafting",
+      ])
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle<{ id: string; status: string }>();
+    if (!data?.id) return;
+    await admin
+      .from("bulk_run_brands")
+      .update({
+        current_step_label: label,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", data.id);
+  } catch {
+    // best-effort; never block discovery on a label write
+  }
 }
 
 function extractDomain(input: string | null): string | null {

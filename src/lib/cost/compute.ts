@@ -38,7 +38,15 @@ export function computeCost(args: ComputeCostArgs): number {
       cost = units * KEEPA_COST_PER_TOKEN_USD;
       break;
     case "apollo":
-      if (operation === "apollo_org_search") {
+      if (
+        operation === "apollo_org_search" ||
+        // Phase 83 — Bug #1 split the single cascade label into two so
+        // api_costs shows which Apollo search step produced a hit. Both
+        // use the same /mixed_people/api_search endpoint with the same
+        // per-search price.
+        operation === "apollo_people_match_org" ||
+        operation === "apollo_people_match_domain"
+      ) {
         cost = APOLLO_COST_PER_SEARCH_USD;
       } else if (operation === "apollo_people_match") {
         cost = units * APOLLO_COST_PER_REVEAL_CREDIT_USD;

@@ -105,11 +105,13 @@ async function kickWorker(req: Request, runId: string): Promise<void> {
   const origin = resolveOrigin(req);
   const url = `${origin}/api/bulk/${runId}/worker`;
   const secret = process.env.CRON_SECRET;
-  // Fire-and-forget with a 2s ceiling — Vercel routes accept the request
+  // Fire-and-forget with a 3s ceiling — Vercel routes accept the request
   // and continue running after we abort, which is exactly the behavior
-  // we want. Swallowing the abort here is the success path.
+  // we want. Phase 83 — bumped from 2s to 3s to match the worker's
+  // self-kick window; under load the worker handshake occasionally took
+  // longer than 2s to land. Swallowing the abort here is the success path.
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 2_000);
+  const t = setTimeout(() => controller.abort(), 3_000);
   try {
     await fetch(url, {
       method: "POST",
@@ -139,10 +141,48 @@ interface StuckBrand {
 
 interface ActionResult {
   run_id: string;
-  action: "kicked" | "abandoned" | "noop";
+  action: "kicked" | "abandoned" | "noop" | "safety_kicked";
   brands_marked_error?: string[];
   error_steps?: string[];
   kick_count?: number;
+}
+
+/**
+ * Phase 83 — Bug #4 helper. Atomically bumps `janitor_kick_count` via
+ * the SECURITY DEFINER RPC (migration 0065). Falls back to a non-atomic
+ * write when the RPC throws so the janitor still functions pre-migration.
+ * Returns the post-increment kick count.
+ */
+async function incrementJanitorKick(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  runId: string,
+  currentCount: number,
+): Promise<number> {
+  if (!admin) return currentCount;
+  let nextCount = currentCount + 1;
+  try {
+    const { data: rpcCount } = await admin.rpc("increment_janitor_kick", {
+      p_run_id: runId,
+    });
+    if (typeof rpcCount === "number") {
+      nextCount = rpcCount;
+    }
+  } catch (e) {
+    console.warn(
+      `[bulk-janitor] increment_janitor_kick RPC failed for ${runId}:`,
+      String((e as Error)?.message ?? e),
+    );
+    const nowIso = new Date().toISOString();
+    await admin
+      .from("bulk_runs")
+      .update({
+        janitor_kick_count: nextCount,
+        last_janitor_kick_at: nowIso,
+        updated_at: nowIso,
+      })
+      .eq("id", runId);
+  }
+  return nextCount;
 }
 
 export async function GET(req: Request) {
@@ -216,11 +256,10 @@ export async function GET(req: Request) {
 
     const brands = (brandsRaw ?? []) as StuckBrand[];
 
-    // Phase 82 review fix #1: only ACT on a candidate run when an
-    // in-flight brand row has actually exceeded its per-step soft cap.
-    // Iterate all such rows (review fix #9 — drop the single-brand
-    // `break;` so multiple orphans in the same run are cleaned up in
-    // one pass).
+    // Phase 82 review fix #1: only mark-error a brand row when it has
+    // actually exceeded its per-step soft cap. Iterate all such rows
+    // (review fix #9 — drop the single-brand `break;` so multiple
+    // orphans in the same run are cleaned up in one pass).
     const markedErrorBrands: string[] = [];
     const markedErrorSteps: string[] = [];
 
@@ -257,12 +296,41 @@ export async function GET(req: Request) {
       }
     }
 
-    // Phase 82 review fix #1: if no brand exceeded its per-step soft
-    // cap, the run is healthy (just hasn't bumped run-level updated_at
-    // recently). Record a noop — do NOT increment kick_count, do NOT
-    // re-kick. Healthy long-running brands no longer push the run
-    // toward the 10-kick abandon ceiling.
-    if (markedErrorBrands.length === 0) {
+    // Phase 83 — Bug #4 + Bug #3 shared post-action path. We kick the
+    // worker (and increment the counter) in two cases:
+    //   • mark-error path: a stuck brand was just transitioned to error
+    //     so the worker chain needs a re-kick to advance.
+    //   • safety-net path (NEW): no brand is in a stuck status, but the
+    //     run is stale >90s AND at least one brand is still `queued`.
+    //     This catches the "worker dropped its self-kick after a
+    //     terminal brand transition" failure mode that left run b6341dd2
+    //     idle for 152s between Milbon's 429 error and Minimalist's
+    //     pickup. A manual curl re-kick at 10:21 PDT proved a kick was
+    //     all that was needed.
+    let actedThisCron = false;
+    let action: ActionResult["action"] = "noop";
+
+    if (markedErrorBrands.length > 0) {
+      actedThisCron = true;
+      action = "kicked";
+    } else {
+      // Bug #3 safety net — only check when there is no stuck brand.
+      const { data: queuedRows } = await admin
+        .from("bulk_run_brands")
+        .select("id")
+        .eq("bulk_run_id", run.id)
+        .eq("status", "queued")
+        .limit(1);
+      if (queuedRows && queuedRows.length > 0) {
+        actedThisCron = true;
+        action = "safety_kicked";
+      }
+    }
+
+    if (!actedThisCron) {
+      // Healthy long-running brand — record a noop. Do NOT increment
+      // kick_count, do NOT re-kick. This keeps healthy brands from
+      // pushing the run toward the 10-kick abandon ceiling.
       results.push({
         run_id: run.id,
         action: "noop",
@@ -271,41 +339,42 @@ export async function GET(req: Request) {
       continue;
     }
 
-    // We actually marked at least one brand as `error`. Atomically
-    // bump the kick counter (review fix #4) so concurrent janitor
-    // invocations can't lose an increment, then re-kick the worker
-    // chain so the run advances.
-    let nextKickCount = kickCount + 1;
-    try {
-      const { data: rpcCount } = await admin.rpc("increment_janitor_kick", {
-        p_run_id: run.id,
-      });
-      if (typeof rpcCount === "number") {
-        nextKickCount = rpcCount;
-      }
-    } catch (e) {
-      // Fallback to non-atomic write so the janitor still functions
-      // pre-migration. Logged so the discrepancy is visible.
-      console.warn(
-        `[bulk-janitor] increment_janitor_kick RPC failed for ${run.id}:`,
-        String((e as Error)?.message ?? e),
-      );
+    // Bug #4 — increment counter on EVERY acted-on cron pass (both the
+    // mark-error path and the new safety-net path) via the shared
+    // atomic RPC. Then read the abandon check against the post-increment
+    // count so the abandon threshold is crossed cleanly at exactly 10.
+    const nextKickCount = await incrementJanitorKick(admin, run.id, kickCount);
+
+    if (nextKickCount > KICK_ABANDON_THRESHOLD) {
+      // Crossed the ceiling on THIS increment — abandon now so we don't
+      // fire another doomed kick. The earlier kickCount >= threshold
+      // gate at the top of the loop catches subsequent cron passes.
       const nowIso = new Date().toISOString();
       await admin
         .from("bulk_runs")
         .update({
-          janitor_kick_count: nextKickCount,
-          last_janitor_kick_at: nowIso,
+          status: "error",
+          error_message: "janitor abandoned after 10 kicks",
+          completed_at: nowIso,
           updated_at: nowIso,
         })
-        .eq("id", run.id);
+        .eq("id", run.id)
+        .eq("status", "running");
+      results.push({
+        run_id: run.id,
+        action: "abandoned",
+        kick_count: nextKickCount,
+        brands_marked_error: markedErrorBrands,
+        error_steps: markedErrorSteps,
+      });
+      continue;
     }
 
     await kickWorker(req, run.id);
 
     results.push({
       run_id: run.id,
-      action: "kicked",
+      action,
       brands_marked_error: markedErrorBrands,
       error_steps: markedErrorSteps,
       kick_count: nextKickCount,
