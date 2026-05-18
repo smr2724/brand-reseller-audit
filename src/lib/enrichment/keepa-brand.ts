@@ -392,28 +392,107 @@ export async function enrichBrandWithKeepa(
     });
     await heartbeat();
 
-    // Aggregate brand_sellers: count asins won (buy-box winner) per seller
+    // Phase 84 — Aggregate brand_sellers across ALL live offers, not just
+    // the buy-box winner per ASIN. Bug #5: pre-Phase-84 we only counted
+    // `p.buy_box_seller_id` once per ASIN, so a brand whose 30 listings
+    // each had 30 active offers came back with `keepa_unique_seller_count=3`
+    // and a 33%/33%/33% modal — completely masking the recoverable-revenue
+    // opportunity. Now we walk `p.offers[]` (already filtered to live by
+    // `liveOffersOrder` in extractOffers) and tally each seller's offer
+    // appearances across the catalog. We still keep `asins_won` as the
+    // buy-box-winner count (preserves the existing top-seller / share_pct
+    // semantics and Phase 46 brand-controlled classification), but the
+    // SELLER UNIVERSE we surface to the report now includes every active
+    // 3P competitor on every listing.
     const sellerMap = new Map<string, {
       seller_name: string;
       seller_id?: string;
       seller_country?: string;
       is_fba?: boolean;
-      asins_won: number;
+      asins_won: number;        // buy-box wins (preserved)
+      offer_count: number;      // Phase 84: appearances across all live offers
+      asin_count: number;       // Phase 84: distinct ASINs where seller has a live offer
     }>();
 
     let amazonOnesP = 0;
+    let totalLiveOffers = 0;
     for (const p of products) {
+      const winnerId = p.buy_box_seller_id ?? null;
       const winnerName = p.buy_box_seller ?? null;
-      if (winnerName) {
-        const key = (p.buy_box_seller_id || winnerName).toLowerCase();
+      // Walk every live offer on the ASIN. Each offer contributes one
+      // `offer_count`; each distinct (seller, asin) pair contributes one
+      // `asin_count`. The buy-box winner gets +1 `asins_won` too.
+      const seenOnThisAsin = new Set<string>();
+      for (const o of p.offers ?? []) {
+        const sid = o.seller_id ?? null;
+        // Skip offers with no identifiable seller (rare — usually means a
+        // historical row Keepa didn't fully resolve). Without a key we
+        // can't aggregate.
+        if (!sid) continue;
+        const key = sid.toLowerCase();
+        totalLiveOffers += 1;
+        let existing = sellerMap.get(key);
+        if (!existing) {
+          existing = {
+            seller_name: o.seller_name ?? sid,
+            seller_id: sid,
+            seller_country: o.is_amazon ? "US" : undefined,
+            is_fba: !!o.is_fba,
+            asins_won: 0,
+            offer_count: 0,
+            asin_count: 0,
+          };
+          sellerMap.set(key, existing);
+        }
+        existing.offer_count += 1;
+        if (!seenOnThisAsin.has(key)) {
+          existing.asin_count += 1;
+          seenOnThisAsin.add(key);
+        }
+        // Promote a better name if we now have one.
+        if ((!existing.seller_name || existing.seller_name === existing.seller_id) && o.seller_name) {
+          existing.seller_name = o.seller_name;
+        }
+      }
+      // Buy-box winner gets credit for `asins_won`. If the winner isn't
+      // already in the map (e.g. liveOffersOrder didn't surface them, or
+      // they appear only via buyBoxSellerIdHistory), seed an entry so we
+      // don't lose the historical signal that drives top-seller and
+      // brand-controlled classification.
+      if (winnerId) {
+        const key = winnerId.toLowerCase();
+        let existing = sellerMap.get(key);
+        if (!existing) {
+          existing = {
+            seller_name: winnerName ?? winnerId,
+            seller_id: winnerId,
+            seller_country: p.buy_box_is_amazon ? "US" : undefined,
+            is_fba: !!p.buy_box_is_fba,
+            asins_won: 0,
+            offer_count: 0,
+            asin_count: 0,
+          };
+          sellerMap.set(key, existing);
+        }
+        existing.asins_won += 1;
+        if ((!existing.seller_name || existing.seller_name === existing.seller_id) && winnerName) {
+          existing.seller_name = winnerName;
+        }
+      } else if (winnerName) {
+        // Edge case: buy-box winner has no seller_id (very rare). Key by
+        // name so the row still lands; classification will treat it as
+        // a name-only seller.
+        const key = winnerName.toLowerCase();
         const existing = sellerMap.get(key);
         if (existing) existing.asins_won += 1;
         else sellerMap.set(key, {
           seller_name: winnerName,
-          seller_id: p.buy_box_seller_id,
+          seller_id: undefined,
           seller_country: p.buy_box_is_amazon ? "US" : undefined,
           is_fba: !!p.buy_box_is_fba,
           asins_won: 1,
+          offer_count: 0,
+          asin_count: 0,
         });
       }
       if (p.buy_box_is_amazon) amazonOnesP += 1;
@@ -455,6 +534,14 @@ export async function enrichBrandWithKeepa(
     }
 
     const totalWon = Array.from(sellerMap.values()).reduce((a, s) => a + s.asins_won, 0);
+    // Phase 84 — `share_pct` now reflects each seller's slice of the
+    // brand's full live-offer universe (offer_count / totalLiveOffers),
+    // not just their buy-box wins. This is the metric that makes the
+    // modal's bar chart meaningful for the reseller-removal pitch — a
+    // brand with 30 active sellers should show a long-tail distribution,
+    // not three 33% slices. Falls back to the legacy asins_won-based
+    // share when totalLiveOffers is 0 (older callers / brands with no
+    // offers data at all).
     const preResolved = Array.from(sellerMap.values()).map((s) => {
       const resolved = s.seller_id ? resolvedInfo[s.seller_id] : null;
       const resolvedName = resolved?.name?.trim() || null;
@@ -471,11 +558,17 @@ export async function enrichBrandWithKeepa(
           ? s.seller_name
           : null;
       const country = resolved?.country ?? s.seller_country ?? null;
+      const sharePct =
+        totalLiveOffers > 0
+          ? s.offer_count / totalLiveOffers
+          : totalWon > 0
+          ? s.asins_won / totalWon
+          : null;
       return {
         seller_name: finalName,
         seller_id: s.seller_id ?? null,
         seller_country: country,
-        share_pct: totalWon > 0 ? s.asins_won / totalWon : null,
+        share_pct: sharePct,
         asins_won: s.asins_won,
         is_fba: s.is_fba ?? null,
       };

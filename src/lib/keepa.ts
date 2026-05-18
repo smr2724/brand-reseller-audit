@@ -5,6 +5,7 @@
  */
 import { fetchWithTimeout } from "@/lib/util/timing";
 import { trackCost } from "@/lib/cost/track";
+import { KEEPA_OFFERS_TOKEN_MULTIPLIER } from "@/lib/cost/constants";
 
 const BASE = "https://api.keepa.com";
 
@@ -733,7 +734,23 @@ function extractOffers(p: any): { offers: KeepaOffer[]; buyBoxSellerId?: string 
   // Keepa marks the current buy-box offer in stats.buyBoxSellerIdHistory (last entry).
   const bbHistory: any[] = Array.isArray(p?.stats?.buyBoxSellerIdHistory) ? p.stats.buyBoxSellerIdHistory : [];
   const currentBuyBoxSellerId = bbHistory.length ? String(bbHistory[bbHistory.length - 1]) : undefined;
-  for (const o of rawOffers) {
+
+  // Phase 84 — `product.liveOffersOrder` is an array of indices into
+  // `offers[]` for the currently-active offers (Keepa's `/product?offers=N`
+  // returns up to N current+historical offers; without this filter we'd
+  // aggregate dead/historical offers as if they were live). When the
+  // field is absent (older Keepa responses, or callers not requesting
+  // offers), we fall back to "all offers" — preserves previous behavior.
+  const liveOrder: number[] | null = Array.isArray(p?.liveOffersOrder)
+    ? p.liveOffersOrder.filter(
+        (i: any) => typeof i === "number" && Number.isFinite(i) && i >= 0 && i < rawOffers.length,
+      )
+    : null;
+  const indicesToScan: number[] = liveOrder ?? rawOffers.map((_: any, i: number) => i);
+
+  for (const idx of indicesToScan) {
+    const o = rawOffers[idx];
+    if (!o) continue;
     const sellerId = o?.sellerId ? String(o.sellerId) : undefined;
     const isAmazon = sellerId === "ATVPDKIKX0DER" || (o?.isAmazon === true);
     const condition = o?.condition;
@@ -859,6 +876,12 @@ async function fetchOneProductBatch(
     "/product",
     {
       asin: batch.join(","),
+      // Phase 84 — `offers=20` returns up to 20 current+historical offers per
+      // ASIN (filtered to active via `liveOffersOrder` in extractOffers).
+      // Without this, Keepa's /product returns stats only (e.g. offer COUNT
+      // but no per-offer detail), and we silently fell back to capturing only
+      // the buy-box winner — Bug #5. Token cost: ~2× a stats-only call.
+      // Charged via trackCost(units = batch.length × KEEPA_OFFERS_TOKEN_MULTIPLIER).
       offers: 20,
       stats: 365,
       buybox: 1,
@@ -887,10 +910,15 @@ async function fetchOneProductBatch(
   );
   // Phase 81/82 — record one row per Keepa call with units=batch_size
   // so the per-unit cost × units math still produces the correct total.
+  // Phase 84 — when the call carries `offers=20`, Keepa charges ~2× the
+  // stats-only token cost; reflect that here via KEEPA_OFFERS_TOKEN_MULTIPLIER
+  // so cost_total_usd stays honest. (We always call with offers=20 today;
+  // the multiplier is wired through a constant so it can be tuned without
+  // editing this site.)
   await trackCost({
     provider: "keepa",
     operation: "keepa_product",
-    units: batch.length,
+    units: batch.length * KEEPA_OFFERS_TOKEN_MULTIPLIER,
   });
   const tokensLeft = Number(json?.tokensLeft ?? 0);
   const refillIn = Number(json?.refillIn ?? 0);
