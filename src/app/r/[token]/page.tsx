@@ -184,30 +184,6 @@ export default async function ReportPage({ params }: PageProps) {
 
   // ---- brand-audit (Phase 5+) ----
   if (report.brand_id) {
-    // Phase 56 — suppress public report rendering for any brand whose
-    // qualification segment is one of the six disqualified segments.
-    // Even if a report row + token exists (e.g. generated before Phase
-    // 56), the public-facing artifact should not render. Admin UI still
-    // exposes the disqualification reason internally.
-    {
-      const { data: qual } = await admin
-        .from("brand_qualifications")
-        .select("segment, icp_verdict")
-        .eq("brand_id", report.brand_id)
-        .maybeSingle<{ segment: string | null; icp_verdict: string | null }>();
-      const disqualifiedSegments = new Set([
-        "brand_self_managed",
-        "amazon_vendor_central",
-        "anti_amazon_stance",
-        "enterprise_pe_public",
-        "trademark_split",
-        "below_revenue_floor",
-      ]);
-      if (qual?.segment && disqualifiedSegments.has(qual.segment)) {
-        return notFound();
-      }
-    }
-
     // Math framework v4: RCG fee / new_profit / additional_profit /
     // seven_x_multiple_value are no longer rendered on the v2 page —
     // the math is recomputed live via `LegionMathSection` from
