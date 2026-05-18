@@ -25,6 +25,12 @@ export const KEEPA_COST_PER_TOKEN_USD = 0.0007;
 // capture by ~50%. Bumped from the implicit 1× when stats-only.
 export const KEEPA_OFFERS_TOKEN_MULTIPLIER = 2;
 
+// Phase 84 follow-up #3 — Keepa `/seller` endpoint cost. 1 token per
+// resolved seller_id lookup (Keepa docs). With full-offers capture now
+// resolving 10–20× more sellers per brand than the old buy-box-only path,
+// this is a real and growing cost surface that was previously untracked.
+export const KEEPA_SELLER_LOOKUP_COST_PER_UNIT_USD = KEEPA_COST_PER_TOKEN_USD;
+
 // Apollo: Search/filter is free per Apollo docs.
 export const APOLLO_COST_PER_SEARCH_USD = 0.0;
 
@@ -58,6 +64,7 @@ export const RESEND_COST_PER_SEND_USD = 0.0004;
  */
 export const COST_BASIS_LINES: string[] = [
   "Keepa product: $0.0007 / token (Phase 84: ~2× when offers=20)",
+  "Keepa seller lookup: $0.0007 / token (1 token per seller_id; cached 30d)",
   "Apollo people match: $0.04 / credit (email reveal only)",
   "Hunter Email Finder: $0.034 / credit (charged only when email found)",
   "MillionVerifier: $0.0004 / verification",

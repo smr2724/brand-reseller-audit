@@ -57,7 +57,23 @@ export interface EnrichmentSummary {
   unique_seller_count: number;
   brand_controlled_pct: number | null;
   top_seller: string | null;
+  /**
+   * Phase 84 follow-up — buy-box share of the top reseller. This is the
+   * "fraction of ASINs whose Buy Box this seller wins" number, preserved
+   * exactly so `computeValidationScore` / `computeCombinedValidationScore`
+   * keep producing the same magnitudes they were tuned on. Stored on
+   * `brands.keepa_top_seller_share_pct`. Renderers that want the modal's
+   * offer-share metric should read `top_seller_offer_share_pct` instead.
+   */
   top_seller_share_pct: number | null;
+  /**
+   * Phase 84 — offer share of the top reseller (offer_count / total_live_offers
+   * across the brand catalog). This is the metric that makes the modal's
+   * bar chart meaningful — a brand with 30 active sellers should show a
+   * long-tail distribution, not a 33/33/33 split. NOT used by scoring;
+   * scoring continues to use `top_seller_share_pct` (buy-box share).
+   */
+  top_seller_offer_share_pct: number | null;
   avg_offers: number | null;
   validation_score: number | null;
   tokens_used: number;
@@ -221,6 +237,7 @@ export async function enrichBrandWithKeepa(
         brand_controlled_pct: null,
         top_seller: null,
         top_seller_share_pct: null,
+        top_seller_offer_share_pct: null,
         avg_offers: null,
         validation_score: null,
         tokens_used: tokensUsed,
@@ -810,12 +827,34 @@ export async function enrichBrandWithKeepa(
     // Top reseller = the classified-as-reseller seller with the largest
     // share. The dossier and cover hero want the actionable outsider,
     // not the brand's own LLC (Fantaswick LLC) sitting at the top.
+    //
+    // Phase 84 follow-up #2 — sort by `share_pct` DESC (offer-share, the
+    // metric users see in the modal) with `asins_won` DESC as a tiebreak.
+    // Pre-fix the sort keyed only on `asins_won`, which became misleading
+    // once `share_pct` shifted to offer-share — two resellers tied on
+    // asins_won could appear in any order regardless of how much of the
+    // live-offer pie they actually held.
     const resellersSorted = classified
       .filter((s) => !s.classification.is_brand_controlled)
-      .sort((a, b) => (b.asins_won ?? 0) - (a.asins_won ?? 0));
+      .sort((a, b) => {
+        const bs = b.share_pct ?? 0;
+        const as = a.share_pct ?? 0;
+        if (bs !== as) return bs - as;
+        return (b.asins_won ?? 0) - (a.asins_won ?? 0);
+      });
     const topReseller = resellersSorted[0] ?? null;
     const top_seller = topReseller?.seller_name ?? null;
-    const top_seller_share_pct = topReseller?.share_pct ?? null;
+    // Phase 84 follow-up #1 — keep `top_seller_share_pct` semantically
+    // equal to its pre-Phase-84 value (buy-box-share: this seller's
+    // asins_won / total brand asins_won) so `computeValidationScore` /
+    // `computeCombinedValidationScore` keep producing the same magnitude
+    // they were tuned on. Offer-share (the new metric for the modal /
+    // UI bar chart) is exposed separately as `top_seller_offer_share_pct`.
+    const top_seller_share_pct =
+      topReseller && totalWon > 0
+        ? (topReseller.asins_won ?? 0) / totalWon
+        : null;
+    const top_seller_offer_share_pct = topReseller?.share_pct ?? null;
     const top_seller_country = topReseller?.seller_country ?? null;
 
     // Combine Keepa channel signals with the latest DataForSEO snapshot
@@ -922,6 +961,7 @@ export async function enrichBrandWithKeepa(
       brand_controlled_pct,
       top_seller,
       top_seller_share_pct,
+      top_seller_offer_share_pct,
       avg_offers,
       validation_score,
       tokens_used: tokensUsed,

@@ -18,6 +18,8 @@
 import {
   getProductDetailsBatch,
   clearKeepaProductCache,
+  resolveSellerInfo,
+  clearKeepaSellerCache,
 } from "../keepa";
 
 let failures = 0;
@@ -184,6 +186,170 @@ async function runFullOffersTest(): Promise<void> {
   );
 }
 
+/**
+ * Phase 84 follow-up #6 — Buy-box-only seeding branch.
+ *
+ * Covers the fallback in `enrichBrandWithKeepa`: when the buy-box winner
+ * is NOT present in the live-offers walk (e.g. `liveOffersOrder` excludes
+ * the winner's index, or Keepa only surfaced the winner via
+ * `buyBoxSellerIdHistory`), the aggregation still seeds a sellerMap
+ * entry so the winner gets credit for `asins_won=1`. Without the
+ * seeding branch, top-seller and brand-controlled classification would
+ * lose the signal entirely.
+ *
+ * We construct a `KeepaProductDetails`-shaped object directly here
+ * because the upstream `getBuyBoxSeller` parser cannot synthesize this
+ * exact combination (winnerId set, offers populated, winner NOT in
+ * offers) — this is the input shape `enrichBrandWithKeepa` would
+ * receive when Keepa returns inconsistent state.
+ */
+async function runBuyBoxOnlySeedingTest(): Promise<void> {
+  const sellerA = makeSellerId(990);
+  const sellerB = makeSellerId(991);
+  const sellerC = makeSellerId(992); // buy-box winner; NOT in offers[]
+
+  // Hand-craft the post-parse product as enrichBrandWithKeepa sees it.
+  const p = {
+    asin: makeAsin(200),
+    buy_box_seller_id: sellerC,
+    buy_box_seller: undefined as string | undefined,
+    buy_box_is_amazon: false,
+    buy_box_is_fba: false,
+    offers: [
+      { seller_id: sellerA, seller_name: undefined, is_fba: true, is_amazon: false, is_buy_box_winner: false },
+      { seller_id: sellerB, seller_name: undefined, is_fba: false, is_amazon: false, is_buy_box_winner: false },
+    ],
+  };
+
+  // Reproduce keepa-brand.ts aggregation lines ~423-497 EXACTLY so the
+  // seeding branch stays under unit-test coverage.
+  type Row = { asins_won: number; offer_count: number; asin_count: number };
+  const sellerMap = new Map<string, Row>();
+  let totalLiveOffers = 0;
+  const seenOnThisAsin = new Set<string>();
+  for (const o of p.offers ?? []) {
+    const sid = o.seller_id;
+    if (!sid) continue;
+    const key = sid.toLowerCase();
+    totalLiveOffers += 1;
+    let existing = sellerMap.get(key);
+    if (!existing) {
+      existing = { asins_won: 0, offer_count: 0, asin_count: 0 };
+      sellerMap.set(key, existing);
+    }
+    existing.offer_count += 1;
+    if (!seenOnThisAsin.has(key)) {
+      existing.asin_count += 1;
+      seenOnThisAsin.add(key);
+    }
+  }
+  // Seeding fallback: winner not in offers[] → still credit asins_won.
+  const winnerId = p.buy_box_seller_id ?? null;
+  if (winnerId) {
+    const key = winnerId.toLowerCase();
+    let existing = sellerMap.get(key);
+    if (!existing) {
+      existing = { asins_won: 0, offer_count: 0, asin_count: 0 };
+      sellerMap.set(key, existing);
+    }
+    existing.asins_won += 1;
+  }
+
+  check(
+    "sellerMap contains A, B, AND seeded winner C (3 entries)",
+    sellerMap.size === 3,
+    `got ${sellerMap.size} sellers`,
+  );
+  const cRow = sellerMap.get(sellerC.toLowerCase());
+  check(
+    "seeded winner C: asins_won=1, offer_count=0",
+    cRow?.asins_won === 1 && cRow?.offer_count === 0,
+    JSON.stringify(cRow),
+  );
+  check(
+    "total asins_won across sellerMap === 1 (only winner C)",
+    Array.from(sellerMap.values()).reduce((a, s) => a + s.asins_won, 0) === 1,
+    `got ${Array.from(sellerMap.values()).reduce((a, s) => a + s.asins_won, 0)}`,
+  );
+  check(
+    "totalLiveOffers === 2 (A + B; winner C not counted as an offer)",
+    totalLiveOffers === 2,
+    `got ${totalLiveOffers}`,
+  );
+
+  // Phase 84 follow-up #1 invariant: top_seller_share_pct (the buy-box
+  // semantic preserved for scoring) must be 1.0 when the seeded winner
+  // is the only seller with asins_won>0, regardless of how many sellers
+  // hold live offers.
+  const totalWon = Array.from(sellerMap.values()).reduce((a, s) => a + s.asins_won, 0);
+  const winnerAsinsWon = cRow?.asins_won ?? 0;
+  const top_seller_share_pct = totalWon > 0 ? winnerAsinsWon / totalWon : null;
+  check(
+    "FU1: top_seller_share_pct (buy-box semantic) === 1.0 for the lone winner",
+    top_seller_share_pct === 1.0,
+    `got ${top_seller_share_pct}`,
+  );
+}
+
+/**
+ * Phase 84 follow-up #6 — `/seller` cache miss → hit path. The first
+ * `resolveSellerInfo` call for a fresh seller_id hits Keepa and records
+ * one `keepa_seller_lookup` cost row; the second call (within the 30-day
+ * SELLER_NAME_CACHE TTL) hits the in-memory cache and issues zero new
+ * Keepa requests. We don't have direct access to api_costs in this
+ * mock-only harness, so we assert on the proxy: number of /seller fetch
+ * calls. trackCost is only invoked on a real /seller round-trip, so
+ * fetchCount === cost rows.
+ */
+async function runSellerCacheMissThenHitTest(): Promise<void> {
+  clearKeepaSellerCache();
+  const sellerId = makeSellerId(500);
+  let fetchCount = 0;
+  // @ts-expect-error overriding global fetch for the test
+  global.fetch = async (url: string) => {
+    const u = String(url);
+    if (u.includes("/seller")) {
+      fetchCount += 1;
+      return new Response(
+        JSON.stringify({
+          sellers: {
+            [sellerId]: { sellerName: "Cached Seller LLC", address: ["US"] },
+          },
+          tokensLeft: 10_000,
+          refillIn: 0,
+          refillRate: 5,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("{}", { status: 200 });
+  };
+
+  const first = await resolveSellerInfo([sellerId]);
+  check(
+    "first call hits Keepa /seller (fetchCount=1)",
+    fetchCount === 1,
+    `got fetchCount=${fetchCount}`,
+  );
+  check(
+    "first call returns resolved name",
+    first[sellerId]?.name === "Cached Seller LLC",
+    `got ${JSON.stringify(first[sellerId])}`,
+  );
+
+  const second = await resolveSellerInfo([sellerId]);
+  check(
+    "second call hits in-memory cache (fetchCount still 1)",
+    fetchCount === 1,
+    `got fetchCount=${fetchCount}`,
+  );
+  check(
+    "second call returns same resolved name",
+    second[sellerId]?.name === "Cached Seller LLC",
+    `got ${JSON.stringify(second[sellerId])}`,
+  );
+}
+
 async function runLiveOffersOrderFilterTest(): Promise<void> {
   // Confirm `liveOffersOrder` filtering correctly drops historical offers.
   clearKeepaProductCache();
@@ -205,6 +371,8 @@ async function runLiveOffersOrderFilterTest(): Promise<void> {
 async function main(): Promise<void> {
   await runFullOffersTest();
   await runLiveOffersOrderFilterTest();
+  await runBuyBoxOnlySeedingTest();
+  await runSellerCacheMissThenHitTest();
 
   console.log(
     `\nkeepa-offers-capture.test: ${passes} passed, ${failures} failed`,

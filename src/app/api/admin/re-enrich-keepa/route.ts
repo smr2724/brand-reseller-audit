@@ -143,12 +143,21 @@ export async function GET(req: Request) {
   // `keepa_unique_seller_count < (keepa_avg_offers * 0.6)` likely
   // suffered Bug #5 under-capture and need re-enrichment. Mirrors the
   // SQL snippet in the PR description.
+  //
+  // Phase 84 follow-up #5 — we cap the underlying SELECT at 200 rows so
+  // a single GET can't pull thousands of brand rows. To make the
+  // truncation visible to callers (instead of silent), we also issue a
+  // HEAD-style count of the same `gt("keepa_avg_offers", 5)` filter and
+  // return `total_count` + `truncated` alongside the flagged list. The
+  // `truncated` flag refers to the pre-filter candidate pool, not the
+  // post-filter `flagged` array.
+  const SCAN_LIMIT = 200;
   const { data, error } = await admin
     .from("brands")
     .select("id, name, keepa_avg_offers, keepa_unique_seller_count")
     .gt("keepa_avg_offers", 5)
     .order("keepa_avg_offers", { ascending: false })
-    .limit(200);
+    .limit(SCAN_LIMIT);
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
@@ -163,5 +172,31 @@ export async function GET(req: Request) {
     const uniq = r.keepa_unique_seller_count ?? 0;
     return avg > 5 && uniq < avg * 0.6;
   });
-  return NextResponse.json({ flagged });
+
+  // Best-effort total candidate count. Supabase returns `count` via the
+  // `count: "exact"` option without re-fetching rows. If the count call
+  // fails we still return the flagged list — `truncated` falls back to
+  // `rows.length >= SCAN_LIMIT` which is a conservative-true.
+  let totalCount: number | null = null;
+  try {
+    const { count, error: countErr } = await admin
+      .from("brands")
+      .select("id", { count: "exact", head: true })
+      .gt("keepa_avg_offers", 5);
+    if (!countErr && typeof count === "number") totalCount = count;
+  } catch {
+    // ignore — totalCount stays null
+  }
+  const truncated =
+    typeof totalCount === "number"
+      ? totalCount > SCAN_LIMIT
+      : rows.length >= SCAN_LIMIT;
+
+  return NextResponse.json({
+    flagged,
+    scan_limit: SCAN_LIMIT,
+    scanned_count: rows.length,
+    total_count: totalCount,
+    truncated,
+  });
 }

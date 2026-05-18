@@ -1424,6 +1424,21 @@ export async function resolveSellerInfo(
       continue;
     }
     if (!json) continue;
+    // Phase 84 follow-up #3 — record `/seller` cost in api_costs. 1 Keepa
+    // token per seller_id. Only the IDs that actually went to Keepa get
+    // billed (cache hits / hardcoded Amazon fast-path / IDs found in the
+    // shared Supabase cache are excluded by the upstream filter). units
+    // is best-effort `chunk.length` even if Keepa returned fewer than
+    // requested — Keepa still charges per requested ID. Fail-soft.
+    try {
+      await trackCost({
+        provider: "keepa",
+        operation: "keepa_seller_lookup",
+        units: chunk.length,
+      });
+    } catch {
+      // never derail seller resolution on a cost-tracking failure
+    }
     const tokensLeft = Number(json?.tokensLeft ?? 0);
     if (tokensLeft) {
       TOKEN_CACHE = { t: Date.now(), v: { tokens_left: tokensLeft, refill_in_ms: Number(json?.refillIn ?? 0), refill_rate: Number(json?.refillRate ?? 0) } };
