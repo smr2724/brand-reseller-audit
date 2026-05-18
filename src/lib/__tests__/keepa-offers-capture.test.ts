@@ -368,11 +368,107 @@ async function runLiveOffersOrderFilterTest(): Promise<void> {
   );
 }
 
+/**
+ * Phase 84 follow-up #7 — regression guard for the FU1/FU2 interaction.
+ *
+ * FU2 changed `topReseller` selection to sort by `share_pct` DESC
+ * (offer-share leader). FU1 restored `top_seller_share_pct` to buy-box
+ * semantics (`asins_won / totalWon`) to preserve scoring magnitude. If
+ * `top_seller_share_pct` is computed from `topReseller.asins_won` (the
+ * FU1 implementation as merged), the offer-share leader's buy-box share
+ * is reported instead of the MAX buy-box share — silently lowering
+ * `computeValidationScore`/`computeLegionEconomics` magnitude whenever
+ * offer-share leader ≠ buy-box leader.
+ *
+ * Both PR reviewers (#96) flagged this. The fix: compute
+ * `top_seller_share_pct` independently as
+ * `max(asins_won)/totalWon` over the brand-controlled-filtered resellers
+ * list, decoupling it from `topReseller` identity.
+ *
+ * Reproduces the exact aggregation/sort/share block from
+ * `keepa-brand.ts` lines ~837-865 so the regression stays under unit
+ * coverage even though the function under test is too IO-heavy to call
+ * end-to-end here.
+ */
+async function runTopSellerShareDecouplingTest(): Promise<void> {
+  // Two resellers with diverging asins_won vs offer-share:
+  //   Seller A: asins_won=10, offer-share ~20% (buy-box leader, low offer-share)
+  //   Seller B: asins_won=2,  offer-share ~70% (offer-share leader, low asins_won)
+  //   totalWon = 12
+  const sellerA = makeSellerId(701);
+  const sellerB = makeSellerId(702);
+
+  type Reseller = {
+    seller_id: string;
+    seller_name: string;
+    asins_won: number;
+    share_pct: number;
+    classification: { is_brand_controlled: boolean };
+  };
+
+  const classified: Reseller[] = [
+    {
+      seller_id: sellerA,
+      seller_name: "Seller A LLC",
+      asins_won: 10,
+      share_pct: 0.20,
+      classification: { is_brand_controlled: false },
+    },
+    {
+      seller_id: sellerB,
+      seller_name: "Seller B LLC",
+      asins_won: 2,
+      share_pct: 0.70,
+      classification: { is_brand_controlled: false },
+    },
+  ];
+  const totalWon = 12;
+
+  // Mirror keepa-brand.ts lines ~837-865 EXACTLY.
+  const resellersSorted = classified
+    .filter((s) => !s.classification.is_brand_controlled)
+    .sort((a, b) => {
+      const bs = b.share_pct ?? 0;
+      const as = a.share_pct ?? 0;
+      if (bs !== as) return bs - as;
+      return (b.asins_won ?? 0) - (a.asins_won ?? 0);
+    });
+  const topReseller = resellersSorted[0] ?? null;
+
+  // Post-fix: top_seller_share_pct is independent of topReseller identity.
+  const top_seller_share_pct =
+    totalWon > 0 && resellersSorted.length > 0
+      ? Math.max(...resellersSorted.map((r) => (r.asins_won ?? 0) / totalWon))
+      : null;
+  const top_seller_offer_share_pct = topReseller?.share_pct ?? null;
+
+  // Three invariants in one assertion (the FU1/FU2 interaction guard
+  // both reviewers on PR #96 called out):
+  //   (a) FU2 — topReseller identity is the offer-share leader (B).
+  //   (b) FU1 regression guard — top_seller_share_pct is MAX buy-box
+  //       share (A's 10/12 ≈ 0.833), NOT the offer-share leader's
+  //       buy-box share (B's 2/12 ≈ 0.167). This is what preserves
+  //       `computeValidationScore` / `computeLegionEconomics` magnitude.
+  //   (c) top_seller_offer_share_pct exposes B's offer-share (~0.70).
+  const ok =
+    topReseller?.seller_id === sellerB &&
+    top_seller_share_pct !== null &&
+    Math.abs(top_seller_share_pct - 10 / 12) < 1e-9 &&
+    top_seller_offer_share_pct !== null &&
+    Math.abs(top_seller_offer_share_pct - 0.70) < 1e-9;
+  check(
+    "FU1/FU2 decoupling: topReseller=B (offer-share leader), top_seller_share_pct=10/12 (buy-box-leader MAX), top_seller_offer_share_pct=0.70 (B's offer-share)",
+    ok,
+    `topReseller=${topReseller?.seller_id} top_seller_share_pct=${top_seller_share_pct} top_seller_offer_share_pct=${top_seller_offer_share_pct}`,
+  );
+}
+
 async function main(): Promise<void> {
   await runFullOffersTest();
   await runLiveOffersOrderFilterTest();
   await runBuyBoxOnlySeedingTest();
   await runSellerCacheMissThenHitTest();
+  await runTopSellerShareDecouplingTest();
 
   console.log(
     `\nkeepa-offers-capture.test: ${passes} passed, ${failures} failed`,

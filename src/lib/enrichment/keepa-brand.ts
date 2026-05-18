@@ -845,14 +845,21 @@ export async function enrichBrandWithKeepa(
     const topReseller = resellersSorted[0] ?? null;
     const top_seller = topReseller?.seller_name ?? null;
     // Phase 84 follow-up #1 — keep `top_seller_share_pct` semantically
-    // equal to its pre-Phase-84 value (buy-box-share: this seller's
+    // equal to its pre-Phase-84 value (buy-box-share: max reseller
     // asins_won / total brand asins_won) so `computeValidationScore` /
     // `computeCombinedValidationScore` keep producing the same magnitude
     // they were tuned on. Offer-share (the new metric for the modal /
     // UI bar chart) is exposed separately as `top_seller_offer_share_pct`.
+    //
+    // Decoupled from `topReseller` identity: FU2 changed `topReseller`
+    // selection to sort by `share_pct` DESC (offer-share leader), which
+    // may not be the buy-box leader. Using `topReseller.asins_won` here
+    // would silently lower the scoring magnitude whenever the offer-share
+    // leader ≠ buy-box leader. Compute the max independently over the
+    // (already brand-controlled-filtered, per Phase 46) resellers list.
     const top_seller_share_pct =
-      topReseller && totalWon > 0
-        ? (topReseller.asins_won ?? 0) / totalWon
+      totalWon > 0 && resellersSorted.length > 0
+        ? Math.max(...resellersSorted.map((r) => (r.asins_won ?? 0) / totalWon))
         : null;
     const top_seller_offer_share_pct = topReseller?.share_pct ?? null;
     const top_seller_country = topReseller?.seller_country ?? null;
