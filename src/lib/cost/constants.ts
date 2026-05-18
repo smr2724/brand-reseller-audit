@@ -16,8 +16,20 @@ export type CostProvider =
   | "resend";
 
 // Keepa Pro plan: $50/mo ≈ 60 tokens/min ≈ ~70,000 tokens/mo blended.
-// ~$0.0007/token. /product calls 1 token per ASIN.
+// ~$0.0007/token. /product calls 1 token per ASIN (stats only).
 export const KEEPA_COST_PER_TOKEN_USD = 0.0007;
+
+// Phase 84 — `offers=20` roughly doubles the per-ASIN token cost on
+// `/product` (Keepa docs: offers=20 ≈ 2×, offers=100 ≈ 6×). Without this
+// multiplier, api_costs would understate the true cost of full-offers
+// capture by ~50%. Bumped from the implicit 1× when stats-only.
+export const KEEPA_OFFERS_TOKEN_MULTIPLIER = 2;
+
+// Phase 84 follow-up #3 — Keepa `/seller` endpoint cost. 1 token per
+// resolved seller_id lookup (Keepa docs). With full-offers capture now
+// resolving 10–20× more sellers per brand than the old buy-box-only path,
+// this is a real and growing cost surface that was previously untracked.
+export const KEEPA_SELLER_LOOKUP_COST_PER_UNIT_USD = KEEPA_COST_PER_TOKEN_USD;
 
 // Apollo: Search/filter is free per Apollo docs.
 export const APOLLO_COST_PER_SEARCH_USD = 0.0;
@@ -51,7 +63,8 @@ export const RESEND_COST_PER_SEND_USD = 0.0004;
  * strings, not computed, since the user asked for transparent prose).
  */
 export const COST_BASIS_LINES: string[] = [
-  "Keepa product: $0.0007 / token",
+  "Keepa product: $0.0007 / token (Phase 84: ~2× when offers=20)",
+  "Keepa seller lookup: $0.0007 / token (1 token per seller_id; cached 30d)",
   "Apollo people match: $0.04 / credit (email reveal only)",
   "Hunter Email Finder: $0.034 / credit (charged only when email found)",
   "MillionVerifier: $0.0004 / verification",

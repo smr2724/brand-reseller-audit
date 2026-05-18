@@ -35,6 +35,12 @@ export function computeCost(args: ComputeCostArgs): number {
   let cost = 0;
   switch (provider) {
     case "keepa":
+      // Phase 84 follow-up #3 — `/seller` and `/product` are billed in the
+      // same Keepa token bucket ($0.0007/token). `keepa_seller_lookup`
+      // charges 1 token per resolved seller_id (Keepa /seller endpoint).
+      // `keepa_product` callers pre-multiply units by the offers token
+      // multiplier (see KEEPA_OFFERS_TOKEN_MULTIPLIER), so the math stays
+      // a single units × per-token rate at this layer.
       cost = units * KEEPA_COST_PER_TOKEN_USD;
       break;
     case "apollo":
