@@ -1142,8 +1142,19 @@ export async function getProductDetails(
    * `bulk_run_brands.updated_at`, preventing the janitor's
    * `keepa_enriching` 240s soft cap from false-killing a healthy
    * long-running enrich.
+   *
+   * Phase 66 partial-save — the callback may optionally accept the just-
+   * completed chunk's parsed products plus the cumulative count of
+   * successfully-fetched ASINs so far. The enrichment orchestrator uses
+   * this to accumulate a per-chunk `partialProducts` buffer so a mid-
+   * stream timeout / 429 can be turned into a graceful partial save
+   * instead of discarding every chunk that did land. Existing callers
+   * that ignore the args (heartbeat-only) still work unchanged.
    */
-  onBatchComplete?: () => Promise<void>,
+  onBatchComplete?: (
+    chunkResults: KeepaProductDetails[],
+    cumulativeCount: number,
+  ) => Promise<void>,
 ): Promise<KeepaProductDetails[]> {
   const clean = Array.from(new Set(asins.filter((a) => a && /^[A-Z0-9]{10}$/i.test(a))));
   if (!clean.length) return [];
@@ -1187,7 +1198,7 @@ export async function getProductDetails(
     out.push(...fetched);
     if (onBatchComplete) {
       try {
-        await onBatchComplete();
+        await onBatchComplete(fetched, out.length);
       } catch {
         // best-effort heartbeat — never derail the enrich on its failure
       }
