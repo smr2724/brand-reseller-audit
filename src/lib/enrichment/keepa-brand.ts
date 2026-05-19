@@ -280,9 +280,21 @@ export async function enrichBrandWithKeepa(
     }
 
     if (shouldAbortForWallClock(runStartedAtMs)) {
-      throw new Error(
-        `[phase66] wall-clock budget (${KEEPA_ENRICHMENT_WALL_CLOCK_MS}ms) exceeded after variation_expansion; aborting before product fetch`,
-      );
+      // Phase 66 follow-up — graceful degrade. If variation_expansion alone
+      // blew the wall-clock budget, drop the expanded children and continue
+      // with the parent seeds we already have. The user gets enriched data
+      // (perhaps fewer variants) instead of a hard failure.
+      if (expansion.children.length && search.asins.length) {
+        console.warn(
+          `[phase66] wall-clock budget (${KEEPA_ENRICHMENT_WALL_CLOCK_MS}ms) exceeded after variation_expansion for "${brand_name}"; dropping ${expansion.children.length} expanded children and proceeding with ${search.asins.length} seed parents`,
+        );
+        asins = search.asins;
+        expansion = { children: [], hit_cap: false };
+      } else {
+        throw new Error(
+          `[phase66] wall-clock budget (${KEEPA_ENRICHMENT_WALL_CLOCK_MS}ms) exceeded after variation_expansion; aborting before product fetch`,
+        );
+      }
     }
 
     // Phase 82 — Hard cap at the top 500 ASINs by sales signal.
