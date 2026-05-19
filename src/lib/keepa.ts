@@ -1246,7 +1246,7 @@ export async function expandVariationAsins(
   if (!seeds.length) {
     return { seeds: [], children: [], combined: [], hit_cap: false };
   }
-  const parents = await getProductDetails(seeds, 5);
+  const parents = await getProductDetails(seeds, KEEPA_PRODUCT_BATCH_MAX);
   const seedSet = new Set(seeds);
   const childSet = new Set<string>();
   for (const p of parents) {
