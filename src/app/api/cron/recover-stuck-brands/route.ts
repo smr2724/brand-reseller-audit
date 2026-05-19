@@ -52,6 +52,11 @@ function isEnabled(): boolean {
   return v !== "false" && v !== "0" && v !== "off";
 }
 
+function isDisabledKillSwitch(): boolean {
+  const v = (process.env.RECOVER_STUCK_BRANDS_DISABLED ?? "").trim().toLowerCase();
+  return v === "true";
+}
+
 function batchLimit(): number {
   const raw = process.env.RECOVER_MAX_BRANDS_PER_RUN;
   if (!raw) return RECOVERY_BRAND_BATCH_LIMIT;
@@ -63,6 +68,13 @@ function batchLimit(): number {
 export async function GET(req: Request) {
   if (!authorize(req)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  if (isDisabledKillSwitch()) {
+    console.warn(
+      "[cron/recover-stuck-brands] kill-switch active via RECOVER_STUCK_BRANDS_DISABLED=true — no DB or Keepa work performed",
+    );
+    return NextResponse.json({ skipped: true, reason: "kill_switch" });
   }
 
   if (!isEnabled()) {
