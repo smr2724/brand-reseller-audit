@@ -89,6 +89,18 @@ export interface EnrichmentSummary {
    * this to increment `bulk_run_brands.retry_count`. 0 on a clean run.
    */
   keepa_product_retry_count: number;
+  /**
+   * Phase 66 partial-save — true when the /product fetch failed
+   * mid-stream (withDeadline trip or Keepa 429 cascade) but at least
+   * one chunk landed successfully, so the brand was still marked
+   * `enriched` with the prefix of products we did get. The UI uses
+   * this (mirrored on `brands.enrichment_metadata.partial_save`) to
+   * render a "partial coverage" badge. False on a clean full run.
+   */
+  partial_save: boolean;
+  /** Phase 66 — first 500 chars of the inner /product error when
+   * `partial_save` is true. Null on a clean run. */
+  partial_reason: string | null;
 }
 
 export interface EnrichInput {
@@ -245,6 +257,8 @@ export async function enrichBrandWithKeepa(
         amazon_1p_disqualified: false,
         enrichment_error: "No ASINs found",
         keepa_product_retry_count: consumeKeepaProductRetryCount(),
+        partial_save: false,
+        partial_reason: null,
       };
 
       await supabase
@@ -405,11 +419,69 @@ export async function enrichBrandWithKeepa(
     // janitor's 240s `keepa_enriching` soft cap. The heartbeat (passed
     // by the bulk worker) refreshes both run-level and brand-row
     // `updated_at` so the janitor sees a healthy in-flight enrich.
-    const products = await withDeadline(
-      getProductDetails(asins, KEEPA_PRODUCT_BATCH_MAX, heartbeat),
-      remainingBudget,
-      `getProductDetailsBatch(brand="${brand_name}", n=${asins.length})`,
-    );
+    //
+    // Phase 66 partial-save — collect each completed batch into
+    // `partialProducts` BEFORE awaiting the next one. If `withDeadline`
+    // trips or the /product call throws (e.g. Keepa 429 cascade) mid-
+    // stream, the chunks that already landed are still usable. Large
+    // brands (n=315 Fiebing's) were reliably failing entirely because
+    // every chunk's results were discarded when the wrapping promise
+    // rejected. Now we mark the brand `enriched` with whatever we got
+    // and stamp `enrichment_metadata.partial_save=true`.
+    const partialProducts: KeepaProductDetails[] = [];
+    let partialSave = false;
+    let partialReason: string | null = null;
+    let products: KeepaProductDetails[];
+    try {
+      products = await withDeadline(
+        getProductDetails(
+          asins,
+          KEEPA_PRODUCT_BATCH_MAX,
+          async (chunkResults) => {
+            // Accumulate chunk-by-chunk so mid-stream failure still
+            // leaves us with the completed prefix to persist.
+            if (chunkResults?.length) {
+              partialProducts.push(...chunkResults);
+            }
+            await heartbeat();
+          },
+        ),
+        remainingBudget,
+        `getProductDetailsBatch(brand="${brand_name}", n=${asins.length})`,
+      );
+    } catch (productErr: any) {
+      const errMsg = String(productErr?.message ?? productErr).slice(0, 500);
+      // No data persisted yet → preserve the original behavior: throw
+      // so the outer catch routes this to the terminal 'error'/'failed'
+      // state. Partial-save only kicks in when we have something worth
+      // saving.
+      if (partialProducts.length === 0) {
+        throw productErr;
+      }
+      partialSave = true;
+      partialReason = errMsg;
+      // Snapshot — `withDeadline` only stops *waiting* on the inner
+      // promise; the stranded getProductDetails loop may keep appending
+      // to `partialProducts` after we enter this catch. Freeze a copy
+      // so downstream aggregation operates on a stable list and the
+      // late-arriving pushes become harmless log lines.
+      products = [...partialProducts];
+      console.warn(
+        `[phase66] partial-save: "${brand_name}" /product fetch failed mid-stream ` +
+          `(${errMsg}); proceeding with ${products.length}/${asins.length} ASINs.`,
+      );
+      logKeepaProgress({
+        brand_id,
+        brand_name,
+        stage: "product_fetch_partial",
+        accumulated: products.length,
+        elapsed_ms: Date.now() - runStartedAtMs,
+        extra: {
+          attempted: asins.length,
+          partial_reason: errMsg,
+        },
+      });
+    }
     tokensUsed += products.length * 5; // rough estimate (cache hits don't count perfectly)
     logKeepaProgress({
       brand_id,
@@ -942,6 +1014,58 @@ export async function enrichBrandWithKeepa(
       .eq("id", brand_id)
       .eq("user_id", user_id);
 
+    // Phase 66 partial-save — stamp `enrichment_metadata.partial_save`
+    // so the UI can render a "partial coverage" badge / tooltip and ops
+    // can grep partial runs later. Best-effort, mirrors the merge pattern
+    // used by the Phase 82 truncation marker above. When `partialSave`
+    // is false (the common path) this block is skipped entirely so a
+    // healthy full enrich leaves the metadata blob untouched.
+    if (partialSave) {
+      try {
+        const partialPatch = {
+          partial_save: true,
+          partial_reason: partialReason ?? "unknown",
+          partial_saved_asins: products.length,
+          partial_attempted_asins: asins.length,
+          partial_saved_at: new Date().toISOString(),
+        };
+        let merged = false;
+        try {
+          const { error: rpcErr } = await supabase.rpc(
+            "merge_brand_enrichment_metadata",
+            { p_brand_id: brand_id, p_patch: partialPatch },
+          );
+          if (!rpcErr) merged = true;
+        } catch {
+          // RPC missing — fall back to read-merge-write
+        }
+        if (!merged) {
+          const { data: cur } = await supabase
+            .from("brands")
+            .select("enrichment_metadata")
+            .eq("id", brand_id)
+            .eq("user_id", user_id)
+            .maybeSingle<{ enrichment_metadata: Record<string, unknown> | null }>();
+          const next = { ...(cur?.enrichment_metadata ?? {}), ...partialPatch };
+          const { error: metaErr } = await supabase
+            .from("brands")
+            .update({
+              enrichment_metadata: next,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", brand_id)
+            .eq("user_id", user_id);
+          if (metaErr) {
+            console.warn(
+              `[phase66] partial_save metadata write failed for ${brand_id}: ${metaErr.message}`,
+            );
+          }
+        }
+      } catch (e) {
+        console.warn(`[phase66] partial_save metadata write threw:`, e);
+      }
+    }
+
     // Phase 38 — persist computeLegionEconomics output to the brand row
     // so the brand page (and any other consumer) reads numbers from the
     // database instead of re-deriving them at render time. Best-effort:
@@ -968,6 +1092,14 @@ export async function enrichBrandWithKeepa(
           tokens_used: tokensUsed,
           asins_found: asin_count,
           completed_at: new Date().toISOString(),
+          // Phase 66 partial-save — surface the partial reason on the
+          // run row so ops can grep `enrichment_runs` for partial
+          // completions without joining brands.enrichment_metadata.
+          // The brand row itself keeps `enrichment_error=null` (the
+          // brand IS enriched, just with reduced coverage).
+          ...(partialSave
+            ? { error_message: `partial_save: ${partialReason ?? "unknown"}` }
+            : {}),
         })
         .eq("id", run_id);
     }
@@ -988,6 +1120,8 @@ export async function enrichBrandWithKeepa(
       amazon_1p_disqualified: amazon1pDisqualified,
       enrichment_error: null,
       keepa_product_retry_count: consumeKeepaProductRetryCount(),
+      partial_save: partialSave,
+      partial_reason: partialReason,
     };
   } catch (err: any) {
     const msg = String(err?.message ?? err).slice(0, 500);
